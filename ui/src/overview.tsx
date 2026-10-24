@@ -1,5 +1,4 @@
 import {activityTitle} from "./activity-presentation.js";
-import {StopNotice} from "./stop-notice.js";
 import { useEffect, useState } from "react";
 import { useAtomRefresh, useAtomSet, useAtomValue } from "@effect/atom-react";
 import { Effect, Option } from "effect";
@@ -11,8 +10,9 @@ import { authEpoch, environmentAtom, pollWhileVisible, uiRuntime } from "./atoms
 import { directoryRoute, RouteLink, type Route } from "./navigation.js";
 import { Icon } from "./icons.js";
 
-export const workRoute = (work: Pick<DashboardWorkInfo, "projectId" | "mainThreadId">): Route =>
-  ({...directoryRoute, projectId: work.projectId, main: work.mainThreadId});
+/** A work row opens its task; a stopped row opens Supervision, where the stop record and Enable action are. */
+export const workRoute = (work: Pick<DashboardWorkInfo, "projectId" | "mainThreadId"> & {stop?: DashboardWorkInfo["stop"]}): Route =>
+  ({...directoryRoute, projectId: work.projectId, main: work.mainThreadId, section: work.stop ? "supervision" : "task"});
 
 export function ReadTime({value, prefix = "Read"}: {value: number | null; prefix?: string}) {
   return <span className="small muted">{prefix} {value === null ? "time unavailable" : <time dateTime={new Date(value).toISOString()} title={new Date(value).toLocaleString()}>{new Date(value).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"})}</time>}</span>;
@@ -118,7 +118,6 @@ export function Home({data, overview, navigate, startPanel}: {data: GuidanceSnap
         {result.hasMore && <div className="pagination"><p className="muted small">{result.work.length} of {result.total} conversations loaded. Filters apply to this loaded set.</p><button disabled={overview.loading || !data.connected} onClick={overview.loadMore}>Load more conversations</button></div>}
       </section>
     </>}
-    {result?.work.some(item => item.stop) && <section className="stack" aria-label="Stopped supervision"><h2>Stopped supervision</h2>{result.work.filter(item => item.stop).slice(0, 3).map(item => <StopNotice key={item.mainThreadId} audit={item.stop!} title={item.title} enableLabel="Review and enable" onEnable={() => navigate(workRoute(item))}/>)}</section>}
     <section aria-labelledby="recent-changes-title" className="stack"><div className="section-heading row between"><h2 id="recent-changes-title">Recent changes</h2><RouteLink to={{...directoryRoute, page: "activity"}} navigate={navigate}>All activity<Icon name="arrow" size={16}/></RouteLink></div>
       <ol className="recent-activity">{[...data.activity].sort((a, b) => b.createdAt - a.createdAt).slice(0, 5).map(item => {
         const thread = data.threads.find(thread => thread.id === item.threadId);

@@ -1,5 +1,7 @@
 import {definitionGuidanceFields, type DefinitionGuidance} from "../../src/definition-references.js";
-import {fixtureJourney, type JourneyCase} from "./journey.js";
+import {fixtureJourney, journeyTitle, type JourneyCase} from "./journey.js";
+import {assessmentForTask} from "../../src/workflow-assessment.js";
+import {workAttention} from "../../src/dashboard-overview.js";
 import { createHash } from "node:crypto";
 import { stringify } from "yaml";
 import type { GuidanceActivity, GuidanceSnapshot } from "../../src/guidance-contract.js";
@@ -199,6 +201,13 @@ export class FixtureModel {
   private current: FixtureEnvironmentName = "a";
   private journey: JourneyCase | null = null;
   setJourney(phase: JourneyCase | null) {this.journey = phase;}
+  // the reconstructed packing journey replaces chat A1 everywhere it appears, so Home, Conversations and the task agree
+  private journeyFor(threadId: string) {
+    if (this.current !== "a" || !this.journey || threadId !== fixtureIds.threadA1) return null;
+    const thread = this.data.threads.find(item => item.id === threadId)!;
+    return fixtureJourney(this.journey, thread.projectId, thread.id, thread.binding!.threadId, this.now());
+  }
+  private titleOf(thread: {id: string; title: string}) {return this.journeyFor(thread.id) ? journeyTitle : thread.title;}
   constructor(private readonly now: () => number = Date.now) {}
 
   // the data of the environment the fixture answers for
@@ -239,7 +248,7 @@ export class FixtureModel {
       settings: {generation: 1, guidancePaused: false, monitoringPaused: false, allowFollowupRace: false, verifiedServerVersion: null,
         model: "fixture-model-steady", reasoning: "low", dailyTokenBudget: 0, evidenceHours: 24, maxAnchorAgeSeconds: 600},
       threadPolicy: this.threadPolicy(),
-      threads: this.data.threads.map(thread => ({id: thread.id, title: thread.title, projectId: thread.projectId, available: true})),
+      threads: this.data.threads.map(thread => ({id: thread.id, title: this.titleOf(thread), projectId: thread.projectId, available: true})),
       projects: this.data.projects.map(project => ({id: project.id, title: project.title, available: true, classification: project.classification})),
       rules: [], mutes: [], activity, coverage: "Fixture coverage: synthetic API data for UI recordings.", tokensUsed: 0,
     };
@@ -256,14 +265,20 @@ export class FixtureModel {
       const stopped = this.data.threadPolicy.excludedThreadIds.includes(thread.id);
       const enabled = scratch ? this.data.global.enabled && this.data.noProject.mode !== "off" : this.effective(project);
       const supervision = stopped ? "stopped" as const : enabled ? "enabled" as const : "disabled" as const;
-      const attention = supervision === "enabled" && thread.binding?.state === "rejected" ? ["Supervisor access was rejected."] : [];
+      const journey = this.journeyFor(thread.id);
+      const task = journey?.task ?? thread.task;
+      const live = journey?.progress.workflows.find(workflow => workflow.threadId === thread.id);
+      const assessment = journey ? assessmentForTask(live?.assessment, journey.task) : null;
+      const attention = journey ? workAttention({enabled: supervision === "enabled", bindingState: thread.binding?.state ?? null, task: journey.task, assessment})
+        : supervision === "enabled" && thread.binding?.state === "rejected" ? ["Supervisor access was rejected."] : [];
       return [{
-        projectId: thread.projectId, mainThreadId: thread.id, title: thread.title,
+        projectId: thread.projectId, mainThreadId: thread.id, title: this.titleOf(thread),
         supervisorThreadId: thread.binding?.threadId ?? `fixture-supervisor-${thread.id.slice("fixture-thread-".length)}`,
         stop: stopped && stop ? {route: stop.stoppedBy, callerThreadId: null, userMessageId: null, stoppedAt: stop.stoppedAt} : null,
-        nativeState: "quiet" as const, supervision, objective: thread.task?.objective ?? null,
-        reason: thread.task?.reason ?? "Fixture: no task recorded.", taskStatus: thread.task?.status ?? null, planStatus: null, assessment: null,
-        attention, updatedAt: thread.task?.updatedAt ?? null,
+        nativeState: journey && journey.task.status !== "waiting" && assessment?.status !== "completed" ? "active" as const : "quiet" as const, supervision, objective: task?.objective ?? null,
+        reason: task?.reason ?? "Fixture: no task recorded.", taskStatus: task?.status ?? null, planStatus: task?.agreement?.status ?? task?.workflow?.status ?? null,
+        assessment: assessment ? {status: assessment.status, summary: assessment.summary, updatedAt: assessment.updatedAt} : null,
+        attention, updatedAt: assessment?.updatedAt ?? task?.updatedAt ?? null,
       }];
     });
   }
@@ -309,7 +324,7 @@ export class FixtureModel {
       (!search || thread.id.toLowerCase() === search || thread.title.toLowerCase().includes(search))).slice(0, 8);
     return {
       exceptions: this.data.threadPolicy.excludedThreadIds.filter(id => {const thread = this.data.threads.find(item => item.id === id);return Boolean(thread && relevant(thread));}),
-      candidates: rows.map(thread => ({id: thread.id, projectId: thread.projectId, title: thread.title, updatedAt: null,
+      candidates: rows.map(thread => ({id: thread.id, projectId: thread.projectId, title: this.titleOf(thread), updatedAt: null,
         active: this.started(thread.id) && !excluded(thread), excluded: excluded(thread)})),
       message: rows.length ? "Choose a chat. At most eight matches are shown." : "No matching available chat. Paste its native T3 link or change the search.",
     };
@@ -407,7 +422,7 @@ export class FixtureModel {
     const project = this.project(projectId);
     const thread = mainThreadId === null ? null : this.thread(projectId, mainThreadId);
     const scratch = project.classification === "scratch";
-    const journeyTask = this.current === "a" && this.journey && thread?.id === fixtureIds.threadA1 ? fixtureJourney(this.journey, projectId, thread.id, thread.binding!.threadId, this.now()).task : null;
+    const journeyTask = thread ? this.journeyFor(thread.id)?.task ?? null : null;
     const stop = thread ? this.data.stops[thread.id] : undefined;
     const stopped = thread ? this.data.threadPolicy.excludedThreadIds.includes(thread.id) : false;
     return {
@@ -489,7 +504,7 @@ export class FixtureModel {
     const page = parseWorkflowProgressPageQuery(query);
     if (!page) throw new FixtureFailure("Fixture: invalid workflow progress page.");
     const thread = this.thread(page.projectId, page.mainThreadId);
-    if (this.current === "a" && this.journey && thread.id === fixtureIds.threadA1) return {...fixtureJourney(this.journey, page.projectId, thread.id, thread.binding!.threadId, now).progress, workflowOffset: page.workflowOffset, lineageOffset: page.lineageOffset};
+    if (this.journeyFor(thread.id)) return {...fixtureJourney(this.journey!, page.projectId, thread.id, thread.binding!.threadId, now).progress, workflowOffset: page.workflowOffset, lineageOffset: page.lineageOffset};
     return {status: "ok", message: null, projectId: page.projectId, mainThreadId: page.mainThreadId, observedAt: now, scope: null, coverage: [],
       incompatibleWorkflows: [], workflows: [], workflowOffset: page.workflowOffset, workflowHasMore: false, lineageOffset: page.lineageOffset, lineageHasMore: false};
   }
@@ -545,7 +560,8 @@ export class FixtureModel {
 }
 
 export const scenarioNames = [
-  "journey-request", "journey-proposal", "journey-agreed", "journey-working", "journey-completed", "journey-attention", "journey-stale", "journey-nested", "journey-nested-attention", "journey-retained",
+  "journey-request", "journey-proposal", "journey-agreed", "journey-working", "journey-attention", "journey-revised", "journey-reagreed", "journey-verified",
+  "journey-nested", "journey-nested-attention", "journey-completed", "journey-stale", "journey-retained",
   "baseline", "session-expiry-next-call", "signout-other-tab", "mutation-never-answered", "mutation-dropped",
   "save-401", "save-403", "save-409", "save-413", "editor-conflict", "editor-uncertain", "slow-reads", "setup-race", "reload",
 ] as const;
@@ -569,16 +585,19 @@ const setupPath = "/api/guidance/supervision-setup";
 const plan = (arms: Arm[], revokeSessions = false): ScenarioPlan => ({arms, revokeSessions});
 
 export const scenarioCatalog: Record<ScenarioName, {description: string; plan: (params: ScenarioParams) => ScenarioPlan}> = {
-  "journey-request": {description: "synthetic duplicate-email task: request", plan: () => plan([])},
-  "journey-proposal": {description: "synthetic duplicate-email task: proposal", plan: () => plan([])},
-  "journey-agreed": {description: "synthetic duplicate-email task: agreed", plan: () => plan([])},
-  "journey-working": {description: "synthetic duplicate-email task: working", plan: () => plan([])},
-  "journey-completed": {description: "synthetic duplicate-email task: completed", plan: () => plan([])},
-  "journey-attention": {description: "synthetic duplicate-email task: attention", plan: () => plan([])},
-  "journey-stale": {description: "synthetic duplicate-email task: stale", plan: () => plan([])},
-  "journey-nested-attention": {description: "synthetic planned workflow with an attention-needing child", plan: () => plan([])},
-  "journey-retained": {description: "a current plan beside an unlinked earlier completed workflow", plan: () => plan([])},
-  "journey-nested": {description: "synthetic duplicate-email task: nested", plan: () => plan([])},
+  "journey-request": {description: "reconstructed packing example: the request is being interpreted", plan: () => plan([])},
+  "journey-proposal": {description: "reconstructed packing example: Change workflow proposed", plan: () => plan([])},
+  "journey-agreed": {description: "reconstructed packing example: proposal accepted, no assessment yet", plan: () => plan([])},
+  "journey-working": {description: "reconstructed packing example: scope and evidence assessed, design underway", plan: () => plan([])},
+  "journey-attention": {description: "reconstructed packing example: overfill behavior not evidenced", plan: () => plan([])},
+  "journey-revised": {description: "reconstructed packing example: refined Verify criterion awaiting acceptance; live statuses unchanged", plan: () => plan([])},
+  "journey-reagreed": {description: "reconstructed packing example: refinement accepted; overfill clamped, implementation reopened", plan: () => plan([])},
+  "journey-verified": {description: "reconstructed packing example: refined criterion verified", plan: () => plan([])},
+  "journey-nested": {description: "reconstructed packing example: independent review underway in parallel", plan: () => plan([])},
+  "journey-nested-attention": {description: "reconstructed packing example: a review branch needs attention while its workflow stays underway", plan: () => plan([])},
+  "journey-completed": {description: "reconstructed packing example: reviewed pull request ready for handoff", plan: () => plan([])},
+  "journey-stale": {description: "reconstructed packing example: acceptance out of date", plan: () => plan([])},
+  "journey-retained": {description: "reconstructed packing example: accepted plan beside an unlinked earlier workflow", plan: () => plan([])},
   "baseline": {description: "normal synthetic behaviour", plan: () => plan([])},
   "session-expiry-next-call": {description: "the next /api/ call with a valid session revokes that session and answers 401", plan: () => plan([{kind: "session-expiry"}])},
   "signout-other-tab": {description: "revokes every fixture session now, as a sign-out in another tab does server-side", plan: () => plan([], true)},

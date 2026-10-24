@@ -92,7 +92,7 @@ typography:
     lineHeight: 1.4
   objective:
     fontFamily: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif
-    fontSize: clamp(1.35rem, 1rem + 1cqi, 1.8rem)
+    fontSize: clamp(1.1rem, .95rem + .5cqi, 1.35rem)
     fontWeight: 650
     lineHeight: 1.35
   body:
@@ -143,7 +143,7 @@ typography:
     lineHeight: 1.55
   outcome:
     fontFamily: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif
-    fontSize: 1.15rem
+    fontSize: 1.05rem
     fontWeight: 700
     lineHeight: 1.4
   guide-introduction:
@@ -293,7 +293,7 @@ components:
     textColor: "{colors.ink}"
     typography: "{typography.outcome}"
     rounded: "{rounded.surface}"
-    padding: 20px 24px
+    padding: 12px 16px
   task-outcome-underway:
     backgroundColor: "{colors.status-green-bg}"
     textColor: "{colors.status-green-ink}"
@@ -307,7 +307,7 @@ components:
     backgroundColor: "{colors.surface}"
     textColor: "{colors.ink}"
     rounded: "{rounded.surface}"
-    padding: 24px
+    padding: 18px 22px 12px
   journey-step:
     rounded: "{rounded.context}"
   journey-step-current:
@@ -337,7 +337,7 @@ components:
     backgroundColor: "{colors.soft}"
     textColor: "{colors.ink}"
     rounded: "{rounded.surface}"
-    padding: 24px
+    padding: 20px
   retained-workflow:
     rounded: "{rounded.context}"
     padding: 16px 20px
@@ -424,7 +424,7 @@ Browser text selection uses a pale-teal background and dark ink; scrollbars use 
 - **Headline:** page headings with tight tracking and compact line height; the mobile role replaces the desktop size at the narrow breakpoint.
 - **Title:** major sections, with a slightly smaller mobile size.
 - **Section:** subordinate headings and fieldset legends.
-- **Objective:** the task statement uses the recorded fluid clamp, weight (650), line height (1.35) and measure (64ch). This later rule supersedes the earlier fixed desktop/mobile objective sizes; there is no separate current mobile objective token.
+- **Objective:** the task statement uses the recorded fluid clamp, weight (650), line height (1.35) and a wide measure (92ch), so a long statement stays within three lines on a desktop task view.
 - **Journey heading / workflow title:** plan-progress section headings and the titles inside workflow surfaces.
 - **Context title:** alignment, observation and compact definition headings.
 - **Outcome:** the semantic result title; the guide introduction shares its scale with regular body weight and line height.
@@ -443,19 +443,19 @@ Browser text selection uses a pale-teal background and dark ink; scrollbars use 
 
 ## Layout
 
-The desktop shell has a fixed navigation rail (220px), a matching content offset and a viewport-height minimum. The header stays in normal document flow, with a minimum height of (70px). The centered workspace has a maximum width of (1560px) and padding of (34px 38px 24px). Settings narrow to (1000px). Rows wrap rather than forcing long labels into fixed-width controls.
+The desktop shell has a fixed navigation rail (220px), a matching content offset and a viewport-height minimum. The header stays in normal document flow, with a minimum height of (70px). The centered workspace has a maximum width of (1560px) and padding of (26px 38px 24px). Settings narrow to (1000px). Rows wrap rather than forcing long labels into fixed-width controls.
 
 At widths up to (1150px), rail and offset reduce to (190px), horizontal header/workspace padding becomes (26px), and search occupies its own filter row.
 
-At widths up to (760px), navigation becomes an in-flow indigo header with four equal columns. Main navigation items have a minimum height of (57px); the brand detail and lower utility prose disappear. The instance header reduces to a minimum height of (62px), the workspace uses (25px 18px), and ordinary panel padding becomes (19px). The later task-focus rule leaves the task statement unboxed with padding (8px 0 24px); Plan & agreement reduces its bottom inset to (4px). The header still scrolls with the page.
+At widths up to (760px), navigation becomes an in-flow indigo header with four equal columns. Main navigation items have a minimum height of (57px); the brand detail and lower utility prose disappear. The instance header reduces to a minimum height of (62px), the workspace uses (25px 18px), and ordinary panel padding becomes (19px). The task statement stays unboxed. The header still scrolls with the page.
 
 The work table becomes stacked conversation records with visible native-activity and update labels. Checkout controls and project-configuration identity fields become single-column layouts. Conversation navigation wraps as whole links. Project and conversation rows wrap state metadata; save actions stack vertically. The sign-in split view also stacks at this breakpoint.
 
-Spacing is pragmatic rather than a rigid modular grid: small gaps bind labels and metadata, a normal stack separates blocks (20px), ordinary panels use (24px), the workflow grid uses a (24px) gap, negotiation uses (28px), settings groups use (32px), and the home workspace uses (30px), reducing to (25px) on mobile. Frontmatter lists recurring measured steps rather than every local inset.
+Spacing is pragmatic rather than a rigid modular grid: small gaps bind labels and metadata, a normal stack separates blocks (20px), ordinary panels use (24px), the workflow grid uses a (24px) gap, settings groups use (32px), and the home workspace uses (30px), reducing to (25px) on mobile. Frontmatter lists recurring measured steps rather than every local inset.
 
-The workflow section is an inline-size container named `workflow`. The plan and context use columns (1.45fr / 1fr), with a minimum context width of (260px). At container widths up to (760px), the plan stacks above a two-column context region; at (500px), context becomes one column, surface padding becomes (18px), and step labels move below their names. Workflow disclosure preserves sequence, unordered parallel branches and nested workflows without flattening them.
+The Task workspace is an inline-size container named `workflow`. The plan and the agreement context use columns (1.45fr / 1fr), with a minimum context width of (260px). At container widths up to (760px), the plan stacks above a two-column context region; at (500px), context becomes one column, surface padding becomes (18px), and step labels move below their names. Workflow disclosure preserves sequence, unordered parallel branches and nested workflows without flattening them.
 
-Plan & agreement has its own inline-size container named `negotiation`. Task meaning leads above a left plan / right alignment grid with the same column proportions and a (28px) gap. Alignment is sticky (20px from the top) until this container narrows to (760px), when the grid stacks and alignment becomes static. These are container thresholds, separate from the shell viewport breakpoint.
+At (1280 × 800) with a long task statement, the first plan step of the Task view starts within the first viewport (about 520px from the top).
 
 Minimum heights remain explicit: buttons (42px), fields (44px), project navigation (46px) and conversation navigation (42px). With a coarse pointer, buttons, text fields, selects and project/conversation navigation rise to at least (48px). Long copy, paths and identifiers wrap; source text preserves line breaks. Radio and checkbox marks remain (18px).
 
@@ -495,7 +495,7 @@ Familiar native controls with a stronger outline than content containers. Inputs
 
 The rail pairs a label and line icon; current selection adds the selected indigo fill, white text and teal icon. Rail keyboard focus uses its pale-teal outline. An amber count marks recorded attention items. Mobile keeps the same four destinations in a top grid.
 
-Project pages use a restrained bottom boundary and teal current-item underline (2px). Inside a conversation, linked Projects and project breadcrumbs lead back to scope, the conversation title identifies the work, and one rounded conversation navigation row follows: Overview, Plan & agreement, Supervision. The project tab row is hidden there. Conversation links use a tonal teal selected fill and wrap without splitting their labels. Checkout selection appears only in Definitions. Current state belongs to the active link through `aria-current`; Guide remains a separate utility link.
+Project pages use a restrained bottom boundary and teal current-item underline (2px); a project opens at Conversations. Inside a conversation, linked Projects and project breadcrumbs lead back to scope, and the title band carries the conversation title, its two views (Task, Supervision) and Open in T3. The project tab row is hidden there. Conversation links use a tonal teal selected fill and wrap without splitting their labels. Checkout selection appears only in Definitions. Current state belongs to the active link through `aria-current`; Guide is a separate reference link in its own navigation landmark. Moving to another page, project or conversation, including through Back and Forward, focuses that view's visible h1; switching between a conversation's views keeps focus on the activated link.
 
 ### Attention and notices
 
@@ -503,41 +503,39 @@ Attention rows keep title, reason and context together in an amber-bordered list
 
 ### Task meaning and outcome
 
-The task statement leads on the canvas without a surrounding card. A tonal outcome strip names work in progress, task completion, attention or stopped supervision, with a larger marker and the assessment explanation. When a current task-bound assessment exists, the strip can list underway or attention steps after “Now:”. A stopped state suppresses that current-step line. Plan status and assessment/read time remain separate metadata below. No percentage or remaining-effort estimate is inferred from step counts.
+The task statement leads on the canvas without a surrounding card. A tonal outcome strip names work in progress, task completion, attention or stopped supervision, with its marker and the assessment explanation. When a current task-bound assessment exists, the strip can list underway or attention steps after “Now:”. A stopped state suppresses that current-step line. One metadata line follows: the agreement state, the assessment time (or an honest reading state such as Reading, Unavailable or Coverage incomplete), the read time and the view's one Refresh. Attention reasons that the outcome, agreement panel or a record's own details already state are not repeated in the attention band. No percentage or remaining-effort estimate is inferred from step counts.
 
 ### Connected workflow journey
 
 The bordered plan surface carries the full recorded topology. Sequences use ordered lists and connected tracks; parallel groups use unordered lists, a named “In parallel” region and a dashed side boundary, explicitly saying that branches have no declared order. Nested workflows retain their own boundary and status, with nested contents inside the workflow disclosure. A child's completion never changes its parent's assessment by implication.
 
-Each stop is a native disclosure with an SVG state marker, name, textual state and chevron. Live underway and attention items open initially, along with ancestor workflows needed to reveal them. Other completed and planned items start collapsed; an ancestor keeps its own recorded state. The underway summary carries `aria-current="step"`. Proposed stops use dashed markers and “Proposed”; accepted plan snapshots use “In agreed plan”, and historical snapshots use “In earlier plan”. Those non-live contexts do not inherit execution status. A workflow without an expanded plan says so explicitly.
+Each stop is a native disclosure with an SVG state marker, name, textual state and chevron. Live underway and attention items open initially, along with ancestor workflows needed to reveal them. Other completed and planned items start collapsed; an ancestor keeps its own recorded state. The underway summary carries `aria-current="step"`. Statuses come only from the current workflow bound to the task; before one exists, the journey shows the proposal with dashed “Proposed” markers or the accepted plan labelled “Accepted” and “Not yet assessed”, and historical snapshots use “In earlier plan”. Those non-live contexts never inherit execution status, and a pending proposal never replaces or merges into the current workflow. A workflow without an expanded plan says so explicitly.
 
-Description, rationale, unresolved-definition notices and contributor links appear inside the disclosure. The current step gains the documented teal row, label and ring; completion adds a check; attention adds the amber square marker. The plan can show assessed-complete counts, without turning those counts into task completion.
+The disclosure holds the step's duty (definition description), read-only references and skills, its Plan note, and, matched by occurrence ID within the same task, an Accepted plan note and a “Proposed plan note · awaiting acceptance” when they differ. A Supervisor assessment appears only from that step's own recorded status change, with its transition and time; other step records sit in an Earlier step records disclosure. A workflow lists its not-applicable original commitments with their reasons. A quiet source line names the definition or task-local ID and path. Steps affected by a pending update carry an “Update proposed” chip; a live step missing from the accepted plan carries “Not in the accepted plan”. The current step gains the documented teal row, label and ring; completion adds a check; attention adds the amber square marker. The plan can show assessed-complete counts, without turning those counts into task completion.
 
 **The Topology Before Totals Rule.** Preserve sequence, parallel and nested workflow boundaries, and keep parent assessment independent from child completion.
 
-### Alignment and negotiation
+### Alignment and agreement
 
-The tinted Agent and Supervisor region presents the actual proposal state and recorded agent acceptance as two attributed rows. Messages come from those records; they are not invented chat. Links open the Supervisor and agent conversations, and Agreement record discloses acceptance time and source identifiers. “Plan agreed” requires an active task and agreement consistent with the current proposal. A revised proposal, stale acceptance or expired/non-supervised task instead names the outstanding review or earlier acceptance.
-
-Plan & agreement leads with task meaning, then places the plan on the left and actual alignment on the right. Accepted commitments, current drafts and historical agreements keep their own explicit labels. Definition status, requirements and full source structure remain in provenance disclosures; execution assessment belongs in Overview.
+The tinted Agent and Supervisor region beside the plan presents the actual proposal state and the recorded agent acceptance as two attributed rows, each message stated once: a proposal's message only while it is the open question, the acceptance message once accepted. Messages come from those records; they are not invented chat. Links open the Supervisor and agent conversations. Disclosures hold the acceptance record (time, proposal, agent and Supervisor message or interpretation submission), plan provenance (proposal status, definitions status, requirements, checkout and revision, issues) and the task interpretation. “Plan accepted” requires an active task whose acceptance covers the current proposal. A revised proposal reads “Earlier plan accepted; update awaiting acceptance”, without implying an enforcement gate, and a “Proposed update awaiting acceptance” panel lists the actual added, removed and changed steps against the accepted plan, with an optional plan-note comparison.
 
 **The Current Task Rule.** Bind current outcome and alignment to the selected task; retain unrelated workflow records as explicitly labeled history without presenting their agreement as the current task's agreement.
 
-### Retained history and evidence
+### Evidence and history
 
-An unlinked main workflow sits in a collapsed, dashed “Earlier workflow” disclosure with an explicit retained-record notice. Its inner plan can still display its recorded assessments, but it receives no current-task alignment panel. Current proposal/alignment remains outside that historical wrapper. Full plan, evidence and observations discloses source paths, references, external contributions, native lifecycle and observations separately from the latest-observation summary. Proposed, agreed and historical plan snapshots remain distinct from those retained execution records.
+One “Evidence and history” disclosure follows the plan. It holds every Supervisor record (newest first, with its step, transition, time and source references), external contributions for steps no longer in the plan, the native conversation lifecycle with supporting activity, an out-of-date earlier acceptance with its plan in historical labels, and an unlinked earlier workflow in a dashed “Earlier workflow” disclosure with a retained-record notice and no current-task agreement panel. It never repeats the current plan. Connected work (child conversations, their workflows and assignments) appears only when such work exists.
 
 ### Page patterns
 
-Home keeps one supervision/plan status per work row, alongside separate native activity, objective, a concise reason or assessment and update time. Titles, objectives and summaries clamp to two lines; full context remains available in the conversation. Attention rows prioritize an actual reason, and an empty successful work list offers Choose a project.
+Home keeps one supervision/plan status per work row, alongside separate native activity, objective, a concise reason or assessment and update time. Titles, objectives and summaries clamp to two lines; full context remains available in the conversation. Attention rows prioritize an actual reason, and an empty successful work list offers Choose a project. A stopped conversation appears once, in its work row, which opens its Supervision view with the stop record and Enable action.
 
-Activity uses human-readable event titles in chronological day groups. Inspect opens retained detail in the existing native dialog; history is not an unresolved-alert total. Instance settings groups where supervision runs and individual chat exceptions, exposes connection detail progressively, and separates disable actions from quiet reloads. Conversation Supervision leads with a health explanation and discloses monitoring/model details. Project settings remains the home of defaults.
+Activity uses human-readable event titles in chronological day groups. Inspect opens retained detail in the existing native dialog; history is not an unresolved-alert total. Instance settings groups where supervision runs and individual chat exceptions, exposes connection detail progressively, and separates disable actions from quiet reloads. Conversation Supervision leads with a health explanation and discloses monitoring/model details. Project settings first states which conversations are supervised (the project switch and the agent-created conversations checkbox), then the defaults for new Supervisors; per-control reloads stay quiet and exist to reconcile their own uncertain outcomes. Sign-in has one h1; the boot state keeps the shell with static skeleton bars and offers Retry only after a failed read.
 
-Definitions uses compact, separated rows: name, origin, required/fixed flags, path, summary and a Full definition disclosure. Global entries remain read-only, and missing/invalid entries retain their identity and required flags. Guide begins with a short introduction and a topic contents grid (three columns, two on mobile); topic buttons focus the selected heading and scroll it into view.
+Definitions asks for an explicit checkout choice (Project root or a main conversation's checkout, without task states); once chosen, a compact Checkout control shows the path and changes it. Definitions uses compact, separated rows: name, origin, required/fixed flags, path, summary and a Full definition disclosure. Global entries remain read-only, and missing/invalid entries retain their identity and required flags. Guide begins with a short introduction and a topic contents grid (three columns, two on mobile); topic buttons focus the selected heading and scroll it into view.
 
 ### Disclosure and dialog
 
-Ordinary native disclosures retain their marker and a minimum-height summary (44px); opening adds separation before the details. Journey summaries intentionally replace the native marker with SVG and use a minimum height of (56px); compact definition summaries use (36px). Retained history stays collapsed until opened. Activity inspection uses a native modal with the dialog radius, padding (26px), width bounded by (740px) and (100% - 32px), and maximum height (85dvh). Overflow stays within the dialog. A skip link becomes visible on keyboard focus.
+Ordinary native disclosures retain their marker and a minimum-height summary (44px); opening adds separation before the details. Journey summaries intentionally replace the native marker with SVG and use a border-box minimum height of (48px); compact definition summaries use (36px). Retained history stays collapsed until opened. Activity inspection uses a native modal with the dialog radius, padding (26px), width bounded by (740px) and (100% - 32px), and maximum height (85dvh). Overflow stays within the dialog. A skip link becomes visible on keyboard focus.
 
 ## Do's and Don'ts
 

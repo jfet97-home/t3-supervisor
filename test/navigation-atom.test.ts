@@ -22,7 +22,7 @@ beforeAll(() => Effect.gen(function* () {
   ui = yield* Effect.promise(() => import("../ui/src/navigation.js"));
 }));
 
-const project = (projectId: string, main: string | null = "", section: "progress" | "plan" = "progress") => ({...ui.directoryRoute, projectId, main, section});
+const project = (projectId: string, main: string | null = "", section: "task" | "supervision" = "task") => ({...ui.directoryRoute, projectId, main, section});
 
 it.effect("the route atom follows navigation and history, restores a guarded entry, recovers a silent traversal and releases its listeners", () => Effect.gen(function* () {
   const registry = yield* clockedRegistry(atoms.uiRuntime);
@@ -32,9 +32,9 @@ it.effect("the route atom follows navigation and history, restores a guarded ent
   assert.equal(browser.location.hash, "#/home");
 
   const {navigate, guard} = registry.get(ui.navigationAtom);
-  navigate(project("a", "chat-1", "plan"));
-  assert.deepEqual(registry.get(ui.navigationAtom).route, project("a", "chat-1", "plan"));
-  assert.equal(browser.session.get("supervisor-context:a"), JSON.stringify({main: "chat-1", section: "plan"}));
+  navigate(project("a", "chat-1", "supervision"));
+  assert.deepEqual(registry.get(ui.navigationAtom).route, project("a", "chat-1", "supervision"));
+  assert.equal(browser.session.get("supervisor-context:a"), JSON.stringify({main: "chat-1", section: "supervision"}));
   assert.equal(registry.get(ui.navigationAtom).navigate, navigate, "navigate stays stable across routes");
   navigate(project("a"));
 

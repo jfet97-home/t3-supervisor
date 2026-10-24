@@ -52,6 +52,13 @@ export function overviewPage(query: {offset?: string | undefined; limit?: string
 }
 
 /** The same current-state explanations are used by the overview and the selected conversation. */
+/** The attention reason for a rejected workflow record; the task workspace shows the record's details beside it. */
+export const protocolDiagnosticAttention = "A plan record could not be accepted. Open the task to inspect the reported field and repair it.";
+/** The attention reason for an out-of-date acceptance; the task's agreement panel states it there. */
+export const staleAgreementAttention = "The saved agreement needs review against current definitions.";
+/** The attention reason for a current plan that cannot be used; the task's agreement panel states its status there. */
+export const planStatusAttention = (status: string) => `The current plan is ${status}. Open the task to inspect it.`;
+
 export function workAttention(input: {
   enabled: boolean; bindingState: string | null; settlementState?: string | null;
   monitoring?: SupervisorMonitoringStatus | undefined; task?: TaskInterpretationInfo | undefined;
@@ -67,10 +74,10 @@ export function workAttention(input: {
   if (monitoring?.state === "unavailable" || monitoring?.state === "uncertain") attention.push(monitoring.message.slice(0, 700));
   if (task && ["needs_context", "unavailable", "uncertain"].includes(task.status)) attention.push(task.reason.slice(0, 700));
   if (assessment?.status === "needs_attention") attention.push(assessment.summary || "The current workflow needs attention.");
-  if (task?.workflow && ["invalid", "stale", "unavailable"].includes(task.workflow.status)) attention.push(`The current plan is ${task.workflow.status}. Open Plan & agreement to inspect it.`);
-  if (task?.agreement?.status === "stale") attention.push("The saved agreement needs review against current definitions.");
+  if (task?.workflow && ["invalid", "stale", "unavailable"].includes(task.workflow.status)) attention.push(planStatusAttention(task.workflow.status));
+  if (task?.agreement?.status === "stale") attention.push(staleAgreementAttention);
   if (task?.definitionReview?.status === "revert_requested") attention.push(task.definitionReview.message.slice(0, 700));
-  if (task?.workflowProtocolDiagnostic) attention.push("A plan record could not be accepted. Open Plan & agreement to inspect the reported field and repair.");
+  if (task?.workflowProtocolDiagnostic) attention.push(protocolDiagnosticAttention);
   return [...new Set(attention)];
 }
 

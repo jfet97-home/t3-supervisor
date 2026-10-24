@@ -11,7 +11,7 @@ import { discardSupervisorDrafts, ProjectSupervisorPanel } from "./project-super
 import { type OverviewState, ReadTime, WorkState } from "./overview.js";
 import { Icon } from "./icons.js";
 import { DefinitionReferences } from "./definition-references.js";
-import { directoryRoute, openProject, RouteLink, type NavigationGuard, type Route } from "./navigation.js";
+import { conversationSections, directoryRoute, isConversationView, openProject, RouteLink, type NavigationGuard, type Route } from "./navigation.js";
 
 const statusText: Record<ProjectDefinitionSnapshot["status"], string> = {
   ready: "Definitions valid",
@@ -337,6 +337,7 @@ export function ProjectDefinitionsPanel({data, overview, route, navigate, guard,
   const workspaceRoute = {...route, page: "projects" as const, projectId: selection.projectId};
   const showDefinitions = inWorkspace && route.section === "definitions";
   const showSupervisor = inWorkspace && route.section !== "definitions" && route.section !== "conversations";
+  const conversation = inWorkspace && Boolean(threadId) && isConversationView(route);
   const selectedProject = data.projects.find(project => project.id === selection.projectId);
   return <section className="stack project-definitions" aria-label="Projects">
     <div hidden={inWorkspace} className="stack">
@@ -355,52 +356,54 @@ export function ProjectDefinitionsPanel({data, overview, route, navigate, guard,
       </div>
       {!data.projects.some(project => project.title.toLowerCase().includes(projectQuery.toLowerCase())) && <p className="empty-state muted">{projectQuery ? "No projects match your search." : "No T3 projects are available. Add a project in T3 to begin."}</p>}
     </div>
-    <div hidden={!inWorkspace} className={`stack ${threadId && ["progress", "plan", "supervision"].includes(route.section) ? "conversation-workspace" : ""}`}>
-      <div className="page-heading"><nav className="workspace-breadcrumb" aria-label="Workspace breadcrumb"><RouteLink to={directoryRoute} navigate={navigate}>Projects</RouteLink><span aria-hidden="true">/</span><RouteLink to={{...workspaceRoute, main: null, section: "conversations"}} navigate={navigate}>{selectedProject?.title ?? "Unavailable project"}</RouteLink>{threadId && ["progress", "plan", "supervision"].includes(route.section) && <span className="muted">/ Conversation</span>}</nav><div className="row between"><div><h1>{threadId && ["progress", "plan", "supervision"].includes(route.section) ? threads.find(thread => thread.id === threadId)?.title ?? "Unavailable conversation" : selectedProject?.title ?? "Unavailable project"}</h1>{threadId && ["progress", "plan", "supervision"].includes(route.section) && <p className="muted small">Main conversation · {selectedProject?.title}</p>}</div>{threadId && ["progress", "plan", "supervision"].includes(route.section) && <a className="button-link" href={`t3-thread://v1/${threadId}`}><Icon name="external" size={16}/>Open in T3</a>}</div></div>
-      <nav className="project-nav" aria-label="Project sections" hidden={Boolean(threadId && ["progress", "plan", "supervision"].includes(route.section))}>
-        <RouteLink to={{...workspaceRoute, section: "conversations"}} navigate={navigate} aria-current={["progress", "plan", "supervision", "conversations"].includes(route.section) ? "page" : undefined}>Conversations</RouteLink>
+    <div hidden={!inWorkspace} className={`stack ${conversation ? "conversation-workspace" : ""}`}>
+      <div className="page-heading"><nav className="workspace-breadcrumb" aria-label="Workspace breadcrumb"><RouteLink to={directoryRoute} navigate={navigate}>Projects</RouteLink><span aria-hidden="true">/</span><RouteLink to={{...workspaceRoute, main: null, section: "conversations"}} navigate={navigate}>{selectedProject?.title ?? "Unavailable project"}</RouteLink></nav><div className="row between page-title-row"><h1>{conversation ? threads.find(thread => thread.id === threadId)?.title ?? "Unavailable conversation" : selectedProject?.title ?? "Unavailable project"}</h1>{conversation && <div className="title-actions"><nav className="section-nav" aria-label="Conversation views">{conversationSections.map(section => <RouteLink key={section} to={{...workspaceRoute, section}} navigate={navigate} aria-current={route.section === section ? "page" : undefined}>{section === "task" ? "Task" : "Supervision"}</RouteLink>)}</nav><a className="button-link" href={`t3-thread://v1/${threadId}`}><Icon name="external" size={16}/>Open in T3</a></div>}</div></div>
+      <nav className="project-nav" aria-label="Project sections" hidden={conversation}>
+        <RouteLink to={{...workspaceRoute, main: null, section: "conversations"}} navigate={navigate} aria-current={route.section === "conversations" || conversationSections.includes(route.section) ? "page" : undefined}>Conversations</RouteLink>
         <RouteLink to={{...workspaceRoute, section: "definitions"}} navigate={navigate} aria-current={route.section === "definitions" ? "page" : undefined}>Definitions</RouteLink>
         <RouteLink to={{...workspaceRoute, section: "settings"}} navigate={navigate} aria-current={route.section === "settings" ? "page" : undefined}>Project settings</RouteLink>
       </nav>
-      <details className="context-switcher" hidden={route.section !== "definitions"}><summary>{route.section === "definitions" ? "Definitions checkout" : "Switch conversation or inspect checkout"}</summary><div className="context-bar stack">
-        <div className="definition-controls">
-          <label className="context-project" htmlFor="definition-project">Project<select id="definition-project" value={selection.projectId} disabled={saving} onChange={event => navigate(openProject(event.target.value))}>
-            {!projectId && <option value={selection.projectId}>Project unavailable</option>}{projects.map(project => <option key={project.id} value={project.id}>{project.title}</option>)}
-          </select></label>
-          <label htmlFor="definition-thread">{route.section === "definitions" ? "Definitions checkout" : "Conversation"}<select id="definition-thread" value={route.main === null ? "__choose__" : threadId} disabled={!projectId || saving} onChange={event => changeContext(event.target.value, route.section === "definitions" ? "definitions" : event.target.value ? "progress" : "definitions")}>
-            <option value="__choose__" disabled>{route.section === "definitions" ? "Choose a checkout" : "Choose a conversation"}</option>
+      {inWorkspace && !conversation && <div className="section-heading"><h2 id="project-section-heading" className="sr-only">{route.section === "definitions" ? "Definitions" : route.section === "settings" ? "Project settings" : "Conversations"}</h2><p className="muted">{route.section === "definitions" ? "Reusable steps and workflows in a chosen checkout, and its project.yaml index." : route.section === "settings" ? "Which conversations are supervised here, and the defaults for new Supervisors." : "Open a conversation to see its task, plan and supervision."}</p></div>}
+      {route.section === "definitions" && (route.main === null
+        ? <section className="panel stack checkout-chooser" aria-labelledby="checkout-chooser-title">
+          <h3 id="checkout-chooser-title">Choose a checkout</h3>
+          <p className="muted small">Definitions belong to a working checkout. Choose the project root or the checkout a main conversation works in.</p>
+          <ul className="checkout-options" role="list">
+            <li><RouteLink to={{...workspaceRoute, main: "", section: "definitions"}} navigate={navigate}><strong>Project root</strong><span className="muted small">The project’s own folder</span><Icon name="arrow" size={18}/></RouteLink></li>
+            {threads.map(thread => <li key={thread.id}><RouteLink to={{...workspaceRoute, main: thread.id, section: "definitions"}} navigate={navigate}><strong>{thread.title}</strong><span className="muted small">The checkout this conversation works in</span><Icon name="arrow" size={18}/></RouteLink></li>)}
+          </ul>
+        </section>
+        : <div className="checkout-bar">
+          <label htmlFor="definition-thread">Checkout<select id="definition-thread" value={threadId} disabled={!projectId || saving} onChange={event => changeContext(event.target.value, "definitions")}>
             {threadUnavailable && <option value={threadId} disabled>Conversation unavailable</option>}
-            <option value="">Project root checkout</option>{threads.map(thread => <option key={thread.id} value={thread.id}>{thread.title}</option>)}
+            <option value="">Project root</option>{threads.map(thread => <option key={thread.id} value={thread.id}>{thread.title}</option>)}
           </select></label>
-          <button hidden={route.section !== "definitions"} type="button" disabled={!canLoad || busy || saving} onClick={refresh}>Refresh definitions</button>
-        </div>
-        {current?.result?.definitions.workspaceRoot && <p className="small muted definition-path">Working folder <code>{current.result.definitions.workspaceRoot}</code></p>}
-      </div></details>
+          {current?.result?.definitions.workspaceRoot && <code className="definition-path">{current.result.definitions.workspaceRoot}</code>}
+          <button type="button" className="quiet-button" disabled={!canLoad || busy || saving} onClick={refresh}>Refresh</button>
+        </div>)}
       {!projectId && <p className="panel" role="status">The selected project is unavailable. Its context is kept; choose an available project to continue.</p>}
       {threadUnavailable && !["settings", "conversations"].includes(route.section) && <p className="panel" role="status">The selected conversation is no longer available in this project. Choose another conversation.</p>}
       {!data.connected && <p className="panel" role="status">T3 is disconnected. Any unsaved project configuration draft is kept.</p>}
       {saving && <p className="notice" role="status">A save or supervision setup outcome is pending. Inspect Project settings and reload an uncertain outcome before changing scope.</p>}
       {dirty && !onDraftTargetChange && <p className="draft-notice" role="status">Unsaved changes · <RouteLink to={{...workspaceRoute, section: configurationDirty ? "definitions" : "settings"}} navigate={navigate}>Return to your draft</RouteLink>. Switching views keeps your changes.</p>}
-      {threadId && ["progress", "plan", "supervision"].includes(route.section) && <nav className="section-nav" aria-label="Conversation views">{(["progress", "plan", "supervision"] as const).map(section => <RouteLink key={section} to={{...workspaceRoute, section}} navigate={navigate} aria-current={route.section === section ? "page" : undefined}>{({progress: "Overview", plan: "Plan & agreement", supervision: "Supervision"})[section]}</RouteLink>)}</nav>}
-      {inWorkspace && <div className={threadId && ["progress", "plan", "supervision"].includes(route.section) ? "sr-only" : "section-heading"}><h2 id="project-section-heading" tabIndex={-1}>{({conversations: "Conversations", progress: route.main === null ? "Conversations" : "Conversation overview", plan: "Plan & agreement", supervision: "Supervision", definitions: "Definitions", settings: "Project settings"})[route.section]}</h2><p className="muted">{({conversations: "Open a conversation to understand its work and supervision.", progress: route.main === null ? "Open a conversation to understand its work and supervision." : "The task, current assessment and connected work in one place.", plan: "Review the current proposal, agreement and required commitments.", supervision: "Inspect the Supervisor, helpers, monitoring and recovery for this conversation.", definitions: "Choose the exact checkout, then browse and edit its reusable definition index.", settings: "Enable supervision and set defaults for new Supervisors in this project."})[route.section]}</p></div>}
-      {(route.section === "conversations" || route.main === null && route.section !== "settings") && <div className="panel stack">
-        <h3>{route.section === "definitions" ? "Choose the definitions checkout" : "Find a conversation"}</h3><label className="search"><span className="sr-only">Find a conversation</span><input aria-label="Find a conversation" type="search" placeholder="Search conversation titles" value={conversationQuery} onChange={event => setConversationQuery(event.target.value)}/></label>
+      {(route.section === "conversations" || route.main === null && conversationSections.includes(route.section)) && <div className="panel stack">
+        <label className="search"><span className="sr-only">Find a conversation</span><input aria-label="Find a conversation" type="search" placeholder="Search conversation titles" value={conversationQuery} onChange={event => setConversationQuery(event.target.value)}/></label>
         <div className="conversation-list">{threads.filter(thread => thread.title.toLowerCase().includes(conversationQuery.toLowerCase())).map(thread => {
           const work = overview?.data?.work.find(item => item.mainThreadId === thread.id);
-          return <RouteLink key={thread.id} to={{...workspaceRoute, main: thread.id, section: route.section === "definitions" ? "definitions" : "progress"}} navigate={navigate}><div className="conversation-list-copy"><strong>{thread.title}</strong><p className="muted small">{work?.objective ?? "Open to inspect task, plan and current supervision."}</p></div>{work && <WorkState work={work}/>}<Icon name="arrow" size={18}/></RouteLink>;
+          return <RouteLink key={thread.id} to={{...workspaceRoute, main: thread.id, section: "task"}} navigate={navigate}><div className="conversation-list-copy"><strong>{thread.title}</strong><p className="muted small">{work?.objective ?? "Open to inspect task, plan and current supervision."}</p></div>{work && <WorkState work={work}/>}<Icon name="arrow" size={18}/></RouteLink>;
         })}</div>
         {threads.length === 0 && <p>No available main conversations in this project.</p>}
-        <RouteLink className="context-root-link" to={{...workspaceRoute, main: "", section: "definitions"}} navigate={navigate}>Inspect project root checkout</RouteLink>
       </div>}
     </div>
     {selection.projectId && <div hidden={!showSupervisor || (route.main === null && route.section !== "settings")} inert={configurationSaving}><ProjectSupervisorPanel key={selection.projectId} projectId={selection.projectId} threadId={route.section === "settings" ? "" : threadId}
-      section={route.section === "conversations" ? "progress" : route.section} attentionEnabled={overview?.data?.projects.find(project => project.id === selection.projectId)?.effectiveEnabled ?? false} connected={data.connected && Boolean(projectId)}
+      section={route.section === "settings" ? "settings" : route.section === "supervision" ? "supervision" : "task"} attentionEnabled={overview?.data?.projects.find(project => project.id === selection.projectId)?.effectiveEnabled ?? false} connected={data.connected && Boolean(projectId)}
+      supervisionLink={conversation && route.section === "task" ? <RouteLink to={{...workspaceRoute, section: "supervision"}} navigate={navigate}>Open Supervision for recovery and controls</RouteLink> : undefined}
       onDirtyChange={setSupervisorDirty} onSavingChange={setSupervisorSaving}/></div>}
     <div hidden={!showDefinitions} className="stack">
       {busy && <p className="panel" role="status">Reading project definitions…</p>}
       {canLoad && current?.error && <p className="panel" role="alert">Could not load definitions. Refresh to try again or check the Supervisor connection.</p>}
       {messageFor(completion, {read: view.read, environmentId}) !== null && <p role="status">{messageFor(completion, {read: view.read, environmentId})}</p>}
-      {canLoad && current?.result && <div className="stack"><p className="muted small" role="status">Loaded {new Date(current.loadedAt!).toLocaleTimeString()}. Refresh after repository changes.</p><DefinitionsContent key={key} definitions={current.result.definitions}/></div>}
+      {canLoad && current?.result && <div className="stack"><p className="muted small" role="status">Read {new Date(current.loadedAt!).toLocaleTimeString()}. Refresh after repository changes.</p><DefinitionsContent key={key} definitions={current.result.definitions}/></div>}
       {loaded && <div hidden={!canLoad || view.key !== key} inert={supervisorSaving || configurationSaving}>
         <ProjectConfigurationEditor key={JSON.stringify([loaded.environmentId, loaded.definitions.projectId, loaded.definitions.threadId, loaded.definitions.revision, revision])} definitions={loaded.definitions} onDirtyChange={editorReports.onDirtyChange}
           onSavingChange={editorReports.onSavingChange} onSaved={editorReports.onSaved}/>

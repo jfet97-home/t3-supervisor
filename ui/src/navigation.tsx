@@ -4,10 +4,13 @@ import { Effect, Option, Schema } from "effect";
 import { Atom } from "effect/reactivity";
 import { uiRuntime } from "./atoms.js";
 
-const sections = ["progress", "plan", "supervision", "definitions", "settings", "conversations"] as const;
+const sections = ["task", "supervision", "definitions", "settings", "conversations"] as const;
 export type ProjectSection = typeof sections[number];
 export type Route = {page: "home" | "projects" | "activity" | "settings" | "guide"; projectId: string; main: string | null; section: ProjectSection};
-export const directoryRoute: Route = {page: "projects", projectId: "", main: null, section: "progress"};
+export const directoryRoute: Route = {page: "projects", projectId: "", main: null, section: "conversations"};
+/** The two views of one main conversation. */
+export const conversationSections: readonly ProjectSection[] = ["task", "supervision"];
+export const isConversationView = (route: Route) => route.main !== null && route.main !== "" && conversationSections.includes(route.section);
 export const homeRoute: Route = {...directoryRoute, page: "home"};
 export const projectSections: readonly ProjectSection[] = sections;
 export type NavigationGuard = (next: Route) => boolean;
@@ -18,8 +21,9 @@ export function parseRoute(hash: string): Route {
     const parts = url.pathname.split("/").filter(Boolean).map(decodeURIComponent);
     const page = parts[0];
     if (page === "projects") {
-      const section = projectSections.find(value => value === parts[2]) ?? "progress";
-      return {...directoryRoute, projectId: parts[1] ?? "", section, main: url.searchParams.get("main")};
+      const main = url.searchParams.get("main");
+      const section = projectSections.find(value => value === parts[2]) ?? (main ? "task" : "conversations");
+      return {...directoryRoute, projectId: parts[1] ?? "", section, main};
     }
     if (page === "home" || page === "activity" || page === "settings" || page === "guide") return {...directoryRoute, page};
   } catch { /* Invalid addresses return to the project directory. */ }
@@ -197,12 +201,26 @@ export const navigationAtom: Atom.Atom<Navigation> = Atom.make((get) => {
   }, next => guard.current(next), next => { rememberContext(next); current = {...current, route: next}; get.setSelf(current); });
   controller.start();
   rememberContext(current.route);
-  const changed = () => controller.historyChanged();
+  const changed = () => {
+    const before = current.route;
+    controller.historyChanged();
+    if (current.route !== before) focusAfterNavigation(before, current.route);
+  };
   window.addEventListener("hashchange", changed);
   window.addEventListener("popstate", changed);
   get.addFinalizer(() => { window.removeEventListener("hashchange", changed); window.removeEventListener("popstate", changed); });
   return current;
 });
+
+/** After a move to another page, project or conversation, focus moves to that view's visible h1; within one view it stays put. */
+export function focusAfterNavigation(previous: Route, next: Route) {
+  if (previous.page === next.page && previous.projectId === next.projectId && previous.main === next.main && next.projectId) return;
+  if (typeof requestAnimationFrame !== "function" || typeof document === "undefined") return;
+  requestAnimationFrame(() => {
+    const heading = [...document.querySelectorAll<HTMLElement>("#workspace h1")].find(element => !element.closest("[hidden]") && !element.closest(".sr-only"));
+    if (heading) { heading.tabIndex = -1; heading.focus(); }
+  });
+}
 
 export function useNavigation(): Navigation {
   return useAtomValue(navigationAtom);
@@ -216,12 +234,6 @@ export function RouteLink({to, navigate, children, ...props}: Omit<React.AnchorH
     const previous = parseRoute(window.location.hash);
     navigate(to);
     if (routeHref(parseRoute(window.location.hash)) !== routeHref(to)) return;
-    requestAnimationFrame(() => {
-      const pageChanged = previous.page !== to.page || previous.projectId !== to.projectId || !to.projectId;
-      const heading = pageChanged
-        ? [...document.querySelectorAll<HTMLElement>("#workspace h1")].find(element => !element.closest("[hidden]"))
-        : document.getElementById("project-section-heading");
-      if (heading) { heading.tabIndex = -1; heading.focus(); }
-    });
+    focusAfterNavigation(previous, to);
   }}>{children}</a>;
 }

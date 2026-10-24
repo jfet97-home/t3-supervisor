@@ -319,7 +319,7 @@ export function SupervisionSetupView({options, selected, busy, blocked, message,
     <div className="row">
       <button type="button" disabled={!canCreate} onClick={() => onSetup("create")}>Create</button>
       <button type="button" disabled={!canCreate || !checkout?.isGitRepository} onClick={() => onSetup("create_and_commit")}>Create + commit</button>
-      <button type="button" disabled={busy} onClick={onReload}>Reload setup</button>
+      <button type="button" className="quiet-button" disabled={busy} onClick={onReload}>Reload setup</button>
     </div><p role="status">{message}</p>
   </section>;
 }

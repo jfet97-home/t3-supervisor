@@ -25,7 +25,7 @@ import {
 import { admit, admittedMutation, authEpoch, authEpochAtom, draftFamily, environmentAtom, scopeKey, snapshotAtom, uiRuntime, type MutationKey } from "./atoms.js";
 import "./style.css";
 import { directoryRoute, homeRoute, RouteLink, useNavigation, type Route } from "./navigation.js";
-import { Home, ReadTime, useOverview } from "./overview.js";
+import { Home, useOverview } from "./overview.js";
 import { Icon } from "./icons.js";
 import { ProjectDefinitionsPanel } from "./project-definitions.js";
 import { StepsAndWorkflowsGuide } from "./steps-and-workflows-guide.js";
@@ -238,7 +238,7 @@ function History({
           const day = new Date(item.createdAt).toLocaleDateString();
           return <Fragment key={item.id}>
             {(index === 0 || new Date(rows[index - 1]!.createdAt).toLocaleDateString() !== day) && <h2 className="activity-day">{day}</h2>}
-            <article><div><strong>{activityTitle(item)}</strong><p>{thread?.projectId ? <RouteLink to={{...directoryRoute, projectId: thread.projectId, main: thread.id}} navigate={navigate}>{thread.title}</RouteLink> : "Supervisor"}</p><small className="muted"><time dateTime={new Date(item.createdAt).toISOString()}>{new Date(item.createdAt).toLocaleTimeString()}</time></small></div><button type="button" onClick={() => inspect(item)}>Inspect</button></article>
+            <article><div><strong>{activityTitle(item)}</strong><p>{thread?.projectId ? <RouteLink to={{...directoryRoute, projectId: thread.projectId, main: thread.id, section: "task"}} navigate={navigate}>{thread.title}</RouteLink> : "Supervisor"}</p><small className="muted"><time dateTime={new Date(item.createdAt).toISOString()}>{new Date(item.createdAt).toLocaleTimeString()}</time></small></div><button type="button" onClick={() => inspect(item)}>Inspect</button></article>
           </Fragment>;
         })}
         {!items.some(item => JSON.stringify(item).toLowerCase().includes(filter.toLowerCase())) && (
@@ -397,17 +397,14 @@ function Dashboard({onSignedOut}: {onSignedOut: () => void}) {
   }, [startPending, projectDirty, settingsDirty]);
   if (!data)
     return (
-      <main className="panel">
-        <h1>Supervisor</h1>
-        <p>
+      <div className="app-shell">
+        <aside className="app-sidebar"><span className="app-name"><img src="/app-icon.png" width="36" height="36" alt=""/><span>Supervisor<span className="app-name-detail">Keep work in view</span></span></span></aside>
+        <div className="app-body"><main id="workspace" tabIndex={-1} className="boot-state stack">
           {snapshot._tag === "Failure"
-            ? "Supervisor connection unavailable."
-            : "Connecting…"}
-        </p>
-        <button onClick={() => retry()}>
-          Retry
-        </button>
-      </main>
+            ? <><h1>Supervisor is unavailable</h1><p className="muted">The Supervisor connection could not be read. Your session is kept.</p><div><button className="primary" onClick={() => retry()}>Retry</button></div></>
+            : <><h1 className="sr-only">Supervisor</h1><div className="loading-state" role="status"><div className="skeleton"/><div className="skeleton"/><p>Connecting to Supervisor…</p></div></>}
+        </main></div>
+      </div>
     );
   const dirty = startPending || projectDirty || settingsDirty;
   const signOutNow = async () => {
@@ -424,10 +421,10 @@ function Dashboard({onSignedOut}: {onSignedOut: () => void}) {
         <nav className="app-nav" aria-label="Supervisor sections">
           {(["home", "projects", "activity", "settings"] as const).map(name => <RouteLink key={name} to={{...directoryRoute, page: name}} navigate={navigate} aria-current={view === name ? "page" : undefined}><Icon name={name}/><span>{name[0]!.toUpperCase() + name.slice(1)}</span>{name === "settings" && settingsDirty && <span className="draft-dot" aria-label="Unsaved changes" />}{name === "home" && Boolean(overview.data?.attentionTotal) && <span className="nav-count">{overview.data!.attentionTotal}</span>}</RouteLink>)}
         </nav>
-        <div className="sidebar-utility"><RouteLink to={{...directoryRoute, page: "guide"}} navigate={navigate} aria-current={view === "guide" ? "page" : undefined}><Icon name="guide"/>Guide &amp; definitions</RouteLink><p>Native work.<br/>Clearer supervision.</p></div>
+        <nav className="sidebar-utility" aria-label="Reference"><RouteLink to={{...directoryRoute, page: "guide"}} navigate={navigate} aria-current={view === "guide" ? "page" : undefined}><Icon name="guide"/>Guide</RouteLink></nav>
       </aside>
       <div className="app-body">
-      <header className="app-header"><div className="environment-context"><span className="environment-label">Supervisor instance</span><span className="connection"><span className={`dot ${data.connected ? "online" : ""}`} />{data.connected ? "T3 connected" : "Disconnected"}</span>{overview.data && <span className="small muted">Supervision {overview.data.globallyEnabled ? "on" : "off globally"}</span>}</div><div className="row"><ReadTime value={data.lastCycleAt} prefix="Catalog"/><SignOutButton blocked={dirty} onSignOut={() => void signOutNow()}/></div></header>
+      <header className="app-header"><div className="environment-context"><span className="environment-label">Supervisor instance</span><span className="connection"><span className={`dot ${data.connected ? "online" : ""}`} />{data.connected ? "T3 connected" : "Disconnected"}</span>{overview.data && <span className="small muted">Supervision {overview.data.globallyEnabled ? "on" : "off globally"}</span>}</div><div className="row"><SignOutButton blocked={dirty} onSignOut={() => void signOutNow()}/></div></header>
       <main id="workspace" tabIndex={-1}>
         {dirty && <p id="pending-changes" className="notice" role="status">Save drafts and resolve pending changes before signing out. {projectDirty && projectDraftTarget && <RouteLink to={projectDraftTarget} navigate={navigate}>Review project changes</RouteLink>}{projectDirty && settingsDirty && " · "}{settingsDirty && <RouteLink to={{...directoryRoute, page: "settings"}} navigate={navigate}>Review instance settings</RouteLink>}</p>}
         {signOutError && <p className="notice" role="alert">{signOutError}</p>}
@@ -438,7 +435,6 @@ function Dashboard({onSignedOut}: {onSignedOut: () => void}) {
         {view === "activity" && <History items={data.activity} title="Supervision activity" data={data} navigate={navigate} />}
         {settingsOpened && <div hidden={view !== "settings"}><Settings data={data} active={view === "settings"} onDirtyChange={setSettingsDirty}/></div>}
       </main>
-      <footer><span>Supervisor</span><span>Native activity · agreed plans · assessed progress</span></footer>
       </div>
     </div>
   );
@@ -455,15 +451,14 @@ function App() {
   const error = signInError || (!busy && AsyncResult.isSuccess(access) && access.value.state === "unreachable" ? "Could not reach Supervisor. Try again." : "");
   return <>
     {opened && <div hidden={!ready}><Dashboard onSignedOut={() => setToken("")} /></div>}
-    {!ready && <div className="sign-in-layout"><div className="sign-in-intro"><img src="/app-icon.png" width="76" height="76" alt=""/><h1>Keep work<br/>in view.</h1><p>Follow the task. Understand the plan. Know when to step in.</p><span>Supervisor</span></div><main className="connecting stack">
-      <h1>Open Supervisor</h1>
+    {!ready && <div className="sign-in-layout"><div className="sign-in-intro"><img src="/app-icon.png" width="76" height="76" alt=""/><p className="sign-in-tagline">Keep work<br/>in view.</p><p>Follow the task. Understand the plan. Know when to step in.</p></div><main className="connecting stack">
+      <h1>{opened ? "Sign in again" : "Sign in to Supervisor"}</h1>
       {ready === null ? <p role="status">Opening Supervisor…</p> : <form className="stack" onSubmit={async event => {
         event.preventDefault();
         const exit = await signIn(token);
         // the token is single-use: once its session is stored the form forgets it
         if (Exit.isSuccess(exit) && exit.value) setToken("");
       }}>
-        <h2>{opened ? "Sign in again" : "Sign in"}</h2>
         {opened && <p>Your open draft is kept in this tab.</p>}
         <p>Stay signed in for 30 days on this browser, until you sign out.</p>
         <p className="muted">Use a one-time token from the machine running Supervisor.</p><details><summary>How to get a sign-in token</summary><div className="stack"><p>Generate a sign-in token on the machine running T3 Supervisor:</p>

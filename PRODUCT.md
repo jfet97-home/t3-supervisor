@@ -43,6 +43,8 @@ keyboard inspection; they do not establish complete accessibility conformance.
 ## Workspace organization
 
 Home prioritizes current attention items, supervised work and recent changes. Each
-project has conversations, definitions and settings. Conversation views separate
-the task overview, plan/agreement and supervision details. A PNG coordination mark
-identifies the application without competing with work content.
+project has conversations, definitions and settings. A conversation has one Task view,
+where the task, its single plan with assessed progress, the agreement and the evidence
+live together, and a Supervision view for the Supervisor's health and controls. A pending
+proposal never resets recorded progress. A PNG coordination mark identifies the
+application without competing with work content.

@@ -3,12 +3,14 @@ import { it } from "vitest";
 import { createNavigator, directoryRoute, openProject, parseRoute, rememberContext, routeHref } from "../ui/src/navigation.js";
 
 it("deep links preserve exact opaque project and conversation identities and explicit root choice", () => {
-  const route = {...directoryRoute, projectId: "project/with ?#%", main: "mcp:chat/&?#", section: "plan" as const};
+  const route = {...directoryRoute, projectId: "project/with ?#%", main: "mcp:chat/&?#", section: "supervision" as const};
   assert.deepEqual(parseRoute(routeHref(route)), route);
-  assert.equal(parseRoute("#/projects/a/progress").main, null);
+  assert.equal(parseRoute("#/projects/a/task").main, null);
+  assert.equal(parseRoute("#/projects/a").section, "conversations");
+  assert.equal(parseRoute("#/projects/a?main=chat").section, "task");
   assert.equal(parseRoute("#/projects/a/definitions?main=").main, "");
-  assert.equal(parseRoute("#/projects/a/progress?main=deleted-thread").main, "deleted-thread");
-  assert.deepEqual(parseRoute("#/projects/%ZZ/progress"), directoryRoute);
+  assert.equal(parseRoute("#/projects/a/task?main=deleted-thread").main, "deleted-thread");
+  assert.deepEqual(parseRoute("#/projects/%ZZ/task"), directoryRoute);
 });
 
 it("remembered context is per project and cannot override an explicit deep link", () => {
@@ -21,7 +23,7 @@ it("remembered context is per project and cannot override an explicit deep link"
     assert.equal(openProject("a").main, "old");
     assert.equal(openProject("b").main, "");
     assert.equal(openProject("c").main, null);
-    assert.equal(parseRoute("#/projects/a/progress?main=new").main, "new");
+    assert.equal(parseRoute("#/projects/a/task?main=new").main, "new");
     values.set("supervisor-context:c", '{"main":3,"section":"plan"}');
     assert.equal(openProject("c").main, null);
   } finally {
@@ -65,7 +67,7 @@ it("a canceled manually entered hash retains the current route and earlier histo
   let value: {hash: string; state: unknown} = {hash: routeHref(route), state: null};
   let changed = false;
   const controller = createNavigator(route, {read: () => value, push: () => {}, replace: (hash, state) => {value = {hash, state};}, go: () => assert.fail("an untracked hash must not guess a traversal offset")}, () => false, () => {changed = true;});
-  controller.start(); value = {hash: "#/projects/b/progress?main=other", state: null};
+  controller.start(); value = {hash: "#/projects/b/task?main=other", state: null};
   controller.historyChanged();
   assert.equal(value.hash, routeHref(route));
   assert.equal(changed, false);

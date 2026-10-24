@@ -47,16 +47,19 @@ baseline single-use behaviour. The session is a random 43-character value kept i
 | `fixture-project-a` "Fixture project A" | supervised and enabled, `.t3-supervisor` present, editable `project.yaml` (1 workflow, 2 steps, unindexed `steps/fixture-unindexed.md`), model/monitoring/team settings |
 | `fixture-thread-a1` "Fixture chat A1 (supervised)" | ready binding, inferred task, Stop/Enable supervision |
 | `fixture-thread-a2` "Fixture chat A2 (access rejected)" | rejected binding: attention item and "Retry native access" |
-| `fixture-thread-a3` "Fixture chat A3 (stopped)" | excluded chat with a stop record (StopNotice, Home "Stopped supervision") |
+| `fixture-thread-a3` "Fixture chat A3 (stopped)" | excluded chat with a stop record (StopNotice in Supervision; its Home row opens Supervision) |
 | `fixture-project-b` "Fixture project B (setup)", `fixture-thread-b1` | disabled, folder missing: Enable gives `setup_required` and two checkouts (`/fixture/project-b` on `main`, Git; `/fixture/project-b-worktree`, not Git) |
 | `fixture-no-project` "Fixture No Project", `fixture-thread-n1`, `fixture-thread-n2` | No Project mode `on_request`; Start candidates on Home |
 
 Global supervision is on and global definitions are off. The baseline has an empty
 `ok` workflow page. The `journey-*` scenarios replace chat A1's task with a synthetic
-duplicate-email example using the production proposal, agreement and progress schemas.
-They cover request, proposal, agreement, work, completion, attention, stale agreement,
-and a nested/parallel plan with more than eight steps. Synthetic text starts with
-"Fixture" or "Fixture:". These scenes record no actual work or native messages.
+reconstructed packing example (a GTIN scan selects an article; quantity-label scans add pieces) using the
+production proposal, agreement and progress schemas; Home, Conversations and the Task view show the same title,
+objective and status for it.
+They cover request, proposal, acceptance, work, attention, a revised proposal awaiting acceptance,
+the accepted refinement, verification, parallel review, completion, stale acceptance and an unlinked
+earlier workflow, with more than eight steps. Synthetic text starts with "Fixture", "Fixture:" or
+"Reconstructed example:". These scenes record no actual work or native messages.
 
 ### Environments
 
@@ -270,8 +273,7 @@ read-only on native, without saving).
 **UI-STORY-06 — unmount, one poll per interval, no leaks** (also runnable read-only on
 native).
 1. Install the counter snippet, read `/__fixture/log` `polls`, then for 2 minutes
-   navigate repeatedly between Home, Projects, a chat (Overview, Plan & agreement,
-   Supervision), Definitions, Settings and Activity. End on Home.
+   navigate repeatedly between Home, Projects, a chat (Task, Supervision), Definitions, Settings and Activity. End on Home.
 2. Record `polls[].intervalsMs` (snapshot about 5000 ms with no doubled entries; the others
    about 30000 ms while visible) and `window.__fixtureCounts` (listener add/remove balance
    per type, live intervals). Hide the tab (switch tabs) for 60 s and record the cadence.
@@ -296,7 +298,7 @@ native).
    after the reload.
 4. Stop/Enable: "Fixture chat A1", then "Supervision", then "Stop supervision", then
    "Enable supervision". Open "Fixture chat A3 (stopped)" and use the StopNotice "Enable
-   supervision", and Home's "Stopped supervision" "Review and enable". On Settings,
+   supervision" (Home's row for that chat opens the same Supervision view). On Settings,
    "Global supervision" Disable and Enable. Optionally arm `mutation-dropped` or
    `editor-uncertain` with `?path=/api/guidance/project-supervisor/chat-supervision` and
    record "The change could not be confirmed. The saved state is shown."

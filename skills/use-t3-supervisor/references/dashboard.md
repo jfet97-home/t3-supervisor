@@ -2,13 +2,12 @@
 
 The main navigation is Home, Projects, Activity and Settings, with Guide as a utility link. Home prioritizes current attention, supervised conversations with their objectives and freshness, then recent activity. Historical activity is not an unresolved-alert count. Native activity and Supervisor assessment remain separate. Unavailable projects and failed refreshes report limited coverage; retained data does not establish current health.
 
-Projects has Conversations, Definitions and Project settings. Open a conversation for Overview, Plan & agreement and Supervision. A project remembers its last context in this browser tab. Hash addresses preserve project, conversation/checkout and view; an explicit address wins over remembered state. Definitions requires an explicit checkout, including project root. Switching project views retains that checkout draft. Unavailable selections never silently change checkout.
+Projects has Conversations, Definitions and Project settings. Open a conversation for Task and Supervision. A project remembers its last context in this browser tab. Hash addresses preserve project, conversation/checkout and view; an explicit address wins over remembered state. Definitions requires an explicit checkout choice: Project root or the checkout a main conversation works in; once chosen, the Checkout control shows its path and changes it. Switching project views retains that checkout draft. Unavailable selections never silently change checkout.
 
-- Overview shows the current task, agreement and assessment, current attention, workflow records and connected conversations. A current assessment must match both the task identity and source; retained unlinked records are labeled. Failed, loading and incomplete reads remain distinct from absence.
-- Plan & agreement shows proposals, acceptance, requirements and definition-change review.
-- Supervision shows the bound Supervisor, team, assignments, monitoring details and explicit access recovery. Stop/Enable supervision is scoped to the selected chat and also available in Overview.
+- Task is the one workspace for the conversation's task: its statement, current outcome and current steps, one plan, and the agent/Supervisor agreement. Step statuses come only from the live workflow bound to the task; a proposed update never resets them. Each step shows its plan note, any accepted or proposed plan note, and the Supervisor assessment recorded for that step. The agreement panel states the proposal and the agent's acceptance once, with the acceptance record, plan provenance (definitions, requirements, revision) and task interpretation in disclosures; a pending update lists its actual changes there. Definition-change review and record diagnostics appear as attention above the plan. Evidence and history holds every Supervisor record, external contributions, native lifecycle, earlier acceptances and unlinked earlier workflows. A current assessment must match both the task identity and source. Failed, loading and incomplete reads remain distinct from absence.
+- Supervision shows the bound Supervisor, team, assignments, monitoring details and explicit access recovery. Stop/Enable supervision is scoped to the selected chat; the Task view links here when recovery is needed.
 - Definitions shows read validity, effective requirements, reusable steps/workflows, collapsible raw sources and the local project.yaml editor.
-- Project settings contains the supervision switch, first setup, model defaults, monitoring defaults, helper limit and the off-by-default **Supervise conversations created by agents** checkbox. It works without a selected conversation. That checkbox lets the agent that launched an ordinary conversation through T3's MCP server have its later requests there interpreted and negotiated, still attributed to that agent; Supervisor conversations, helpers and delegated child tasks are never included, and Start, Stop and definition approval remain human-only.
+- Project settings first states which conversations are supervised (the supervision switch, first setup and the off-by-default **Supervise conversations created by agents** checkbox), then the defaults for new Supervisors (model, monitoring, helper limit). It works without a selected conversation. That checkbox lets the agent that launched an ordinary conversation through T3's MCP server have its later requests there interpreted and negotiated, still attributed to that agent; Supervisor conversations, helpers and delegated child tasks are never included, and Start, Stop and definition approval remain human-only.
 
 Instance Settings contains the master switch, global definitions, exclusions and
 connection information. Advanced setup help is collapsed. Guide explains the file
@@ -103,11 +102,11 @@ before reconsideration.
 
 ## Current workflow progress
 
-Select a main conversation to inspect current main and child workflow state in the
-Overview live progress section. This is separate from task proposals and historical accepted
-plans. The view includes native/delegated lineage and lifecycle, current semantic
-steps, overlapping parent contributions, recent Supervisor assessment notes and
-supporting activity links. Missing child workflows and unknown lifecycle remain
+Select a main conversation to inspect current main and child workflow state in its
+Task view. Step statuses come only from the current workflow bound to the task; proposals
+and earlier acceptances never change them. The view includes native/delegated lineage and
+lifecycle (Connected work), current semantic steps with their step-level Supervisor
+records, overlapping parent contributions and supporting activity links (Evidence and history). Missing child workflows and unknown lifecycle remain
 visible without synthesizing successful execution. Load further pages when offered.
 
 Refresh reads state only: it does not wake a chat, save a workflow or accept a plan.
