@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { runInNewContext } from "node:vm";
 import { it } from "@effect/vitest";
@@ -95,4 +96,23 @@ it("preserves explicit manual channels and exact-source checks", async () => {
     assert.equal((await execute({ ...fixture(), event: "workflow_dispatch", channel })).channel, channel);
   }
   await assert.rejects(execute({ ...fixture(), event: "workflow_dispatch", comparison: "diverged" }), /not on main/u);
+});
+
+it("uses distinct platform manifest digests so Docker's legacy store cannot collide on the shared index", () => {
+  const smoke = workflow.jobs.release.steps.find((step: { name?: string }) => step.name === "Verify both published image variants by immutable digest").run as string;
+  const selector = /variant=\$\(jq -er --arg architecture [^\n]+ '([^']+)' release\/image-manifest\.json\)/u.exec(smoke)?.[1];
+  assert.ok(selector);
+  const variants = [
+    { platform: { os: "linux", architecture: "amd64" }, digest: `sha256:${"1".repeat(64)}` },
+    { platform: { os: "linux", architecture: "arm64" }, digest: `sha256:${"2".repeat(64)}` },
+    { platform: { os: "unknown", architecture: "unknown" }, digest: `sha256:${"3".repeat(64)}` },
+  ];
+  const select = (architecture: string, manifests = variants) => execFileSync("jq", ["-er", "--arg", "architecture", architecture, selector], {
+    input: JSON.stringify({ digest: `sha256:${"0".repeat(64)}`, manifests }), encoding: "utf8", stdio: "pipe",
+  }).trim();
+  assert.equal(select("amd64"), variants[0]!.digest);
+  assert.equal(select("arm64"), variants[1]!.digest);
+  assert.throws(() => select("arm64", variants.slice(0, 1)));
+  assert.throws(() => select("amd64", [...variants, variants[0]!]));
+  assert.throws(() => select("amd64", [{ ...variants[0]!, digest: "invalid" }]));
 });
