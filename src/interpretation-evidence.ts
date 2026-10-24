@@ -18,6 +18,8 @@ export const InterpretationSubmissionEvidence = Schema.Struct({
   runId: Text,
   argumentsHash: Hash,
   sourcePin: InterpretationSourcePin,
+  // the authorization revision under which finalization applied this plan; immutable while the plan is retained
+  scopeRevision: Schema.optional(Hash),
   // the canonical digest of the submitted plan; null when the submission carries none (bare Start, not needed, no workflow)
   planDigest: Schema.NullOr(Hash),
 });

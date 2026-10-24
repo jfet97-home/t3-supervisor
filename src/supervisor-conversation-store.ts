@@ -1,3 +1,5 @@
+import { dashboardInvalidation } from "./dashboard-updates.js";
+import { projectKeys } from "./dashboard-events.js";
 import { Context, Data, Effect, Layer, Schema } from "effect";
 import type { SqlError } from "effect/sql";
 import { GuidanceDb, untracedSql } from "./db.js";
@@ -289,6 +291,7 @@ const prunable = (request: ConversationRequest): boolean =>
 
 const makeConversationStore = Effect.gen(function* () {
   const db = yield* GuidanceDb;
+  const invalidate = yield* dashboardInvalidation(db);
   const ids = yield* SupervisorIds;
 
   // the tables and the review_misses column addition, once, in the baseline constructor's order
@@ -304,8 +307,11 @@ const makeConversationStore = Effect.gen(function* () {
       Effect.map((requests) => requests.filter((request) => !supervisorThreadId || request.supervisorThreadId === supervisorThreadId)));
   const readPending = (projectId: string, supervisorThreadId: string) => Effect.map(readRequests(projectId, supervisorThreadId),
     (requests) => requests.find((request) => pendingStates.includes(request.state)) ?? null);
-  const writeRequest = (request: ConversationRequest) =>
-    db`INSERT INTO supervisor_conversation_requests VALUES(${request.id},${request.projectId},${JSON.stringify(request)},${request.createdAt}) ON CONFLICT(id) DO UPDATE SET document=excluded.document`;
+  const writeRequest = (request: ConversationRequest) => Effect.gen(function* () {
+    const [old] = yield* db`SELECT document FROM supervisor_conversation_requests WHERE id=${request.id}`;
+    yield* db`INSERT INTO supervisor_conversation_requests VALUES(${request.id},${request.projectId},${JSON.stringify(request)},${request.createdAt}) ON CONFLICT(id) DO UPDATE SET document=excluded.document`;
+    yield* invalidate(projectKeys(request.projectId), old?.document ?? null, request);
+  });
   const readIntroduction = (taskId: string) => db`SELECT document FROM supervisor_workflow_introductions WHERE task_id=${taskId}`.pipe(
     Effect.flatMap(([row]) => row === undefined ? Effect.succeed(null) : decodeIntroductionRow(row)));
   const readCandidate = (taskId: string, proposalId: string) =>
@@ -350,8 +356,11 @@ const makeConversationStore = Effect.gen(function* () {
   const introduction = (taskId: string) => guidanceSql(readIntroduction(taskId));
   const introductions = (projectId: string) => guidanceSql(db`SELECT document FROM supervisor_workflow_introductions WHERE project_id=${projectId}`.pipe(
     Effect.flatMap(Effect.forEach((row) => decodeIntroductionRow(row)))));
-  const saveIntroduction = (value: WorkflowIntroduction) => guidanceSql(Effect.asVoid(
-    db`INSERT INTO supervisor_workflow_introductions VALUES(${value.taskId},${value.projectId},${JSON.stringify(value)}) ON CONFLICT(task_id) DO UPDATE SET document=excluded.document`));
+  const saveIntroduction = (value: WorkflowIntroduction) => guidanceSql(Effect.gen(function* () {
+    const previous = yield* readIntroduction(value.taskId);
+    yield* db`INSERT INTO supervisor_workflow_introductions VALUES(${value.taskId},${value.projectId},${JSON.stringify(value)}) ON CONFLICT(task_id) DO UPDATE SET document=excluded.document`;
+    yield* invalidate(projectKeys(value.projectId, value.threadId), previous, value);
+  }));
 
   // CC-GDB-IMPLICIT: the unsent check and the delete commit together
   const removeUnsentIntroduction = (taskId: string) => guidanceSql(db.withTransaction(Effect.gen(function* () {

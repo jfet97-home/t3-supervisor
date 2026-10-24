@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { it } from "@effect/vitest";
-import { Effect, Scheduler } from "effect";
+import { Effect, Scheduler, Stream } from "effect";
+import { DashboardUpdates } from "../src/dashboard-updates.js";
 import { GuidanceStoreError, guidanceTransaction } from "../src/guidance-sql.js";
 import {
   collectSupervisorActivity,
@@ -1263,3 +1264,20 @@ it.effect("the layer adds the activation, capacity, read-item and active columns
   assert.deepEqual(observed.itemColumns, ["read_item_id", "active"]);
   assert.equal(observed.state.sourceOrdinal, 3);
 }));
+
+it.effect("a repeated frozen acknowledgement keeps its result but emits no dashboard invalidation", () => {
+  const hints: unknown[] = [];
+  const updates = DashboardUpdates.of({publish: keys => Effect.sync(() => {hints.push(keys);}), stream: Stream.never});
+  return withStore(monitor => Effect.gen(function* () {
+    const projection = makeProjection({events: Array.from({length: 10}, (_, index) => event(`hint-${index}`))});
+    yield* monitor.observe({projectId, threadId, sourceOrdinal: 1, projection, now});
+    const batch = yield* monitor.select(projectId, defaultMonitoringSettings, now, null);
+    assert.ok(batch);
+    hints.length = 0;
+    assert.equal((yield* monitor.acknowledge(batch, now)).acknowledged, 10);
+    assert.equal(hints.length, 1, "new evidence review invalidates the dashboard after commit");
+    hints.length = 0;
+    assert.equal((yield* monitor.acknowledge(batch, now + 1)).acknowledged, 10);
+    assert.equal(hints.length, 0, "an acknowledgement replay is bookkeeping only");
+  })).pipe(Effect.provideService(DashboardUpdates, updates));
+});

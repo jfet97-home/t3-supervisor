@@ -2,24 +2,21 @@ import assert from "node:assert/strict";
 import { beforeAll, it } from "@effect/vitest";
 import { Effect, Exit, Option } from "effect";
 import { AsyncResult } from "effect/reactivity";
-import { TestClock } from "effect/testing";
 import { OverviewRangeError, readOverviewPages, type DashboardOverviewInfo } from "../src/dashboard-overview.js";
-import { clockedRegistry, scopedRegistry } from "./support/g7-page.js";
-import { abortOf, held, json, makeBrowser, until, type SentRequest } from "./support/g7-browser.js";
+import { scopedRegistry } from "./support/g7-page.js";
+import { abortOf, held, json, liveSleep, makeBrowser, until, type SentRequest } from "./support/g7-browser.js";
 
 // target regressions of the work overview over atoms (CT-UI-OVERVIEW-01): the loaded range and load-more, the retained
-// last read and its message, polling only while enabled and visible, and interruption on deactivation. the waits for a
-// read are bounded on the live clock; the polling test steps the poll interval on the page runtime's test clock
+// last read and its message, change subscriptions only while enabled and visible, and interruption on deactivation. the waits for a
+// read are bounded on the live clock; the stream tests drive actual decoded invalidation hints
 
 const browser = makeBrowser();
 type Overview = typeof import("../ui/src/overview.js");
 let ui: Overview;
-let atoms: typeof import("../ui/src/atoms.js");
 
 beforeAll(() => Effect.gen(function* () {
   yield* browser.install;
   browser.local.set("supervisor-session", "session-1");
-  atoms = yield* Effect.promise(() => import("../ui/src/atoms.js"));
   ui = yield* Effect.promise(() => import("../ui/src/overview.js"));
 }));
 
@@ -33,13 +30,12 @@ const offsets = (requests: ReadonlyArray<SentRequest>) => requests.map((request)
 const loaded = (result: AsyncResult.AsyncResult<DashboardOverviewInfo, unknown>) => Option.match(AsyncResult.value(result), {onNone: () => 0, onSome: (value) => value.work.length});
 
 it.effect("CT-UI-OVERVIEW-01 the overview reads 100 conversations, load-more adds 100 keeping prior pages, a failure keeps the last read and its message, and deactivation interrupts the read in flight", () => Effect.gen(function* () {
-  assert.equal(ui.overviewRefreshMillis, 30_000);
   browser.sent.length = 0;
   browser.state.reply = (request) => json(page(Number(request.search.get("offset"))));
   const registry = yield* scopedRegistry();
-  const model = ui.makeOverview(60_000);
+  const model = ui.makeOverview();
   const seen: Array<AsyncResult.AsyncResult<DashboardOverviewInfo, unknown>> = [];
-  const stop = registry.subscribe(model.polled, (value) => { seen.push(value); }, { immediate: true });
+  const stop = registry.subscribe(model.live, (value) => { seen.push(value); }, { immediate: true });
   assert.equal(reads().length, 0, "nothing is read before the overview is enabled");
   registry.set(model.enabled, true);
   yield* until(registry, model.read, (result) => AsyncResult.isSuccess(result) && !result.waiting, "the first read");
@@ -87,35 +83,31 @@ it.effect("CT-UI-OVERVIEW-01 the overview reads 100 conversations, load-more add
   registry.dispose();
 }), { timeout: 10_000 });
 
-it.effect("the overview polls only while enabled and visible", () => Effect.gen(function* () {
+it.effect("the overview refreshes its loaded prefix on coalesced hints and retains hidden and disabled reads", () => Effect.gen(function* () {
   browser.sent.length = 0;
-  browser.state.reply = (request) => json(page(Number(request.search.get("offset"))));
-  const registry = yield* clockedRegistry(atoms.uiRuntime);
-  const model = ui.makeOverview(20);
+  browser.state.reply = request => json(page(Number(request.search.get("offset"))));
+  const registry = yield* scopedRegistry();
+  const model = ui.makeOverview();
   registry.set(model.enabled, true);
-  const stop = registry.subscribe(model.polled, () => undefined, { immediate: true });
-  // two intervals pass on the page runtime's clock
-  yield* TestClock.adjust("40 millis");
-  yield* browser.request(() => reads().length >= 3, "two polls after the first read");
-  browser.state.visibility = "hidden";
-  yield* until(registry, model.read, (result) => !result.waiting, "the last visible read");
-  const hidden = reads().length;
-  // six intervals pass while hidden
-  yield* TestClock.adjust("120 millis");
-  assert.equal(reads().length, hidden, "no polling while hidden");
-  browser.state.visibility = "visible";
-  yield* TestClock.adjust("20 millis");
-  yield* browser.request(() => reads().length > hidden, "polling resumes when visible");
-  stop();
-  // the shell mounts only the read while the overview is disabled
-  registry.set(model.enabled, false);
-  const stopRead = registry.subscribe(model.read, () => undefined, { immediate: true });
-  const paused = reads().length;
-  yield* TestClock.adjust("120 millis");
-  assert.equal(reads().length, paused, "no polling while disabled");
-  stopRead();
+  const stop = registry.subscribe(model.live, () => undefined, {immediate: true});
+  yield* until(registry, model.read, result => AsyncResult.isSuccess(result) && !result.waiting, "first page");
+  yield* browser.request(request => request.path === "/api/events", "stream");
+  registry.set(model.more, true); registry.refresh(model.read);
+  yield* until(registry, model.read, result => loaded(result) === 200 && !result.waiting, "loaded prefix");
+  browser.sent.length = 0;
+  browser.hint(["overview"]); browser.hint(["overview"]);
+  yield* browser.request(() => reads().length === 2, "one prefix refresh");
+  yield* until(registry, model.read, result => !result.waiting, "refresh settled");
+  assert.deepEqual(offsets(reads()), [["0", "100"], ["100", "100"]]);
+  browser.visibility("hidden");
+  browser.sent.length = 0;
+  browser.hint(["overview"]);
+  yield* liveSleep("80 millis");
+  assert.equal(reads().length, 0);
+  browser.visibility("visible");
+  stop(); registry.set(model.enabled, false);
   registry.dispose();
-}), { timeout: 10_000 });
+}), {timeout: 10_000});
 
 it.effect("the Effect range reader keeps the loaded range, restarts a reordered prefix once and rejects incoherent pages", () => Effect.gen(function* () {
   const calls: number[] = [];

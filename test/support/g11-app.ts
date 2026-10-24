@@ -1,3 +1,4 @@
+import { DashboardUpdates } from "../../src/dashboard-updates.js";
 import assert from "node:assert/strict";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { join } from "node:path";
@@ -143,7 +144,7 @@ export const runApp = (config: SupervisorConfig, t3: T3ClientShape, catalog: () 
   // store on its own client and the ownership set
   const process = Layer.mergeAll(Layer.succeed(Configuration, config), SupervisorOwnership.layer,
     ThreadPolicyStore.layer.pipe(Layer.provide(policyDbLayer(config.dataDirectory)), Layer.provide(Layer.succeed(Configuration, config))));
-  const application = Effect.scoped(runGuidanceApplication(config, source, t3, () => Deferred.doneUnsafe(ready, Effect.void))).pipe(
+  const application = Effect.scoped(runGuidanceApplication(config, source, t3, () => Deferred.doneUnsafe(ready, Effect.void))).pipe(Effect.provide(DashboardUpdates.layer)).pipe(
     Effect.provide(Layer.mergeAll(NativeTransportLive, process).pipe(Layer.provideMerge(NodeFileSystem.layer))),
     Effect.onExit((exit) => Exit.isFailure(exit) ? Deferred.fail(ready, new Error("the application stopped before it was ready")) : Effect.void));
   const fiber = yield* Effect.forkDetach(observed ? Effect.provideService(application, Clock.Clock, observed) : application);

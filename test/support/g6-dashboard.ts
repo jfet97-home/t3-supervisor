@@ -1,3 +1,4 @@
+import { DashboardUpdates } from "../../src/dashboard-updates.js";
 import assert from "node:assert/strict";
 import { NodeCrypto, NodeFileSystem } from "@effect/platform-node";
 import { Context, Effect, FileSystem, Layer, Redacted } from "effect";
@@ -28,12 +29,12 @@ export const dashboard = (options: GuidanceUiOptions = {}) => Effect.gen(functio
   // the guidance store, and the process's policy store and ownership set, in the caller's scope
   const stores = yield* Layer.build(Layer.mergeAll(GuidanceStore.layer.pipe(Layer.provideMerge(guidanceDbLayer(directory)), Layer.provide(SupervisorIds.layer)),
     Layer.effect(ThreadPolicyStore, makeThreadPolicyStore({excludedThreadIds: config.excludedThreadIds})).pipe(Layer.provide(policyDbLayer(directory))),
-    SupervisorOwnership.layer).pipe(Layer.provide(Layer.mergeAll(NodeFileSystem.layer, NodeCrypto.layer))));
+    SupervisorOwnership.layer).pipe(Layer.provide(Layer.mergeAll(NodeFileSystem.layer, NodeCrypto.layer, DashboardUpdates.layer))));
   const runtime = yield* GuidanceRuntime.make(config, {catalog: () => Effect.succeed({projects: [], threads: []})}).pipe(Effect.provide(stores));
   const context = yield* Layer.build(GuidanceUi.layer(config, options).pipe(
     Layer.provide(Layer.mergeAll(ServiceAuth.layer(directory), Layer.succeed(GuidanceRuntime, runtime), workflowMcpLayer({} as WorkflowWriteController["Service"]),
       Layer.succeedContext(stores))),
-    Layer.provide(Layer.mergeAll(NodeFileSystem.layer, NodeCrypto.layer)),
+    Layer.provide(Layer.mergeAll(NodeFileSystem.layer, NodeCrypto.layer, DashboardUpdates.layer)),
   ));
   const {port} = Context.get(context, GuidanceUi);
   return {directory, port, origin: `http://127.0.0.1:${port}`};

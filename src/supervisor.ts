@@ -1,3 +1,4 @@
+import { DashboardUpdates } from "./dashboard-updates.js";
 import { NodeCrypto, NodeFileSystem, NodeHttpServer } from "@effect/platform-node";
 import { Cause, Clock, Context, Crypto, Deferred, Effect, Fiber, FileSystem, Layer, Redacted, Schedule, Schema, SubscriptionRef } from "effect";
 import { FetchHttpClient, HttpClient, HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
@@ -165,7 +166,7 @@ export type NativeTransport = NativeEnvelope | Crypto.Crypto | HttpClient.HttpCl
 
 const catalog = Layer.unwrap(SupervisorConfig.useSync((config) => makeStore(config.dataDirectory)));
 
-export type SupervisorServices = SupervisorConfig | SupervisorStatusRef | Store | T3Client | ThreadPolicyStore | SupervisorOwnership | NativeTransport | FileSystem.FileSystem;
+export type SupervisorServices = DashboardUpdates | SupervisorConfig | SupervisorStatusRef | Store | T3Client | ThreadPolicyStore | SupervisorOwnership | NativeTransport | FileSystem.FileSystem;
 
 // the process's thread-policy store on its own PolicyDb client (thread-settings.sqlite3), seeded from the configured excluded chats
 const threadPolicy = Layer.unwrap(SupervisorConfig.useSync((config) => ThreadPolicyStore.layer.pipe(Layer.provide(policyDbLayer(config.dataDirectory)))));
@@ -178,6 +179,7 @@ export const SupervisorServicesLive = Layer.mergeAll(catalog, SupervisorStatusRe
   Layer.provideMerge(NativeTransportLive),
   Layer.provideMerge(threadPolicy),
   Layer.provideMerge(SupervisorOwnership.layer),
+  Layer.provideMerge(DashboardUpdates.layer),
 );
 
 // the server graph over the current ConfigProvider: the configuration, the node file system and the root services

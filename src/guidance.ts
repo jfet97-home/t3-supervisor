@@ -1,4 +1,5 @@
 import { Clock, Context, Effect, Layer, SubscriptionRef } from "effect";
+import { DashboardUpdates } from "./dashboard-updates.js";
 import { resolve } from "node:path";
 import { SupervisorConfig as Configuration } from "./config.js";
 import { GuidanceDb } from "./db.js";
@@ -52,7 +53,14 @@ const makeGuidanceRuntime = (config: SupervisorSettings, source: Pick<StoreShape
   const state = yield* SubscriptionRef.make<RuntimeState>({
     descriptor: null, lastCycleAt: null, connected: false, coverage: "Starting", startedAt: yield* Clock.currentTimeMillis,
   });
-  const update = (change: Partial<RuntimeState>) => SubscriptionRef.update(state, (current) => ({ ...current, ...change }));
+  const observer = yield* Effect.serviceOption(DashboardUpdates);
+  const update = (change: Partial<RuntimeState>) => Effect.gen(function* () {
+    const previous = yield* SubscriptionRef.get(state);
+    const next = {...previous, ...change};
+    yield* SubscriptionRef.set(state, next);
+    if (observer._tag === "Some" && (previous.connected !== next.connected || previous.coverage !== next.coverage ||
+      JSON.stringify(previous.descriptor) !== JSON.stringify(next.descriptor))) yield* observer.value.publish(["snapshot"]);
+  });
   const snapshot = Effect.gen(function* () {
     const catalog = yield* source.catalog();
     const current = yield* SubscriptionRef.get(state);

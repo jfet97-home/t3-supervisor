@@ -99,6 +99,117 @@ it.live("discussion remains quiet; later grants use distinct commands through th
   assert.equal(f.dispatches().length, 5, "four requester interpretations and one introduction; no repeated operative contact or routine check-ins");
 }));
 
+const heldPlan = Effect.gen(function* () {
+  const f = yield* makeWorkflowFixture();
+  const source = f.projections.get(sourceThreadId)!;
+  source.runtimeRequests = [];
+  source.thread.runtimeMode = "full-access"; source.thread.interactionMode = "default";
+  const controller = yield* f.makeSupervisor(true);
+  yield* controller.cycle;
+  const first = (yield* f.task())!;
+  const root = f.projections.get(first.supervisorThreadId)!;
+  root.thread.runtimeMode = "full-access"; root.thread.interactionMode = "plan";
+  yield* submitAndComplete(f, controller, first, research(sourceMessageId));
+  yield* controller.cycle;
+  const retained = (yield* f.task())!;
+  assert.ok(retained.workflow?.plan);
+  assert.equal(f.dispatches().filter(call => call.payload.threadId === sourceThreadId).length, 0, "native modes hold the first introduction");
+  assert.match((yield* controller.conversation.requests.introduction(first.id))?.error ?? "", /native modes/u);
+  root.thread.interactionMode = "default";
+  return {f, source, controller, first, root, retained};
+});
+
+it.effect("same-scope pause and resume before first contact retain the plan's native evidence", () => Effect.gen(function* () {
+  const {f, source, controller, first, retained} = yield* heldPlan;
+  appendSourceMessage(source, "pause-before-contact", 2, "Wait, discuss this before starting.");
+  yield* controller.cycle;
+  yield* submitAndComplete(f, controller, (yield* f.task())!, {objective: draft.objective, reason: "Pause before contact", sourceMessageIds: ["pause-before-contact"], supervision: "needed", workflow: null,
+    conversation: decision({intent: "pause"})});
+  yield* controller.cycle;
+  assert.equal((yield* f.task())!.conversation!.authorization!.state, "paused");
+  assert.equal(f.dispatches().filter(call => call.payload.threadId === sourceThreadId).length, 0);
+  appendSourceMessage(source, "resume-before-contact", 3, "Resume the same report; do not fix or deploy.");
+  yield* controller.cycle;
+  yield* submitAndComplete(f, controller, (yield* f.task())!, {...research("resume-before-contact"), workflow: null,
+    conversation: decision({intent: "resume", scope: "same", outcome: "Report the export retry race", limits: ["Do not fix or deploy"], sourceMessageIds: ["resume-before-contact"]})});
+  yield* controller.conversation.retry(projectId, first.supervisorThreadId);
+  yield* controller.cycle;
+  const resumed = (yield* f.task())!;
+  assert.equal(resumed.id, retained.id);
+  assert.equal(resumed.workflowProposalId, retained.workflowProposalId);
+  assert.deepEqual(resumed.interpretationEvidence, retained.interpretationEvidence);
+  assert.deepEqual(resumed.conversation!.authorization!.scopeSources, retained.conversation!.authorization!.scopeSources);
+  assert.equal(resumed.interpretationEvidence?.kind === "interpretation_submission" && resumed.interpretationEvidence.scopeRevision,
+    resumed.conversation!.authorization!.scopeRevision);
+  assert.equal(f.dispatches().filter(call => call.payload.threadId === sourceThreadId).length, 1,
+    JSON.stringify(yield* controller.conversation.requests.introduction(first.id)));
+  yield* controller.cycle;
+  assert.equal(f.dispatches().filter(call => call.payload.threadId === sourceThreadId).length, 1, "retained evidence permits one introduction only");
+}));
+
+it.effect("retained first-contact proof rejects another scope, missing revision, altered grant, rolled-back tool and a newer requester", () => Effect.gen(function* () {
+  for (const variant of ["changed_scope", "missing_revision", "grant_edited", "native_rollback", "newer_requester"] as const) {
+    const {f, source, controller, first, root, retained} = yield* heldPlan;
+    const changedScope = variant === "changed_scope";
+    appendSourceMessage(source, "later-request", 2, changedScope ? "Instead, report deployment health; do not fix or deploy." : "How is the same investigation going?");
+    yield* controller.cycle;
+    yield* submitAndComplete(f, controller, (yield* f.task())!, {objective: changedScope ? "Report deployment health" : draft.objective,
+      reason: "Consider the later requester", sourceMessageIds: ["later-request"], supervision: "not_needed", workflow: null,
+      conversation: changedScope ? decision({intent: "authorize", outcome: "Report deployment health", limits: ["Do not fix or deploy"], sourceMessageIds: [sourceMessageId, "later-request"]}) : decision()});
+    if (changedScope) {
+      yield* controller.cycle;
+      const changed = (yield* f.task())!;
+      assert.notEqual(changed.conversation!.authorization!.scopeRevision, retained.conversation!.authorization!.scopeRevision);
+      assert.deepEqual(changed.interpretationEvidence, retained.interpretationEvidence, "the historical plan remains reviewable");
+      appendSourceMessage(source, "resume-changed-scope", 3, "Proceed with that deployment report; do not fix or deploy.");
+      yield* controller.cycle;
+      yield* submitAndComplete(f, controller, (yield* f.task())!, {...research("resume-changed-scope"), objective: "Report deployment health", workflow: null,
+        conversation: decision({intent: "resume", scope: "same", outcome: "Report deployment health", limits: ["Do not fix or deploy"], sourceMessageIds: ["resume-changed-scope"]})});
+    }
+    if (variant === "missing_revision") {
+      const task = (yield* f.task())!;
+      const evidence = task.interpretationEvidence;
+      assert.ok(evidence?.kind === "interpretation_submission");
+      yield* f.store.saveTask({...task, interpretationEvidence: {...evidence, scopeRevision: undefined}});
+    }
+    if (variant === "grant_edited") source.messages[0]!.text = "The original grant was withdrawn.";
+    if (variant === "native_rollback") root.turnItems!.find(item => item.id === (retained.interpretationEvidence?.kind === "interpretation_submission" ? retained.interpretationEvidence.itemId : ""))!.status = "rolled_back";
+    if (variant === "newer_requester") appendSourceMessage(source, "newer-pause", 3, "Wait; do not start.");
+    yield* controller.conversation.retry(projectId, first.supervisorThreadId);
+    yield* controller.cycle;
+    assert.equal(f.dispatches().filter(call => call.payload.threadId === sourceThreadId).length, 0, variant);
+  }
+}));
+
+it.effect("a later changed scope stamps its own plan before a same-scope pause and resume", () => Effect.gen(function* () {
+  const {f, source, controller, first, root, retained} = yield* heldPlan;
+  root.thread.interactionMode = "plan";
+  appendSourceMessage(source, "second-grant", 2, "Investigate deployment recovery instead; report without fixing or deploying.");
+  yield* controller.cycle;
+  yield* submitAndComplete(f, controller, (yield* f.task())!, {...research("second-grant"), objective: "Report deployment recovery",
+    conversation: decision({intent: "authorize", outcome: "Report deployment recovery", limits: ["Do not fix or deploy"], sourceMessageIds: ["second-grant"]})});
+  yield* controller.cycle;
+  const second = (yield* f.task())!;
+  assert.notEqual(second.conversation!.authorization!.scopeRevision, retained.conversation!.authorization!.scopeRevision);
+  assert.notEqual(second.workflowProposalId, retained.workflowProposalId);
+  assert.equal(second.interpretationEvidence?.kind === "interpretation_submission" && second.interpretationEvidence.scopeRevision,
+    second.conversation!.authorization!.scopeRevision);
+  root.thread.interactionMode = "default";
+  appendSourceMessage(source, "second-pause", 3, "Wait, discuss this first.");
+  yield* controller.cycle;
+  yield* submitAndComplete(f, controller, (yield* f.task())!, {objective: "Report deployment recovery", reason: "Pause the second scope", sourceMessageIds: ["second-pause"], supervision: "needed", workflow: null,
+    conversation: decision({intent: "pause"})});
+  yield* controller.cycle;
+  appendSourceMessage(source, "second-resume", 4, "Resume that deployment report; do not fix or deploy.");
+  yield* controller.cycle;
+  yield* submitAndComplete(f, controller, (yield* f.task())!, {...research("second-resume"), objective: "Report deployment recovery", workflow: null,
+    conversation: decision({intent: "resume", scope: "same", outcome: "Report deployment recovery", limits: ["Do not fix or deploy"], sourceMessageIds: ["second-resume"]})});
+  yield* controller.conversation.retry(projectId, first.supervisorThreadId);
+  yield* controller.cycle;
+  assert.equal(f.dispatches().filter(call => call.payload.threadId === sourceThreadId).length, 1);
+  assert.equal((yield* f.task())!.workflowProposalId, second.workflowProposalId);
+}));
+
 it.effect("a concurrent dispatch under the same task id is never overwritten by discovery", () => Effect.gen(function* () {
   const f = yield* makeWorkflowFixture();
   const controller = yield* f.makeSupervisor();

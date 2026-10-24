@@ -10,7 +10,7 @@ import {
   useAtomSet,
   useAtomValue,
 } from "@effect/atom-react";
-import { Effect, Exit, Option, Schedule, Schema, Stream } from "effect";
+import { Effect, Exit, Option, Schema, Stream } from "effect";
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 import { AsyncResult, Atom, AtomRegistry } from "effect/reactivity";
 import type {
@@ -22,7 +22,7 @@ import {
   ApiClient,
   sessionHttpClient,
 } from "./api.js";
-import { admit, admittedMutation, authEpoch, authEpochAtom, draftFamily, environmentAtom, scopeKey, snapshotAtom, uiRuntime, type MutationKey } from "./atoms.js";
+import { admit, admittedMutation, authEpoch, authEpochAtom, draftFamily, environmentAtom, scopeKey, snapshotAtom, refreshOnDashboardChange, uiRuntime, type MutationKey } from "./atoms.js";
 import { themeAtom, ThemeSelector } from "./theme.js";
 import "./style.css";
 import { directoryRoute, homeRoute, RouteLink, useNavigation, type Route } from "./navigation.js";
@@ -35,12 +35,8 @@ import { idleControlActivity, SupervisionControlPanel, GlobalDefinitionsControlP
 // a new operation id for one user action
 const newOperationId = Effect.sync(() => crypto.randomUUID());
 
-export const snapshotRefreshMillis = 5_000;
-// the snapshot refreshes on every interval of the page runtime's clock while it is mounted, also while the page is
-// hidden, as the baseline interval did; a failed refresh keeps the last successful snapshot
-export const snapshotPoll = Atom.family((millis: number) => snapshotAtom.pipe(Atom.makeRefreshOnSignal(uiRuntime.atom(
-  Stream.fromSchedule(Schedule.spaced(millis)).pipe(Stream.scan(() => 0, (tick: number) => tick + 1), Stream.drop(1)), {initialValue: 0}))));
-export const dashboardSnapshot = snapshotPoll(snapshotRefreshMillis);
+// committed changes refresh the existing typed snapshot without replacing its retained success or failure
+export const dashboardSnapshot = snapshotAtom.pipe(refreshOnDashboardChange("snapshot"));
 
 // what the shell shows for a snapshot: the current or last successful snapshot (disconnected while failing), and the
 // alert that keeps drafts while the read fails

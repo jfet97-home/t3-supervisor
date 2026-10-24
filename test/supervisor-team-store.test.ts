@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { it } from "@effect/vitest";
-import { Clock, Effect } from "effect";
+import { Clock, Effect, Stream } from "effect";
+import { DashboardUpdates } from "../src/dashboard-updates.js";
 import { defaultSupervisorModel } from "../src/project-supervisor-store.js";
 import type { SupervisorTeamStoreShape, TeamBinding, TeamMember, TeamNotification } from "../src/supervisor-team-store.js";
 import { dataDirectory, type SupervisionStores, withSupervisionStores } from "./support/g9-stores.js";
@@ -583,3 +584,17 @@ it.live("reassignment and release cannot reuse an old review even when its recip
     }
   }));
 }));
+
+it.live("acknowledging a team attention event publishes once while its idempotent replay stays quiet", () => {
+  const hints: unknown[] = [];
+  const updates = DashboardUpdates.of({publish: keys => Effect.sync(() => {hints.push(keys);}), stream: Stream.never});
+  return fixture(f => Effect.gen(function* () {
+    const event = yield* f.team.serviceAttention(f.binding, {eventId: "dashboard-attention", memberThreadId: f.binding.threadId, summary: "Fixture attention"}, 20);
+    hints.length = 0;
+    yield* f.team.acknowledgeEvent(f.binding, f.binding.threadId, event.id, 21);
+    assert.equal(hints.length, 1);
+    hints.length = 0;
+    yield* f.team.acknowledgeEvent(f.binding, f.binding.threadId, event.id, 22);
+    assert.equal(hints.length, 0);
+  })).pipe(Effect.provideService(DashboardUpdates, updates));
+});

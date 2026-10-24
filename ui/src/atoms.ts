@@ -1,18 +1,21 @@
 import { Cause, Deferred, Duration, Effect, Exit, Layer, Option, Ref, Schedule, Stream } from "effect";
+import { HttpClient } from "effect/http";
+import { Sse } from "effect/encoding";
+import { DashboardHint, type DashboardKey } from "../../src/dashboard-events.js";
 import { HttpApiClient } from "effect/http-api";
 import { AsyncResult, Atom, AtomRegistry } from "effect/reactivity";
 import { SupervisorApi } from "../../src/guidance-contract.js";
 import { SessionAccess } from "./access.js";
 import { ApiClient, classifyMutation, sessionHttpClient, Unconfirmed, type MutationFailure } from "./api.js";
 
-// the shared atom contract of the dashboard (plan 3.8): one page runtime with fixed layers, scope keys, visibility-aware
-// polling, admitted mutations and keep-alive drafts; panels build their queries, mutations and drafts from these
+// the shared atom contract of the dashboard (plan 3.8): one page runtime with fixed layers, scope keys, visible committed-change
+// notifications, admitted mutations and keep-alive drafts; panels build their queries, mutations and drafts from these
 
 // the page runtime; its layers are fixed when the registry is created and never replaced through registry initial values
 // (#9313); the registry-scoped memo map shares one SessionAccess with ApiClient's own runtime
 export const uiRuntime = Atom.runtime(Layer.mergeAll(
   Layer.effect(ApiClient, HttpApiClient.make(SupervisorApi, { baseUrl: globalThis.location?.origin })).pipe(Layer.provide(sessionHttpClient)),
-  SessionAccess.layerBrowser,
+  SessionAccess.layerBrowser, sessionHttpClient,
 ));
 
 // a stable family key from the parts a panel depends on (T3 environment, project, main chat, binding generation or
@@ -48,16 +51,53 @@ export const snapshotAtom = uiRuntime.atom((get) => {
     Effect.tap((snapshot) => Effect.sync(() => get.set(environmentState, snapshot.environmentId))));
 });
 
-// changes once per interval while the page is visible; a hidden tab skips the tick instead of catching up later, as the
-// baseline interval checks did (document.hidden at each tick)
-export const pollSignal = Atom.family((millis: number) => uiRuntime.atom(
-  Stream.fromSchedule(Schedule.spaced(Duration.millis(millis))).pipe(
-    Stream.filter(() => typeof document === "undefined" || document.visibilityState === "visible"),
-    Stream.scan(() => 0, (tick: number) => tick + 1), Stream.drop(1)),
-  { initialValue: 0 }));
+// the document visibility listener belongs to the registry; changing visibility cancels the stream's owning scope
+export const dashboardVisible = Atom.make((get) => {
+  const visible = () => typeof document === "undefined" || document.visibilityState === "visible";
+  if (typeof document !== "undefined") {
+    const target = document;
+    const changed = () => get.setSelf(visible());
+    target.addEventListener("visibilitychange", changed);
+    get.addFinalizer(() => target.removeEventListener("visibilitychange", changed));
+  }
+  return visible();
+});
 
-// refreshes a read on every visible tick of the interval; the read keeps its last success while it refreshes or fails
-export const pollWhileVisible = (millis: number) => Atom.makeRefreshOnSignal(pollSignal(millis));
+type Hint = {readonly reset: boolean; readonly keys: ReadonlyArray<string>};
+const disconnected = () => Effect.fail("dashboard_updates_disconnected" as const);
+
+// a fetch response and its body share the stream's scope; retries reconnect, then the server resets mounted readers
+const connection = Stream.unwrap(Effect.gen(function* () {
+  const access = yield* SessionAccess;
+  const session = yield* access.session;
+  if (!session) return Stream.never;
+  const client = yield* HttpClient.HttpClient;
+  const response = yield* client.get((globalThis.location?.origin ?? "") + "/api/events");
+  if (response.status === 401) {
+    yield* access.clear(session);
+    return Stream.never;
+  }
+  if (response.status !== 200 || !response.headers["content-type"]?.startsWith("text/event-stream")) return yield* disconnected();
+  return response.stream.pipe(Stream.decodeText, Stream.pipeThroughChannel(Sse.decodeDataSchema(DashboardHint, {maxEventSize: 70_000})),
+    Stream.filter(event => event.event === "reset" || event.event === "invalidate"),
+    Stream.map(event => ({reset: event.event === "reset", keys: event.data.keys} satisfies Hint)));
+}));
+const reconnect = Schedule.exponential("500 millis").pipe(Schedule.modifyDelay(({duration}) => Effect.succeed(Duration.min(duration, Duration.seconds(15)))));
+
+// exactly one stream per dashboard registry, shared by every mounted matching view; no session or hidden tab opens none
+export const dashboardHints = uiRuntime.atom((get) => {
+  authEpoch(get);
+  if (!get(dashboardVisible)) return Stream.never;
+  return Stream.concat(connection, Stream.fail("dashboard_updates_disconnected" as const)).pipe(Stream.retry(reconnect),
+    Stream.groupedWithin(64, "20 millis"), Stream.map(batch => ({reset: batch.some(hint => hint.reset), keys: [...new Set(batch.flatMap(hint => hint.keys))]})));
+});
+
+// unmatched hints retain the same value, so they do not refresh a different project or an unmounted query
+const matchingHint = Atom.family((key: DashboardKey) => Atom.make((get) => {
+  const hint = Option.getOrNull(AsyncResult.value(get(dashboardHints)));
+  return hint && (hint.reset || hint.keys.includes(key) || hint.keys.some(changed => changed.startsWith("project:") && key.startsWith(`progress:${changed.slice(8)}:`))) ? hint : Option.getOrNull(get.self<Hint | null>());
+}));
+export const refreshOnDashboardChange = (key: DashboardKey) => Atom.makeRefreshOnSignal(matchingHint(key));
 
 // one user action: the scope it was started for and its operation id
 export interface MutationKey {

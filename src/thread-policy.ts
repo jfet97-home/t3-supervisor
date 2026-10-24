@@ -1,3 +1,4 @@
+import { dashboardInvalidation } from "./dashboard-updates.js";
 import { Context, Data, Effect, Layer, Schema } from "effect";
 import { SupervisorConfig as Configuration } from "./config.js";
 import { PolicyDb, untracedSql } from "./db.js";
@@ -46,6 +47,7 @@ export interface ThreadPolicyStoreShape {
 /** Builds the thread-policy store on the process's PolicyDb client; the seed is written only into a new file. */
 export const makeThreadPolicyStore = (seed: Omit<ThreadPolicySettings, "generation">) => Effect.gen(function* () {
   const db = yield* PolicyDb;
+  const invalidate = yield* dashboardInvalidation(db);
   yield* policySql(db.withTransaction(Effect.gen(function* () {
     yield* db.unsafe("CREATE TABLE IF NOT EXISTS settings(id INTEGER PRIMARY KEY CHECK(id=1),document TEXT NOT NULL)");
     yield* db`INSERT OR IGNORE INTO settings VALUES(1,${JSON.stringify({ generation: 1, ...seed })})`;
@@ -64,6 +66,7 @@ export const makeThreadPolicyStore = (seed: Omit<ThreadPolicySettings, "generati
     const updated = yield* db`UPDATE settings SET document=${JSON.stringify(next)} WHERE id=1 AND json_extract(document,'$.generation')=${input.generation}`.raw.pipe(
       Effect.flatMap((result) => decodeChanges(result).pipe(Effect.mapError(rowInvalid))));
     if (!updated.changes) return yield* new ThreadPolicyConflict({ message: "Chat settings changed in another tab. Reload first." });
+    yield* invalidate(null);
     return next;
   }));
 
