@@ -6,6 +6,7 @@ import {it} from "@effect/vitest";
 import {Clock, Console, Deferred, Effect, Exit, Fiber, Queue, SubscriptionRef} from "effect";
 import {TestClock} from "effect/testing";
 import {createStatus, supervise, type SupervisorStatus} from "../src/supervisor.js";
+import {buildInfo} from "../src/version.js";
 import {T3TransportError, type T3ClientShape, type T3EnvironmentDescriptor} from "../src/t3.js";
 import type {ProjectInfo, SupervisorConfig} from "../src/types.js";
 import {freePort} from "./support/g8-process.js";
@@ -20,7 +21,7 @@ import {eventConsole, pinnableClock, rootServices, statusView} from "./support/g
 const environment: T3EnvironmentDescriptor = {environmentId: "environment", serverVersion: "test", orchestrationProtocolVersion: 2};
 const project: ProjectInfo = {id: "project", title: "Project", workspaceRoot: "/work/project"};
 const projectItem = {stream: "active", item: {kind: "project.updated", sequence: 1, project}} as const;
-const healthKeys = ["ok", "readiness", "startedAt", "activation", "environmentId", "t3Connected", "storeState", "supervisionState", "heartbeat", "lastErrorPhase", "store"];
+const healthKeys = ["ok", "version", "revision", "readiness", "startedAt", "activation", "environmentId", "t3Connected", "storeState", "supervisionState", "heartbeat", "lastErrorPhase", "store"];
 
 const config = (directory: string, healthPort: number): SupervisorConfig => ({
   dataDirectory: directory,
@@ -145,7 +146,8 @@ it.live("CT-HEALTH-01: /health and /live answer over real HTTP with the exact st
   assert.equal(ready.contentType, "application/json");
   const readyBody = parse(ready.body);
   assert.deepEqual(Object.keys(readyBody), healthKeys);
-  assert.deepEqual(readyBody, JSON.parse(JSON.stringify({ok: true, readiness: {alive: true, ready: true, supervisionProgress: true}, ...status})));
+  assert.deepEqual(readyBody, JSON.parse(JSON.stringify({ok: true, version: buildInfo.version, revision: buildInfo.gitHead ?? null,
+    readiness: {alive: true, ready: true, supervisionProgress: true}, ...status})));
   assert.equal(readyBody.t3Connected, true);
   assert.equal(readyBody.storeState, "ready");
 

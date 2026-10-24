@@ -50,6 +50,22 @@ This project has an LLM-maintained knowledge base in `knowledge/` (git-ignored).
 - After meaningful development or pulling commits, use `$knowledge update`.
 - Library lookup order: `knowledge/dependencies/`, installed `node_modules/`, then official upstream documentation. Dependency reference sources are read-only and must never be imported.
 
+## Release discipline
+
+- Include a changeset for user-visible changes, proposing patch for a fix, minor
+  for a feature, or major for an incompatible change. Explain the impact in user
+  terms. Ask Andrea when compatibility or the appropriate bump is unclear,
+  especially for breaking changes before 1.0; do not infer downgrade safety.
+- Keep the app version in `package.json`; do not hand-edit CLI/image versions or
+  bump it on each push. Follow [RELEASING.md](RELEASING.md) for the separate version
+  PR and changelog. Stable publication requires explicit approval of that PR or
+  an explicit manual release request, and successful CI on the exact main commit.
+- Never enable auto-merge on a version PR or select alpha/beta for users without
+  explicit authorization. Nightly, alpha and beta remain opt-in installation
+  channels. Publishing artifacts and deploying a running service are separate.
+- Keep release-infrastructure work and dry runs free of registry publication,
+  credential provisioning or publishing-setting changes unless explicitly requested.
+
 ## Batch completion and deployment
 
 After completing an implementation batch, deploy the completed Supervisor to both

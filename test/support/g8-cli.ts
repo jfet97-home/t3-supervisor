@@ -6,6 +6,7 @@ import { Clock, Context, Effect, FileSystem, Layer, Option, type Scope } from "e
 import { shebang } from "./cli-bin.js";
 import { startFakeT3, untilTraffic, type FakeT3 as NativeFakeT3, type FakeT3Options, type FakeT3Traffic } from "./cli-fake-t3.js";
 import { nodePath, repositoryRoot, tsxLoader } from "./cli-process.js";
+import { buildInfo } from "../../src/version.js";
 import { bounded, freePort, portState, runProcess, startProcess, waitForHttp, type RunningProcess } from "./g8-process.js";
 
 // the supervisor, probe and installed bin harnesses of the process suites as scoped effects (test harness only): private
@@ -188,9 +189,7 @@ export const installedBinLayer: Layer.Layer<InstalledBin, never, FileSystem.File
       () => `the installed bin teardown did not finish within ${installedBinTeardownMs} ms`));
   const builtCli = join(repositoryRoot, "dist", "cli.js");
   const buildStarted = yield* Clock.currentTimeMillis;
-  // the server half of `pnpm build`; the ui bundle is not part of these cases
-  yield* step("tsc build", process.execPath, [join(repositoryRoot, "node_modules/typescript/bin/tsc"), "-p", "tsconfig.build.json"],
-    repositoryRoot, { PATH: process.env.PATH ?? "" });
+  yield* step("package build", "pnpm", ["build"], repositoryRoot, pnpmEnvironment());
   // guard: a stale or foreign dist must not be exercised
   const built = yield* Effect.orDie(fs.stat(builtCli));
   if (Option.match(built.mtime, { onNone: () => true, onSome: (mtime) => mtime.getTime() < buildStarted - 2_000 })) {
@@ -200,7 +199,7 @@ export const installedBinLayer: Layer.Layer<InstalledBin, never, FileSystem.File
   if (firstLine !== shebang) return yield* Effect.die(new Error("dist/cli.js lost its shebang"));
   const pnpm = pnpmEnvironment();
   yield* step("pnpm pack", "pnpm", ["pack", "--ignore-scripts", "--silent", "--pack-destination", root], repositoryRoot, pnpm);
-  yield* step("tar extract", "tar", ["-xzf", join(root, "t3-supervisor-0.1.0.tgz"), "-C", root], root, pnpm);
+  yield* step("tar extract", "tar", ["-xzf", join(root, `t3-supervisor-${buildInfo.version}.tgz`), "-C", root], root, pnpm);
   const packageDirectory = join(root, "package");
   // the tarball carries no lockfile; the baseline one keeps the installed dependency set identical to this checkout
   for (const name of ["pnpm-lock.yaml", "pnpm-workspace.yaml"]) {

@@ -5,6 +5,7 @@ import { Cause, Console, Data, Effect, Layer, Option, Redacted, Runtime, Schema 
 import { CliConfig, Command, Flag, GlobalFlag } from "effect/cli";
 import { loadDataDirectory } from "./config.js";
 import { forgeDashboardToken } from "./service-auth.js";
+import { buildInfo } from "./version.js";
 
 // an absolute path as given; a relative one is rejected, never resolved (Flag.Directory would resolve it)
 const AbsolutePath = Schema.String.check(Schema.makeFilter((path: string) => isAbsolute(path), { expected: "an absolute path" }));
@@ -58,8 +59,8 @@ const cli = Command.make("t3-supervisor").pipe(
   ]),
 );
 
-// help is the only built-in; a startup failure prints no stack (BC-CLI-04)
-NodeRuntime.runMain(Command.run(cli, { version: "0.1.0" }).pipe(
+// a startup failure prints no stack (BC-CLI-04)
+NodeRuntime.runMain(Command.run(cli, { version: buildInfo.version }).pipe(
   Effect.catchTag("ShowHelp", () => Effect.fail(new CliUsageError())),
-  Effect.provide(Layer.mergeAll(NodeServices.layer, CliConfig.layer({ builtIns: [GlobalFlag.Help] }))),
+  Effect.provide(Layer.mergeAll(NodeServices.layer, CliConfig.layer({ builtIns: [GlobalFlag.Help, GlobalFlag.Version] }))),
 ), { disableErrorReporting: true });

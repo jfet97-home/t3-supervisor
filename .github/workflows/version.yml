@@ -1,0 +1,50 @@
+name: Prepare version
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: version-pull-request
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+jobs:
+  version:
+    if: ${{ vars.RELEASE_VERSIONING_ENABLED == 'true' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/setup-dependencies
+      - uses: changesets/action@v1
+        id: changesets
+        with:
+          version: pnpm release:version
+          title: Release next version
+          commit: Prepare next release
+          createGithubReleases: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Run required CI on the version branch
+        if: ${{ steps.changesets.outputs.pullRequestNumber != '' }}
+        uses: actions/github-script@v8
+        env:
+          PR_NUMBER: ${{ steps.changesets.outputs.pullRequestNumber }}
+        with:
+          script: |
+            // dispatch explicitly because token-created PR workflows may require approval
+            const { data: pr } = await github.rest.pulls.get({ ...context.repo, pull_number: Number(process.env.PR_NUMBER) });
+            const { data: manifest } = await github.rest.repos.getContent({ ...context.repo, path: 'package.json', ref: pr.head.sha });
+            const { version } = JSON.parse(Buffer.from(manifest.content, 'base64').toString('utf8'));
+            if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error('invalid version PR manifest');
+            const body = `## Why\n\nMake the accumulated changes available as a stable release.\n\n## What\n\nRelease ${version}. See the [release notes](https://github.com/${context.repo.owner}/${context.repo.repo}/blob/${pr.head.sha}/CHANGELOG.md).\n\n## How\n\nUpdate the application version and collect the pending notes in the changelog.\n\n## Remarks\n\nMerging approves stable publication after successful main CI, when publishing is enabled. Running services are upgraded separately.`;
+            await github.rest.pulls.update({ ...context.repo, pull_number: pr.number, title: `Release ${version}`, body });
+            await github.rest.actions.createWorkflowDispatch({ ...context.repo, workflow_id: 'check.yml', ref: pr.head.ref });

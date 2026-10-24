@@ -1,0 +1,290 @@
+name: Publish release
+
+on:
+  workflow_run:
+    workflows: [Check Supervisor]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: Release channel
+        type: choice
+        options: [stable, alpha, beta, nightly]
+        required: true
+      revision:
+        description: Fully checked main commit (40-character SHA), or main
+        type: string
+        default: main
+        required: true
+      publish:
+        description: Publish after artifact checks (requires RELEASE_PUBLISH_ENABLED)
+        type: boolean
+        default: false
+
+concurrency:
+  group: release-publication
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  gate:
+    if: ${{ (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (vars.RELEASE_PUBLISH_ENABLED == 'true' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      sha: ${{ steps.source.outputs.sha }}
+      channel: ${{ steps.source.outputs.channel }}
+      commitTime: ${{ steps.source.outputs.commitTime }}
+    steps:
+      - uses: actions/github-script@v8
+        id: source
+        env:
+          REQUESTED_REVISION: ${{ inputs.revision }}
+          REQUESTED_CHANNEL: ${{ inputs.channel }}
+        with:
+          script: |
+            // the GitHub API adapter verifies provenance before any checkout or publishing permissions
+            const { data: main } = await github.rest.repos.getBranch({ ...context.repo, branch: 'main' });
+            const automatic = context.eventName === 'workflow_run';
+            const ref = automatic ? context.payload.workflow_run.head_sha : process.env.REQUESTED_REVISION;
+            if (ref !== 'main' && !/^[a-f0-9]{40}$/.test(ref)) throw new Error('use main or a full commit SHA');
+            const sha = ref === 'main' ? main.commit.sha : ref;
+            if (automatic && sha !== main.commit.sha) return;
+            const { data: comparison } = await github.rest.repos.compareCommitsWithBasehead({ ...context.repo, basehead: `${sha}...${main.commit.sha}` });
+            if (!['ahead', 'identical'].includes(comparison.status)) throw new Error('source is not on main');
+            const { data: workflow } = await github.rest.actions.getWorkflow({ ...context.repo, workflow_id: 'check.yml' });
+            const { data: runs } = await github.rest.actions.listWorkflowRuns({ ...context.repo, workflow_id: workflow.id, head_sha: sha, branch: 'main', event: 'push', status: 'success', per_page: 100 });
+            const run = runs.workflow_runs.find(r => r.head_sha === sha && r.head_repository.full_name === `${context.repo.owner}/${context.repo.repo}` && r.event === 'push' && r.head_branch === 'main' && (!automatic || r.id === context.payload.workflow_run.id));
+            if (!run) throw new Error('no successful main CI for this exact commit');
+            const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, { ...context.repo, run_id: run.id, per_page: 100 });
+            if (!jobs.some(job => job.name === 'check' && job.conclusion === 'success')) throw new Error('required aggregate check did not pass');
+            const prs = await github.paginate(github.rest.repos.listPullRequestsAssociatedWithCommit, { ...context.repo, commit_sha: sha, per_page: 100 });
+            const versionPR = prs.some(pr => pr.merged_at && pr.merge_commit_sha === sha && pr.base.ref === 'main' && pr.head.ref === 'changeset-release/main' && pr.head.repo?.full_name === `${context.repo.owner}/${context.repo.repo}`);
+            const channel = automatic ? (versionPR ? 'stable' : 'nightly') : process.env.REQUESTED_CHANNEL;
+            if (!['stable', 'nightly', 'alpha', 'beta'].includes(channel)) throw new Error('invalid release channel');
+            const { data: commit } = await github.rest.repos.getCommit({ ...context.repo, ref: sha });
+            core.setOutput('sha', sha);
+            core.setOutput('channel', channel);
+            core.setOutput('commitTime', commit.commit.committer.date);
+
+  release:
+    needs: gate
+    if: ${{ needs.gate.outputs.sha != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+    env:
+      IMAGE: ghcr.io/jfet97-home/t3-supervisor
+      PUBLISH: ${{ vars.RELEASE_PUBLISH_ENABLED == 'true' && (github.event_name == 'workflow_run' || inputs.publish) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup-dependencies
+      - name: Plan and stamp the checked source
+        id: plan
+        env:
+          CHANNEL: ${{ needs.gate.outputs.channel }}
+          REVISION: ${{ needs.gate.outputs.sha }}
+          COMMIT_TIME: ${{ needs.gate.outputs.commitTime }}
+        run: |
+          node -e 'require("node:fs").writeFileSync("release-input.json", JSON.stringify({channel:process.env.CHANNEL,revision:process.env.REVISION,commitTime:process.env.COMMIT_TIME}))'
+          pnpm changeset status --output release-status.json
+          node --import tsx scripts/release.ts prepare
+      - name: Build the complete package
+        run: pnpm pack --pack-destination release
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        if: ${{ env.PUBLISH == 'true' }}
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Reconcile immutable package and channel
+        id: registry
+        env:
+          VERSION: ${{ steps.plan.outputs.version }}
+          NPM_TAG: ${{ steps.plan.outputs.npmTag }}
+        run: |
+          set -euo pipefail
+          for selector in "$VERSION" "$NPM_TAG"; do
+            code=$(curl --silent --show-error --connect-timeout 10 --max-time 30 --output release/registry-response.json --write-out '%{http_code}' "https://registry.npmjs.org/t3-supervisor/$selector")
+            case "$code" in
+              200)
+                if [ "$selector" = "$VERSION" ]; then
+                  cp release/registry-response.json release/registry-version.json
+                  node --import tsx scripts/release.ts verify-registry
+                  url=$(jq -er '.dist.tarball | select(startswith("https://registry.npmjs.org/t3-supervisor/-/"))' release/registry-version.json)
+                  curl --fail --silent --show-error --connect-timeout 10 --max-time 120 "$url" --output "release/t3-supervisor-$VERSION.tgz"
+                  node --import tsx scripts/release.ts verify-archive
+                  echo 'exists=true' >> "$GITHUB_OUTPUT"
+                else
+                  cp release/registry-response.json release/registry-alias.json
+                  node --import tsx scripts/release.ts verify-alias
+                fi
+                ;;
+              404) ;;
+              *) echo "Registry lookup failed with HTTP $code" >&2; exit 1 ;;
+            esac
+          done
+      - name: Install and smoke-test the exact archive outside the checkout
+        env:
+          VERSION: ${{ steps.plan.outputs.version }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/release-install"
+          pnpm --dir "$RUNNER_TEMP/release-install" add --prod --offline --ignore-scripts "$PWD/release/t3-supervisor-$VERSION.tgz"
+          node --import tsx scripts/smoke-release.ts package "$RUNNER_TEMP/release-install/node_modules/.bin/t3-supervisor"
+      - name: Check whether the image package exists
+        if: ${{ env.PUBLISH == 'true' }}
+        id: image-package
+        uses: actions/github-script@v8
+        with:
+          script: |
+            try {
+              await github.rest.packages.getPackageForOrganization({ org: context.repo.owner, package_type: 'container', package_name: context.repo.repo });
+              core.setOutput('exists', 'true');
+            } catch (error) { if (error.status !== 404) throw error; }
+      - name: Reconcile immutable image
+        id: image
+        env:
+          VERSION: ${{ steps.plan.outputs.version }}
+          REVISION: ${{ steps.plan.outputs.revision }}
+          NPM_TAG: ${{ steps.plan.outputs.npmTag }}
+          IMAGE_PACKAGE_EXISTS: ${{ steps.image-package.outputs.exists }}
+        run: |
+          set -euo pipefail
+          echo 'smoke=t3-supervisor:release-check' >> "$GITHUB_OUTPUT"
+          if [ "$PUBLISH" != true ] || [ "$IMAGE_PACKAGE_EXISTS" != true ]; then exit 0; fi
+          if docker buildx imagetools inspect "$IMAGE:$VERSION" --format '{{json .Manifest}}' > release/image-manifest.json 2> release/image-lookup.txt; then
+            jq -e '[.manifests[].platform | select(.os == "linux") | .architecture] | index("amd64") != null and index("arm64") != null' release/image-manifest.json
+            docker pull "$IMAGE:$VERSION"
+            test "$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$IMAGE:$VERSION")" = "$REVISION"
+            test "$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.version"}}' "$IMAGE:$VERSION")" = "$VERSION"
+            echo 'exists=true' >> "$GITHUB_OUTPUT"
+            echo "smoke=$IMAGE:$VERSION" >> "$GITHUB_OUTPUT"
+          else
+            if ! rg -qi 'not found|manifest unknown' release/image-lookup.txt; then cat release/image-lookup.txt >&2; exit 1; fi
+            echo 'smoke=t3-supervisor:release-check' >> "$GITHUB_OUTPUT"
+          fi
+          if docker pull "$IMAGE:$NPM_TAG" 2> release/alias-lookup.txt; then
+            docker inspect --format '{{json .Config.Labels}}' "$IMAGE:$NPM_TAG" | jq '{version: .["org.opencontainers.image.version"]}' > release/registry-alias.json
+            node --import tsx scripts/release.ts verify-alias
+          elif ! rg -qi 'not found|manifest unknown' release/alias-lookup.txt; then cat release/alias-lookup.txt >&2; exit 1; fi
+      - uses: docker/build-push-action@v6
+        if: ${{ steps.image.outputs.exists != 'true' }}
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: t3-supervisor:release-check
+          build-args: |
+            VERSION=${{ steps.plan.outputs.version }}
+            REVISION=${{ steps.plan.outputs.revision }}
+          cache-from: type=gha,scope=release-image
+          cache-to: type=gha,mode=max,scope=release-image
+      - name: Smoke-test the container
+        env:
+          SMOKE_IMAGE: ${{ steps.image.outputs.smoke }}
+        run: node --import tsx scripts/smoke-release.ts image "$SMOKE_IMAGE"
+      - name: Verify the immutable Git tag
+        uses: actions/github-script@v8
+        env:
+          TAG: ${{ steps.plan.outputs.tag }}
+          REVISION: ${{ steps.plan.outputs.revision }}
+        with:
+          script: |
+            try {
+              const { data } = await github.rest.git.getRef({ ...context.repo, ref: `tags/${process.env.TAG}` });
+              if (data.object.type !== 'commit' || data.object.sha !== process.env.REVISION) throw new Error('tag belongs to a different source revision');
+            } catch (error) { if (error.status !== 404) throw error; }
+      - uses: docker/build-push-action@v6
+        id: pushed
+        if: ${{ env.PUBLISH == 'true' && steps.image.outputs.exists != 'true' }}
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ env.IMAGE }}:${{ steps.plan.outputs.version }}
+          build-args: |
+            VERSION=${{ steps.plan.outputs.version }}
+            REVISION=${{ steps.plan.outputs.revision }}
+          cache-from: type=gha,scope=release-image
+          cache-to: type=gha,mode=max,scope=release-image
+      - name: Publish the immutable package with provenance
+        if: ${{ env.PUBLISH == 'true' && steps.registry.outputs.exists != 'true' }}
+        env:
+          VERSION: ${{ steps.plan.outputs.version }}
+          NPM_TAG: ${{ steps.plan.outputs.npmTag }}
+        run: pnpm publish "release/t3-supervisor-$VERSION.tgz" --access public --tag "$NPM_TAG" --provenance --no-git-checks --publish-wait-timeout 600000
+      - name: Verify the package channel and advance only the selected image channel
+        if: ${{ env.PUBLISH == 'true' }}
+        env:
+          VERSION: ${{ steps.plan.outputs.version }}
+          NPM_TAG: ${{ steps.plan.outputs.npmTag }}
+        run: |
+          curl --fail --silent --show-error --connect-timeout 10 --max-time 30 "https://registry.npmjs.org/t3-supervisor/$NPM_TAG" --output release/published-alias.json
+          jq -e --arg version "$VERSION" --arg revision "${{ steps.plan.outputs.revision }}" '.version == $version and .gitHead == $revision' release/published-alias.json
+          docker buildx imagetools create --tag "$IMAGE:$NPM_TAG" "$IMAGE:$VERSION"
+          docker buildx imagetools inspect "$IMAGE:$VERSION" --format '{{json .Manifest}}' > release/image-manifest.json
+      - name: Record archive checksum
+        run: |
+          cd release
+          sha256sum ./*.tgz > SHA256SUMS
+      - name: Publish release notes and immutable artifacts
+        if: ${{ env.PUBLISH == 'true' }}
+        uses: actions/github-script@v8
+        env:
+          VERSION: ${{ steps.plan.outputs.version }}
+          TAG: ${{ steps.plan.outputs.tag }}
+          CHANNEL: ${{ steps.plan.outputs.channel }}
+          REVISION: ${{ steps.plan.outputs.revision }}
+        with:
+          script: |
+            const fs = require('node:fs');
+            const { createHash } = require('node:crypto');
+            const { TAG: tag, VERSION: version, CHANNEL: channel, REVISION: sha } = process.env;
+            try { await github.rest.git.getRef({ ...context.repo, ref: `tags/${tag}` }); }
+            catch (error) {
+              if (error.status !== 404) throw error;
+              await github.rest.git.createRef({ ...context.repo, ref: `refs/tags/${tag}`, sha });
+            }
+            const manifest = JSON.parse(fs.readFileSync('release/image-manifest.json', 'utf8'));
+            const notes = fs.readFileSync('release/notes.md', 'utf8').trim();
+            const body = `${notes}\n\nSource: ${sha}\n\nnpm: t3-supervisor@${version}\n\nContainer: ${process.env.IMAGE}@${manifest.digest}\n\nChannel: ${channel}. Upgrades are opt-in; back up state before upgrading.`;
+            let release;
+            try { ({ data: release } = await github.rest.repos.getReleaseByTag({ ...context.repo, tag })); }
+            catch (error) {
+              if (error.status !== 404) throw error;
+              ({ data: release } = await github.rest.repos.createRelease({ ...context.repo, tag_name: tag, target_commitish: sha, name: tag, body, draft: true, prerelease: channel !== 'stable' }));
+            }
+            if (release.body !== body || release.prerelease !== (channel !== 'stable')) throw new Error('existing release receipt conflicts with this publication');
+            for (const name of [`t3-supervisor-${version}.tgz`, 'SHA256SUMS', 'plan.json', 'image-manifest.json']) {
+              const data = fs.readFileSync(`release/${name}`);
+              const existing = release.assets.find(asset => asset.name === name);
+              if (existing) {
+                if (existing.digest !== `sha256:${createHash('sha256').update(data).digest('hex')}`) throw new Error('existing release asset conflicts with this publication');
+                continue;
+              }
+              await github.rest.repos.uploadReleaseAsset({ ...context.repo, release_id: release.id, name, data });
+            }
+            if (release.draft) await github.rest.repos.updateRelease({ ...context.repo, release_id: release.id, draft: false, make_latest: channel === 'stable' ? 'true' : 'false' });
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: release-${{ steps.plan.outputs.version || github.run_id }}
+          path: |
+            release/*.tgz
+            release/plan.json
+            release/notes.md
+            release/SHA256SUMS
+            release/image-manifest.json
+          if-no-files-found: ignore
