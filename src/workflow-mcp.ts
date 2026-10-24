@@ -5,6 +5,7 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { CallToolRequestSchema, ErrorCode, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
+import { buildInfo } from "./version.js";
 import {
   WorkflowWriteController,
   type WorkflowCallCancel,
@@ -23,7 +24,7 @@ const maxMcpRequestBodyBytes = 1024 * 1024;
 const callDeadline = "9 seconds";
 // how long a caller still waits for the controller's own answer after the deadline's soft cancel
 const abortGrace = "1 second";
-const serverInfo = {name: "t3-supervisor-workflows", version: "0.1.0"};
+const serverInfo = {name: "t3-supervisor-workflows", version: buildInfo.version};
 
 // the endpoint is closed: every later request is answered 503 workflow_mcp_closed
 export class McpClosed extends Data.TaggedError("McpClosed") {}
