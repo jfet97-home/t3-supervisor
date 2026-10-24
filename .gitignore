@@ -9,6 +9,8 @@ secrets/
 
 .env*
 !.env.example
+!.envrc
+.direnv/
 *.sqlite*
 *.db
 *.db-*

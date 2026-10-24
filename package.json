@@ -2,6 +2,10 @@
   "name": "t3-supervisor",
   "version": "0.1.0",
   "private": true,
+  "packageManager": "pnpm@12.14.0",
+  "engines": {
+    "node": ">=24.22.1"
+  },
   "type": "module",
   "bin": {
     "t3-supervisor": "dist/cli.js"
@@ -28,9 +32,6 @@
     "scheduler": "0.27.0",
     "ws": "8.22.0",
     "yaml": "2.9.1"
-  },
-  "overrides": {
-    "@effect/platform-node-shared": "4.0.6"
   },
   "devDependencies": {
     "@effect/vitest": "4.0.6",

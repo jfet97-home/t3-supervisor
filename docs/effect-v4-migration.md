@@ -1,5 +1,9 @@
 # Effect v4 migration plan
 
+The current project uses pnpm 12.14.0 and `pnpm-lock.yaml`. References to npm
+commands and `package-lock.json` below describe the historical migration baseline
+and its evidence. See [development](../README.md#development) for current commands.
+
 Status: **plan v2.2 (pins: exact 4.0.6, UPGRADE-406)**, a narrow follow-up to frozen v2.1 `d986e7ee` (after v2 `059e4a82` and
 v1 `14b4a875`). It closes the run-4 findings only: the native in-flight lookup, resource
 ownership and cancellation owner of 3.11 (SOL-PLAN-02, A-P03), the candidate-free

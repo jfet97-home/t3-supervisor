@@ -1,0 +1,27 @@
+name: Setup dependencies
+description: Install pinned Node and pnpm and reuse the package store across runs.
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@v4
+      with:
+        node-version: "24.22.1"
+    - name: Activate the pinned package manager
+      shell: bash
+      run: |
+        corepack enable pnpm
+        corepack prepare --activate
+    - name: Locate the pnpm store
+      id: store
+      shell: bash
+      run: echo "path=$(pnpm store path)" >> "$GITHUB_OUTPUT"
+    - name: Restore the pnpm store
+      uses: actions/cache@v5
+      with:
+        path: ${{ steps.store.outputs.path }}
+        key: ${{ runner.os }}-${{ runner.arch }}-node24-pnpm-store-${{ hashFiles('pnpm-lock.yaml') }}
+        restore-keys: |
+          ${{ runner.os }}-${{ runner.arch }}-node24-pnpm-store-
+    - name: Install dependencies
+      shell: bash
+      run: pnpm install --frozen-lockfile --prefer-offline
