@@ -5,6 +5,7 @@ import { it } from "@effect/vitest";
 import { Context, Effect, Layer } from "effect";
 import { HttpRouter, HttpServer } from "effect/http";
 import {WorkflowMcpRoute} from "../src/workflow-mcp.js";
+import { buildInfo } from "../src/version.js";
 import type {WorkflowWriteController, WorkflowWriteResult, WorkflowReadResult} from "../src/workflow-write-controller.js";
 import {promiseWorkflowController, workflowMcpLayer} from "./support/mcp-controllers.js";
 import {applyArgs, ensureArgs, installEvidence, locator, makeFixture, planEntities, sequencePlan} from "./support/wwc-fixture.js";
@@ -58,7 +59,8 @@ it.live("workflow MCP exposes read, write and the scoped stop tool and serves st
     },
   }));
   assert.equal(initialized.status, 200);
-  yield* Effect.promise(async () => initialized.body?.cancel());
+  const initialization = (yield* Effect.promise(() => initialized.json())) as {result?: {serverInfo?: {name: string; version: string}}};
+  assert.deepEqual(initialization.result?.serverInfo, {name: "t3-supervisor-workflows", version: buildInfo.version});
   const tools = yield* Effect.promise(() => postJson(url, {jsonrpc: "2.0", id: 2, method: "tools/list", params: {}}));
   assert.equal(tools.status, 200);
   const listBody = (yield* Effect.promise(() => tools.json())) as {result?: {tools?: Array<{name: string; inputSchema?: {

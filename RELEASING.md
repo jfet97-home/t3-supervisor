@@ -22,12 +22,12 @@ Required `check` still includes all four main shards, the harness and static che
 
 | Channel | Trigger after publishing is enabled | Version | npm and image aliases |
 | --- | --- | --- | --- |
-| Stable | Successful main CI for the merged version PR, or explicit manual dispatch | Manifest version, e.g. `0.2.0` | `latest` |
+| Stable | Successful main CI for the merged version PR, or explicit manual dispatch | Manifest version, e.g. `0.0.2` | `latest` |
 | Nightly | Successful main CI for other main commits, or manual dispatch | Next planned version plus commit timestamp and SHA | `nightly` |
 | Alpha | Manual dispatch | Next planned version plus commit timestamp and SHA | `alpha` |
 | Beta | Manual dispatch | Next planned version plus commit timestamp and SHA | `beta` |
 
-For example, `0.2.0-beta.20261024140000.gabcdef123456` is a beta snapshot of a
+For example, `0.0.3-beta.20261024140000.gabcdef123456` is a beta snapshot of a
 specific checked commit. Pending changesets determine its base; without pending
 notes, previews target the next patch. Preview generation does not consume notes
 or put the repository into Changesets pre-release mode. Re-running the same commit
@@ -93,7 +93,9 @@ command remains `t3-supervisor`; the image is `ghcr.io/jfet97/t3-supervisor`.
    registry publication, not a running Supervisor deployment. Allow GitHub Actions
    to create pull requests for this repository. Enable the
    repository Actions variable `RELEASE_VERSIONING_ENABLED=true`, then dispatch
-   **Prepare version** on main. Review the first 0.2.0 version PR and its full CI.
+   **Prepare version** on main. The first public version is explicitly `0.0.2`;
+   review that version PR and its full CI. Earlier prototype version numbers were
+   never published and do not form a public release history.
 2. Merge the version PR and wait for its main CI. Keep
    `RELEASE_PUBLISH_ENABLED` unset. Dispatch **Publish release** with channel
    `stable`, that exact main SHA and **publish=false**. Inspect the resulting
