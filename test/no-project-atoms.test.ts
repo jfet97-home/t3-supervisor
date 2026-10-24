@@ -205,7 +205,11 @@ it.effect("a candidate search waits 200 ms for a typed query, a newer query inte
   const stopRecent = yield* subscribe(recent);
   yield* until(registry, recent, AsyncResult.isFailure, "the search failed");
   yield* browser.request((request) => request.path === "/api/csrf", "the access refresh");
-  assert.deepEqual(browser.sent.map((request) => request.path), ["/api/guidance/supervision-candidates", "/api/csrf"]);
+  assert.deepEqual(browser.sent.map((request) => request.path), ["/api/guidance/supervision-candidates", "/api/guidance/supervision-candidates", "/api/csrf"]);
+  assert.equal(browser.sent[0]!.session, "session-1");
+  assert.equal(browser.sent[1]!.session, "", "clearing the rejected session invalidates the mounted search once");
+  assert.equal(browser.sent[2]!.session, "", "the access refresh uses the cleared session");
+  assert.equal(browser.local.has("supervisor-session"), false);
   stopRecent();
   registry.dispose();
 }), { timeout: 10_000 });
