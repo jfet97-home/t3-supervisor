@@ -310,7 +310,7 @@ export class FixtureModel {
       ...overviewWorkPage(work, page),
       projects: this.data.projects.filter(project => project.classification === "project").map(project => ({
         id: project.id, title: project.title, available: true, enabled: project.control.enabled, effectiveEnabled: this.effective(project),
-        detectionStatus: this.folderPresent(project) ? "present" : "missing",
+        detectionStatus: this.folderPresent(project) ? "present" : "missing", attentionTotal: work.filter(item => item.projectId === project.id && item.attention.length > 0).length,
       })),
     };
   }

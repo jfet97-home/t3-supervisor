@@ -351,3 +351,5 @@ For the long Task and Connected work views, POST `/__fixture/scenario/journey-ne
 Definitions first selects an actual folder. Catalog and per-definition detail show template sequence/parallel topology with no execution state; Edit index names the shared project.yaml target and pages compact editable entries ten at a time. Uncertain/conflict stories retain their original operation and draft fences.
 
 `partial-inventory` renders the independently readable project folder while listing an unavailable conversation binding. Selecting a folder is explicit; the missing conversation is never assumed to use the root. The actual ProjectDefinitions regression separately verifies that browsing can be partial while setup target validation remains strict.
+
+Regression: keep a non-matching Home search in the hash, then open Project A Conversations pages 1 and 2. Each page reads its own visible IDs; Home filters must not hide row state or project attention.

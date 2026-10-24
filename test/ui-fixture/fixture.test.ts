@@ -268,6 +268,12 @@ describe("CT-UI-FIXTURE-01 ui baseline fixture", () => {
       const search = Schema.decodeUnknownSync(DashboardOverview)((yield* c.get("/api/guidance/dashboard-overview?q=Fixture%20146&limit=25&offset=0")).json());
       assert.equal(search.total, 1); assert.equal(search.availableTotal, 149); assert.equal(search.work[0]?.mainThreadId, "fixture-long-146");
       assert.equal(search.projects.length, 2, "project coverage remains independent of query results");
+      for (const ids of [["fixture-long-001"], Array.from({length: 25}, (_, i) => `fixture-long-${String(i + 26).padStart(3, "0")}`)]) {
+        const query = new URLSearchParams({projectId: A, limit: "25"}); ids.forEach(id => query.append("mainThreadId", id));
+        const visible = Schema.decodeUnknownSync(DashboardOverview)((yield* c.get(`/api/guidance/dashboard-overview?${query}`)).json());
+        assert.deepEqual(new Set(visible.work.map(row => row.mainThreadId)), new Set(ids));
+        assert.equal(visible.projects.find(project => project.id === A)!.attentionTotal, 1);
+      }
       yield* c.control("/__fixture/reset");
       yield* c.signIn;
       const reads: Array<[string, Schema.Top]> = [

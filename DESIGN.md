@@ -612,3 +612,9 @@ The brief explicitly requires both a list-targeted Back link and breadcrumbs.
 At narrow widths the status header stays in normal document flow so its wrapping labels do not obscure the work while scrolling. Desktop retains the sticky header. Conversation badges use the same icon-plus-text treatment, and connected rows explicitly name Workflow and Conversation status.
 
 Ordinary reconciliation actions are quiet 32px icon buttons beside read metadata, with explicit accessible names and focus rings. Recovery Retry remains in its error context. Definition/folder refresh remains explicit because filesystem detection and native collection have their own cadence; there is no invented Live badge.
+
+### Current detector disposition (2026-10-24)
+
+The parent’s single detector pass on candidate 8d75d40 reported 41 findings: one pre-existing side-tab warning and 40 advisories. Of those advisories, 29 were already on origin/main (22 color, one radius, six typography); the current UI adds 11 color occurrences, using ten distinct values. The historic report above remains the baseline record.
+
+The added values deliberately extend the inherited status treatment across light and dark surfaces: `#8cbaa9` and `#507d70` support enabled teal; `#7f342e`, `#fbeceb`, `#452d30` and `#b67c79` distinguish disabled text, outline and surface; `#714b16`, `#c3a476` and `#927549` distinguish uncertain or unavailable amber. `#0005` supplies the dark sticky Save bar’s soft shadow; the dialog backdrop remains the existing `#17243c80`. These are palette advisories, not ten new component themes; icon and text carry every status meaning. This records the existing detector classification without rerunning it or changing the token system.

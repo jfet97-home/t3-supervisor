@@ -39,15 +39,15 @@ export const DashboardOverview = Schema.Struct({
   projects: Schema.Array(Schema.Struct({
     id: Schema.String, title: Schema.String, available: Schema.Boolean,
     enabled: Schema.Boolean, effectiveEnabled: Schema.Boolean,
-    detectionStatus: Schema.String,
+    detectionStatus: Schema.String, attentionTotal: Schema.optional(Schema.Number),
   })),
   work: Schema.Array(DashboardWork),
 });
 export type DashboardOverviewInfo = typeof DashboardOverview.Type;
 
 export type OverviewQuery = {q: string; projectId: string; filter: "all" | "attention" | "active" | "stopped"};
-export type OverviewPage = {offset: number; limit: number} & Partial<OverviewQuery>;
-export function overviewPage(query: {offset?: string | undefined; limit?: string | undefined; q?: string | undefined; projectId?: string | undefined; filter?: string | undefined}) {
+export type OverviewPage = {offset: number; limit: number; mainThreadIds?: readonly string[]} & Partial<OverviewQuery>;
+export function overviewPage(query: {offset?: string | undefined; limit?: string | undefined; q?: string | undefined; projectId?: string | undefined; filter?: string | undefined; mainThreadId?: readonly string[] | undefined}) {
   const integer = (value: string | undefined, fallback: number, minimum: number, maximum: number) => {
     if (value === undefined) return fallback;
     if (!/^\d+$/u.test(value)) throw new Error("invalid_overview_page");
@@ -57,14 +57,16 @@ export function overviewPage(query: {offset?: string | undefined; limit?: string
   };
   const q = query.q?.trim() ?? ""; const projectId = query.projectId ?? ""; const filter = query.filter ?? "all";
   if (q.length > 300 || projectId.length > 512 || !["all", "attention", "active", "stopped"].includes(filter)) throw new Error("invalid_overview_page");
-  return {offset: integer(query.offset, 0, 0, 100_000), limit: integer(query.limit, 25, 1, 200), q, projectId, filter: filter as OverviewQuery["filter"]};
+  if (query.mainThreadId && (!projectId || query.mainThreadId.length === 0 || query.mainThreadId.length > 25 || query.mainThreadId.some(id => !id || id.length > 512))) throw new Error("invalid_overview_page");
+  return {offset: integer(query.offset, 0, 0, 100_000), limit: integer(query.limit, 25, 1, 200), q, projectId, filter: filter as OverviewQuery["filter"], ...(query.mainThreadId ? {mainThreadIds: [...new Set(query.mainThreadId)]} : {})};
 }
 
 // filtering precedes the page boundary; attention and project coverage remain independent of the selected page
 export function overviewWorkPage(all: readonly DashboardWorkInfo[], page: OverviewPage) {
   const query: OverviewQuery = {q: page.q ?? "", projectId: page.projectId ?? "", filter: page.filter ?? "all"};
   const needle = query.q.toLocaleLowerCase();
-  const matching = all.filter(item => (!query.projectId || item.projectId === query.projectId) &&
+  const visibleIds = page.mainThreadIds ? new Set(page.mainThreadIds) : null;
+  const matching = all.filter(item => (!visibleIds || visibleIds.has(item.mainThreadId)) && (!query.projectId || item.projectId === query.projectId) &&
     (query.filter === "all" || query.filter === "attention" && item.attention.length > 0 || query.filter === "active" && item.nativeState === "active" || query.filter === "stopped" && item.supervision !== "enabled") &&
     `${item.title} ${item.objective ?? ""} ${item.reason}`.toLocaleLowerCase().includes(needle));
   const attention = all.filter(item => item.attention.length > 0);
@@ -114,7 +116,7 @@ export function buildDashboardOverview(input: {
   assessment?: (binding: BindingRecord, task: TaskRecord | undefined) => DashboardWorkInfo["assessment"];
   scopeEnabled?: (projectId: string, mainThreadId: string) => boolean;
   excluded: ReadonlySet<string>;
-  offset: number; limit: number; q?: string; projectId?: string; filter?: OverviewQuery["filter"];
+  offset: number; limit: number; q?: string; projectId?: string; filter?: OverviewQuery["filter"]; mainThreadIds?: readonly string[];
 }): DashboardOverviewInfo {
   const projects = input.projects.map(({project, available}) => {
     const control = input.control(project.id);
@@ -147,7 +149,8 @@ export function buildDashboardOverview(input: {
   }
   work.sort((a, b) => Number(b.attention.length > 0) - Number(a.attention.length > 0) ||
     Number(b.nativeState === "active") - Number(a.nativeState === "active") || (b.updatedAt ?? 0) - (a.updatedAt ?? 0) || a.mainThreadId.localeCompare(b.mainThreadId));
-  const revision = input.fingerprint({available: input.available, globallyEnabled: input.globallyEnabled, projects, work});
+  const summaries = projects.map(project => ({...project, ...(project.available ? {attentionTotal: work.filter(item => item.projectId === project.id && item.attention.length > 0).length} : {})}));
+  const revision = input.fingerprint({available: input.available, globallyEnabled: input.globallyEnabled, projects: summaries, work});
   return {revision, observedAt: input.observedAt, available: input.available, globallyEnabled: input.globallyEnabled,
-    projects, ...overviewWorkPage(work, input)};
+    projects: summaries, ...overviewWorkPage(work, input)};
 }

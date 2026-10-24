@@ -46,7 +46,10 @@ it.effect("the overview reads retained supervision state without native calls, w
   assert.equal(result.work[1]?.planStatus, null, "native activity does not imply an agreed plan or completed work");
   assert.equal(result.hasMore, true);
   const search = yield* supervisor.overview({offset: 0, limit: 25, q: "Objective quiet"});
-  assert.equal(search.total, 1); assert.equal(search.work[0]?.mainThreadId, "quiet"); assert.equal(search.attentionTotal, 1); assert.equal(search.projects.length, 1);
+  assert.equal(search.total, 1); assert.equal(search.work[0]?.mainThreadId, "quiet"); assert.equal(search.attentionTotal, 1); assert.equal(search.projects.length, 1); assert.equal(search.projects[0]!.attentionTotal, 1);
+  const visible = yield* supervisor.overview({offset: 0, limit: 25, projectId: "project", mainThreadIds: ["stopped", "quiet", "unbound"]});
+  assert.deepEqual(new Set(visible.work.map(row => row.mainThreadId)), new Set(["stopped", "quiet"]));
+  assert.equal(visible.total, 2); assert.equal(visible.projects[0]!.attentionTotal, 1);
   const second = yield* supervisor.overview({offset: 2, limit: 2});
   assert.equal(second.hasMore, false);
   assert.deepEqual(new Set([...result.work, ...second.work].map(item => item.mainThreadId)), new Set(threads.map(thread => thread.id)));
@@ -60,7 +63,7 @@ it.effect("the overview reads retained supervision state without native calls, w
 it.effect("overview pagination rejects malformed and excessive pages", () => Effect.sync(() => {
   assert.deepEqual(overviewPage({}), {offset: 0, limit: 25, q: "", projectId: "", filter: "all"});
   assert.deepEqual(overviewPage({offset: "100", limit: "200"}), {offset: 100, limit: 200, q: "", projectId: "", filter: "all"});
-  for (const query of [{offset: "-1"}, {offset: "1.2"}, {offset: "100001"}, {limit: "0"}, {limit: "201"}, {limit: "Infinity"}])
+  for (const query of [{offset: "-1"}, {offset: "1.2"}, {offset: "100001"}, {limit: "0"}, {limit: "201"}, {limit: "Infinity"}, {mainThreadId: ["main"]}, {projectId: "p", mainThreadId: Array.from({length: 26}, (_, i) => String(i))}])
     assert.throws(() => overviewPage(query), /invalid_overview_page/u);
 }));
 

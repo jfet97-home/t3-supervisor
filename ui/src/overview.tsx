@@ -3,7 +3,7 @@ import { ListPager, pageWindow } from "./pagination.js";
 import { StatusBadge } from "./supervision-status.js";
 import { conversationLabel } from "./conversation-status.js";
 import {activityTitle} from "./activity-presentation.js";
-import { useEffect } from "react";
+import { useEffect, useMemo } from "react";
 import { useAtomRefresh, useAtomSet, useAtomValue } from "@effect/atom-react";
 import { Effect, Option } from "effect";
 import { AsyncResult, Atom } from "effect/reactivity";
@@ -26,7 +26,7 @@ export const overviewFailureMessage = "The work overview could not be refreshed.
 
 // one typed page read follows the selected full-collection query, auth epoch and environment
 // background hints re-read this exact selection; retained success/failure and other drafts remain independent
-export type OverviewSelection = OverviewQuery & {page: number};
+export type OverviewSelection = OverviewQuery & {page: number; mainThreadIds?: readonly string[]};
 export const makeOverview = () => {
   const enabled = Atom.make(false);
   const selection = Atom.make<OverviewSelection>({q: "", projectId: "", filter: "all", page: 1});
@@ -34,11 +34,26 @@ export const makeOverview = () => {
     if (!get(enabled)) return Effect.never;
     authEpoch(get); get(environmentAtom);
     const query = get(selection);
-    return Effect.flatMap(ApiClient, client => classifyMutation(client.guidance.dashboardOverview({query: {q: query.q, projectId: query.projectId, filter: query.filter, offset: String((query.page - 1) * 25), limit: "25"}})));
+    return Effect.flatMap(ApiClient, client => classifyMutation(client.guidance.dashboardOverview({query: {q: query.q, projectId: query.projectId, filter: query.filter, offset: String((query.page - 1) * 25), limit: "25", ...(query.mainThreadIds ? {mainThreadId: query.mainThreadIds} : {})}}))).pipe(Effect.map(value => ({...value, selection: query})));
   });
   return {enabled, selection, read, live: read.pipe(refreshOnDashboardChange("overview"))};
 };
 export const overview = makeOverview();
+
+// the project list reads only its visible identities, independently of Home's retained search and page
+export function useConversationOverview(projectId: string, threadIds: readonly string[], enabled: boolean) {
+  const model = useMemo(makeOverview, []);
+  const setSelection = useAtomSet(model.selection);
+  const setEnabled = useAtomSet(model.enabled);
+  const idsKey = JSON.stringify(threadIds);
+  useEffect(() => {setSelection({q: "", projectId, filter: "all", page: 1, mainThreadIds: threadIds});}, [projectId, idsKey, setSelection]);
+  useEffect(() => {setEnabled(enabled && threadIds.length > 0);}, [enabled, idsKey, setEnabled]);
+  const result = useAtomValue(enabled ? model.live : model.read);
+  const current = Option.getOrNull(AsyncResult.value(result))?.selection;
+  const view = overviewView(result, enabled);
+  const sameSelection = current?.projectId === projectId && JSON.stringify(current.mainThreadIds) === idsKey;
+  return {...view, data: sameSelection ? view.data : null};
+}
 
 export interface OverviewState {
   readonly data: DashboardOverviewInfo | null;

@@ -13,7 +13,7 @@ import { authEpochAtom, environmentAtom, scopeKey } from "./atoms.js";
 import { definitionsReadKey, projectDefinitionsAtom, type LoadedDefinitions, type ProjectDefinitionsReadError } from "./project-definitions-api.js";
 import { configurationDrafts, configurationScope, freshDraft, ProjectConfigurationEditor } from "./project-configuration-editor.js";
 import { discardSupervisorDrafts, ProjectSupervisorPanel } from "./project-supervisor.js";
-import { type OverviewState, ReadTime, WorkState } from "./overview.js";
+import { type OverviewState, ReadTime, WorkState, useConversationOverview } from "./overview.js";
 import { ListPager, pageWindow } from "./pagination.js";
 import { Icon } from "./icons.js";
 import { DefinitionReferences } from "./definition-references.js";
@@ -230,6 +230,9 @@ export function ProjectDefinitionsPanel({data, overview, route, navigate, guard,
   const matchingThreads = threads.filter(thread => `${thread.title} ${thread.id}`.toLowerCase().includes(conversationQuery.toLowerCase()));
   const conversationRange = pageWindow(matchingThreads.length, conversationPage);
   const visibleThreads = matchingThreads.slice(conversationRange.offset, conversationRange.offset + conversationRange.size);
+  const conversationListVisible = inWorkspace && (route.section === "conversations" || route.main === null && conversationSections.includes(route.section));
+  const conversationOverview = useConversationOverview(projectId, visibleThreads.map(thread => thread.id), conversationListVisible && data.connected);
+  const conversationReadCurrent = Boolean(conversationOverview.data?.available) && !conversationOverview.loading && !conversationOverview.error && dataCurrent && data.connected;
   const resume = rememberedConversation(projectId);
   const listRoute: Route = {...route, page: "projects", projectId, main: null, section: "conversations"};
   useEffect(() => {
@@ -309,11 +312,10 @@ export function ProjectDefinitionsPanel({data, overview, route, navigate, guard,
       <div className="project-list">
         {matchingProjects.slice(projectRange.offset, projectRange.offset + projectRange.size).map(project => {
           const status = overview?.data?.projects.find(item => item.id === project.id);
-          const work = overview?.data?.work.filter(item => item.projectId === project.id) ?? [];
           return <RouteLink key={project.id} to={openProject(project.id)} navigate={navigate} className="project-card">
             <span className="project-avatar" aria-hidden="true"><Icon name="projects"/></span>
             <span className="project-card-copy"><strong>{project.title}</strong><span className="muted small">{data.threads.filter(thread => thread.available && thread.projectId === project.id).length} {data.threads.filter(thread => thread.available && thread.projectId === project.id).length === 1 ? "conversation" : "conversations"}{project.classification === "scratch" ? " · Scratch workspace" : ""}</span></span>
-            <span className="project-status"><ProjectSupervisionStatus enabled={status?.enabled ?? false} effectiveEnabled={status?.effectiveEnabled ?? false} globallyEnabled={overview?.data?.globallyEnabled ?? false} available={project.available && Boolean(status) && data.connected && !overview?.error}/><span className="small muted">{work.some(item => item.attention.length) ? "Attention needed in loaded work" : "Open workspace"}</span></span><Icon name="arrow" size={18}/>
+            <span className="project-status"><ProjectSupervisionStatus enabled={status?.enabled ?? false} effectiveEnabled={status?.effectiveEnabled ?? false} globallyEnabled={overview?.data?.globallyEnabled ?? false} available={project.available && Boolean(status) && data.connected && !overview?.error}/><span className="small muted">{status?.attentionTotal === undefined ? "Attention state unavailable" : status.attentionTotal > 0 ? `${status.attentionTotal} ${status.attentionTotal === 1 ? "conversation needs" : "conversations need"} attention` : "Open workspace"}</span></span><Icon name="arrow" size={18}/>
           </RouteLink>;
         })}
       </div>
@@ -342,8 +344,8 @@ export function ProjectDefinitionsPanel({data, overview, route, navigate, guard,
         {resume && threads.some(thread => thread.id === resume.main) && <p className="small muted">Continue where you left off: <RouteLink to={resume} navigate={navigate}>{threads.find(thread => thread.id === resume.main)?.title} · {resume.section === "task" ? "Task" : resume.section === "connected" ? "Connected work" : "Supervision"}</RouteLink></p>}
         <ListPager label="Conversations" total={matchingThreads.length} page={conversationRange.page} onPage={listPage => navigate({...listRoute, listPage})}/>
         <div className="conversation-list">{visibleThreads.map(thread => {
-          const work = overview?.data?.work.find(item => item.mainThreadId === thread.id);
-          return <RouteLink key={thread.id} to={{...workspaceRoute, main: thread.id, section: "task"}} navigate={navigate}><div className="conversation-list-copy"><strong>{thread.title}</strong><p className="muted small">{work?.objective ?? "Open to inspect task, plan and current supervision."}</p></div>{work ? <WorkState work={work}/> : <span className="small muted">Outside the current supervision read</span>}<Icon name="arrow" size={18}/></RouteLink>;
+          const work = conversationOverview.data?.work.find(item => item.mainThreadId === thread.id);
+          return <RouteLink key={thread.id} to={{...workspaceRoute, main: thread.id, section: "task"}} navigate={navigate}><div className="conversation-list-copy"><strong>{thread.title}</strong><p className="muted small">{work?.objective ?? "Open to inspect task, plan and current supervision."}</p></div>{work ? <WorkState work={work} fresh={conversationReadCurrent}/> : <span className="small muted">{conversationReadCurrent ? "No Supervisor yet" : conversationOverview.error || !data.connected ? "Conversation state unavailable" : "Reading conversation state…"}</span>}<Icon name="arrow" size={18}/></RouteLink>;
         })}</div>
         {matchingThreads.length === 0 && <p>{conversationQuery ? "No conversations match your search." : "No available main conversations in this project."}</p>}
       </div>}

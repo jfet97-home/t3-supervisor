@@ -14,7 +14,7 @@ beforeAll(() => Effect.gen(function*() {
 }));
 const rows = Array.from({length: 230}, (_, i) => ({projectId: "p", mainThreadId: `work-${String(i).padStart(3, "0")}`, title: `Work ${i}`, supervisorThreadId: "s", nativeState: "quiet" as const, supervision: "enabled" as const, objective: null, reason: "", taskStatus: null, planStatus: null, assessment: null, attention: [], updatedAt: null}));
 const reads = () => browser.sent.filter(request => request.path === "/api/guidance/dashboard-overview");
-const reply = (request: (typeof browser.sent)[number]) => json({revision: "one", observedAt: 1, available: true, globallyEnabled: true, projects: [], ...overviewWorkPage(rows, overviewPage(Object.fromEntries(request.search)))});
+const reply = (request: (typeof browser.sent)[number]) => json({revision: "one", observedAt: 1, available: true, globallyEnabled: true, projects: [], ...overviewWorkPage(rows, overviewPage({...Object.fromEntries(request.search), ...(request.search.has("mainThreadId") ? {mainThreadId: request.search.getAll("mainThreadId")} : {})}))});
 const settled = (registry: Parameters<typeof until>[0], model: ReturnType<typeof ui.makeOverview>) => until(registry, model.read, result => AsyncResult.isSuccess(result) && !result.waiting, "page settled");
 
 it.effect("full-collection query selects an unloaded match, retains failures and cancels deactivation without resetting selection", () => Effect.gen(function*() {
@@ -54,4 +54,25 @@ it.effect("coalesced hints refresh the selected page once; hidden and unmounted 
   browser.visibility("hidden"); browser.sent.length = 0; browser.hint(["overview"]); yield* liveSleep("80 millis");
   assert.equal(reads().length, 0);
   browser.visibility("visible"); stop(); registry.set(model.enabled, false); registry.dispose();
+}), {timeout: 10_000});
+
+
+it.effect("project conversation pages read their own visible identities independently of Home's retained query", () => Effect.gen(function*() {
+  browser.sent.length = 0; browser.state.reply = reply;
+  const registry = yield* scopedRegistry(); const home = ui.makeOverview(); const project = ui.makeOverview();
+  registry.set(home.selection, {q: "non-matching Home query", projectId: "", filter: "all", page: 1});
+  registry.set(home.enabled, true); const stopHome = registry.mount(home.live);
+  yield* settled(registry, home);
+  assert.equal(Option.getOrThrow(AsyncResult.value(registry.get(home.read))).work.length, 0);
+  registry.set(project.enabled, true); const stopProject = registry.mount(project.live);
+  for (const offset of [0, 25]) {
+    const ids = rows.slice(offset, offset + 25).map(row => row.mainThreadId);
+    registry.set(project.selection, {q: "", projectId: "p", filter: "all", page: 1, mainThreadIds: ids});
+    const result = yield* until(registry, project.read, result => AsyncResult.isSuccess(result) && !result.waiting && result.value.selection.mainThreadIds?.[0] === ids[0], "own project page");
+    assert.deepEqual(Option.getOrThrow(AsyncResult.value(result)).work.map(row => row.mainThreadId), ids);
+    assert.deepEqual(reads().at(-1)!.search.getAll("mainThreadId"), ids);
+    assert.equal(reads().at(-1)!.search.get("q"), "");
+    assert.equal(registry.get(home.selection).q, "non-matching Home query");
+  }
+  stopProject(); stopHome(); registry.dispose();
 }), {timeout: 10_000});

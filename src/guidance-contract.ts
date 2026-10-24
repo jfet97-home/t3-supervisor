@@ -101,7 +101,7 @@ export const SupervisorApi = HttpApi.make("supervisor").add(
     .add(
       HttpApiEndpoint.get("snapshot", "/snapshot", { success: Snapshot }),
       HttpApiEndpoint.get("dashboardOverview", "/dashboard-overview", {
-        query: {offset: Schema.optional(Text), limit: Schema.optional(Text), q: Schema.optional(Text), projectId: Schema.optional(Text), filter: Schema.optional(Schema.Literals(["all", "attention", "active", "stopped"]))}, success: DashboardOverview, error: UiError,
+        query: {offset: Schema.optional(Text), limit: Schema.optional(Text), q: Schema.optional(Text), projectId: Schema.optional(Text), filter: Schema.optional(Schema.Literals(["all", "attention", "active", "stopped"])), mainThreadId: Schema.optional(Schema.ArrayEnsure(Text))}, success: DashboardOverview, error: UiError,
       }),
       HttpApiEndpoint.get("noProjectControl", "/no-project-control", {success: NoProjectControl, error: UiError}),
       HttpApiEndpoint.post("saveNoProjectControl", "/no-project-control", {payload: NoProjectControlSave, success: NoProjectControlResult, error: UiError}),

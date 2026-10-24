@@ -69,3 +69,5 @@ and pending save identity belong to that folder and survive navigation and backg
 Global supervision, T3 connectivity and the open project's effective state are independent
 visible statuses. Global On never claims that every conversation is supervised. Conversation
 engagement uses the typed current mode and availability, separately from execution and agreement.
+
+Conversation lists read the visible conversation identities within their own project. Home search and page selection never determine their status or objective. Project attention counts cover the available project independently of Home filters.
