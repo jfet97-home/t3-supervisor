@@ -134,22 +134,3 @@ it("uses distinct platform manifest digests so Docker's legacy store cannot coll
   assert.throws(() => select("amd64", [...variants, variants[0]!]));
   assert.throws(() => select("amd64", [{ ...variants[0]!, digest: "invalid" }]));
 });
-
-it("uses distinct platform manifest digests so Docker's legacy store cannot collide on the shared index", () => {
-  const smoke = workflow.jobs.release.steps.find((step: { name?: string }) => step.name === "Verify both published image variants by immutable digest").run as string;
-  const selector = /variant=\$\(jq -er --arg architecture [^\n]+ '([^']+)' release\/image-manifest\.json\)/u.exec(smoke)?.[1];
-  assert.ok(selector);
-  const variants = [
-    { platform: { os: "linux", architecture: "amd64" }, digest: `sha256:${"1".repeat(64)}` },
-    { platform: { os: "linux", architecture: "arm64" }, digest: `sha256:${"2".repeat(64)}` },
-    { platform: { os: "unknown", architecture: "unknown" }, digest: `sha256:${"3".repeat(64)}` },
-  ];
-  const select = (architecture: string, manifests = variants) => execFileSync("jq", ["-er", "--arg", "architecture", architecture, selector], {
-    input: JSON.stringify({ digest: `sha256:${"0".repeat(64)}`, manifests }), encoding: "utf8", stdio: "pipe",
-  }).trim();
-  assert.equal(select("amd64"), variants[0]!.digest);
-  assert.equal(select("arm64"), variants[1]!.digest);
-  assert.throws(() => select("arm64", variants.slice(0, 1)));
-  assert.throws(() => select("amd64", [...variants, variants[0]!]));
-  assert.throws(() => select("amd64", [{ ...variants[0]!, digest: "invalid" }]));
-});
