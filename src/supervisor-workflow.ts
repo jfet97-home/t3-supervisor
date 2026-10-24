@@ -1540,19 +1540,20 @@ const provisionalPlan = (context: ProposalContext, message: string): WorkflowPla
 // provisional plan or a formal proposal; a provisional plan is never promoted
 export const workflowInterpretationOutcome = (interpretation: InterpretationValue, supervision: "needed" | "not_needed" | undefined,
   workflow: unknown, context: ProposalContext, nodeIds: NodeIds = randomNodeIds): InterpretationSemanticResult<WorkflowInterpretationValue> => {
+  const verdict = {...interpretation, ...(supervision ? {supervision} : {})};
   // a semantic not-needed decision is temporary: no workflow is negotiated and a later substantive request is interpreted again
   if (supervision === "not_needed" && interpretation.objective !== null) {
     if (workflow !== null) return {ok: false, code: "not_needed_workflow_present", path: "/workflow"};
-    return {ok: true, value: {...interpretation, supervision: "not_needed", workflow: {...baseWorkflow(context, "unavailable", "Supervision was judged unnecessary for this task."), plan: null}}};
+    return {ok: true, value: {...verdict, supervision: "not_needed", workflow: {...baseWorkflow(context, "unavailable", "Supervision was judged unnecessary for this task."), plan: null}}};
   }
   if (interpretation.objective === null) {
-    return {ok: true, value: {...interpretation, workflow: {...baseWorkflow(context, "unavailable", "A workflow needs a clear task objective."),
+    return {ok: true, value: {...verdict, workflow: {...baseWorkflow(context, "unavailable", "A workflow needs a clear task objective."),
       ...provisionalPlan(context, "The latest message did not establish a task objective.")}}};
   }
   const plan = validateWorkflowPlan(workflow, context, nodeIds);
   if (!plan) {
     const provisional = provisionalPlan(context, "The response did not contain a valid complete plan; the owning Supervisor will repair it in dialogue.");
-    return {ok: true, value: {...interpretation, workflow: {...baseWorkflow(context, "provisional", "The initial response could not be normalized. Continue with a finite provisional plan in the owning Supervisor dialogue."), ...provisional}}};
+    return {ok: true, value: {...verdict, workflow: {...baseWorkflow(context, "provisional", "The initial response could not be normalized. Continue with a finite provisional plan in the owning Supervisor dialogue."), ...provisional}}};
   }
   const unresolvedNodes = plan.plan === null || allNodes(plan.plan).some(node => node.kind === "step" ? node.resolution !== "resolved" :
     node.kind === "workflow" && node.resolution !== "resolved");
@@ -1562,7 +1563,7 @@ export const workflowInterpretationOutcome = (interpretation: InterpretationValu
   const message = status === "proposed"
     ? "A complete source-bound semantic plan was proposed. It remains a draft until exact operative acceptance; it is not execution evidence."
     : "A finite provisional plan was proposed. Broken definitions, missing requirements, and unknown applicability remain visible and unresolved.";
-  return {ok: true, value: {...interpretation, workflow: {...baseWorkflow(context, status, message), ...plan}}};
+  return {ok: true, value: {...verdict, workflow: {...baseWorkflow(context, status, message), ...plan}}};
 };
 
 /** Revalidates the cached context against the full freshly loaded source snapshot. */

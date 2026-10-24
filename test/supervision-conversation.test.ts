@@ -45,9 +45,10 @@ it.live("discussion remains quiet; later grants use distinct commands through th
   const root = f.projections.get(first.supervisorThreadId)!;
   root.thread.runtimeMode = "full-access"; root.thread.interactionMode = "default";
   assert.match(first.requestText, /discussion with exploration stays quiet/u);
-  yield* submitAndComplete(f, controller, first, {objective: draft.objective, reason: "Discussion before deciding", sourceMessageIds: [sourceMessageId], supervision: "needed", workflow: null, conversation: decision()});
+  yield* submitAndComplete(f, controller, first, {objective: draft.objective, reason: "Discussion before deciding", sourceMessageIds: [sourceMessageId], supervision: "not_needed", workflow: null, conversation: decision()});
   yield* controller.cycle;
   const following = (yield* f.task())!;
+  assert.equal(following.supervision, "not_needed");
   assert.equal(following.workflow, null);
   assert.equal(following.conversation?.authorization, null);
   assert.deepEqual(deriveConversationEngagement({task: following, enabled: true, available: true}), {mode: "following", availability: "current", consideredAt: following.conversation!.updatedAt});
@@ -63,6 +64,8 @@ it.live("discussion remains quiet; later grants use distinct commands through th
   yield* submitAndComplete(f, controller, pending, research("research-request"));
   yield* controller.cycle;
   const engaged = (yield* f.task())!;
+  assert.equal(engaged.supervision, "needed");
+  assert.ok(engaged.workflow?.plan);
   assert.equal(engaged.conversation?.authorization?.state, "authorized");
   assert.equal(deriveConversationEngagement({task: engaged, enabled: true, available: true}).mode, "engaged");
   assert.equal(f.dispatches().filter(call => call.payload.threadId === sourceThreadId).length, 1, JSON.stringify(yield* controller.conversation.requests.introduction(engaged.id)));
