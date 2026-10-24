@@ -1,3 +1,5 @@
+import { dashboardInvalidation } from "./dashboard-updates.js";
+import { projectKeys } from "./dashboard-events.js";
 import { Clock, Context, Data, Effect, Layer, Schema } from "effect";
 import type { SqlError } from "effect/sql";
 import { GuidanceDb, untracedSql } from "./db.js";
@@ -282,6 +284,7 @@ const normalizeTeamNotification = (notification: TeamNotification): TeamNotifica
 
 const makeSupervisorTeamStore = Effect.gen(function* () {
   const sql = yield* GuidanceDb;
+  const invalidate = yield* dashboardInvalidation(sql);
   const ids = yield* SupervisorIds;
   const supervisors = yield* ProjectSupervisorStore;
 
@@ -314,24 +317,33 @@ const makeSupervisorTeamStore = Effect.gen(function* () {
   });
   const membersFor = (binding: TeamBinding) => sql`SELECT document FROM supervisor_team_members WHERE owner_thread_id=${binding.threadId} AND owner_generation=${binding.generation} ORDER BY rowid`.pipe(
     Effect.flatMap((rows) => teamDocumentRows<TeamMember>(rows, isStoredMember, "member")));
-  const saveMember = (binding: TeamBinding, member: TeamMember) =>
-    sql`INSERT INTO supervisor_team_members VALUES(${binding.threadId},${binding.generation},${member.threadId},${member.state},${member.epoch},${JSON.stringify(member)}) ON CONFLICT(owner_thread_id,owner_generation,member_thread_id) DO UPDATE SET state=excluded.state,epoch=excluded.epoch,document=excluded.document`;
+  const saveMember = (binding: TeamBinding, member: TeamMember) => Effect.gen(function* () {
+    const previous = yield* memberOf(binding, member.threadId);
+    yield* sql`INSERT INTO supervisor_team_members VALUES(${binding.threadId},${binding.generation},${member.threadId},${member.state},${member.epoch},${JSON.stringify(member)}) ON CONFLICT(owner_thread_id,owner_generation,member_thread_id) DO UPDATE SET state=excluded.state,epoch=excluded.epoch,document=excluded.document`;
+    yield* invalidate(projectKeys(binding.projectId, binding.mainThreadId), previous, member);
+  });
   const assignmentOf = Effect.fnUntraced(function* (binding: TeamBinding, subtreeRootThreadId: string) {
     const [row] = yield* sql`SELECT document FROM supervisor_team_assignments WHERE owner_thread_id=${binding.threadId} AND owner_generation=${binding.generation} AND subtree_root_thread_id=${subtreeRootThreadId}`;
     return row === undefined ? null : yield* teamDocumentRow<TeamAssignment>(row, isStoredAssignment, "assignment");
   });
   const assignmentsFor = (binding: TeamBinding) => sql`SELECT document FROM supervisor_team_assignments WHERE owner_thread_id=${binding.threadId} AND owner_generation=${binding.generation} ORDER BY subtree_root_thread_id`.pipe(
     Effect.flatMap((rows) => teamDocumentRows<TeamAssignment>(rows, isStoredAssignment, "assignment")));
-  const saveAssignment = (binding: TeamBinding, assignment: TeamAssignment) =>
-    sql`INSERT INTO supervisor_team_assignments VALUES(${binding.threadId},${binding.generation},${assignment.subtreeRootThreadId},${JSON.stringify(assignment)}) ON CONFLICT(owner_thread_id,owner_generation,subtree_root_thread_id) DO UPDATE SET document=excluded.document`;
+  const saveAssignment = (binding: TeamBinding, assignment: TeamAssignment) => Effect.gen(function* () {
+    const previous = yield* assignmentOf(binding, assignment.subtreeRootThreadId);
+    yield* sql`INSERT INTO supervisor_team_assignments VALUES(${binding.threadId},${binding.generation},${assignment.subtreeRootThreadId},${JSON.stringify(assignment)}) ON CONFLICT(owner_thread_id,owner_generation,subtree_root_thread_id) DO UPDATE SET document=excluded.document`;
+    yield* invalidate(projectKeys(binding.projectId, binding.mainThreadId), previous, assignment);
+  });
   const notificationsFor = (binding: TeamBinding) => sql`SELECT document FROM supervisor_team_notifications WHERE owner_thread_id=${binding.threadId} AND owner_generation=${binding.generation} ORDER BY created_at,rowid`.pipe(
     Effect.flatMap((rows) => teamDocumentRows<TeamNotification>(rows, isStoredNotification, "notification")), Effect.map((values) => values.map(normalizeTeamNotification)));
   const notificationOf = Effect.fnUntraced(function* (binding: TeamBinding, notificationId: string) {
     const [row] = yield* sql`SELECT document FROM supervisor_team_notifications WHERE owner_thread_id=${binding.threadId} AND owner_generation=${binding.generation} AND id=${notificationId}`;
     return row === undefined ? null : normalizeTeamNotification(yield* teamDocumentRow<TeamNotification>(row, isStoredNotification, "notification"));
   });
-  const saveNotification = (binding: TeamBinding, notification: TeamNotification) =>
-    sql`INSERT INTO supervisor_team_notifications VALUES(${binding.threadId},${binding.generation},${notification.id},${notification.recipientThreadId},${notification.state},${notification.createdAt},${JSON.stringify(notification)}) ON CONFLICT(owner_thread_id,owner_generation,id) DO UPDATE SET state=excluded.state,document=excluded.document`;
+  const saveNotification = (binding: TeamBinding, notification: TeamNotification) => Effect.gen(function* () {
+    const previous = yield* notificationOf(binding, notification.id);
+    yield* sql`INSERT INTO supervisor_team_notifications VALUES(${binding.threadId},${binding.generation},${notification.id},${notification.recipientThreadId},${notification.state},${notification.createdAt},${JSON.stringify(notification)}) ON CONFLICT(owner_thread_id,owner_generation,id) DO UPDATE SET state=excluded.state,document=excluded.document`;
+    yield* invalidate(projectKeys(binding.projectId, binding.mainThreadId), previous, notification);
+  });
   const notificationCount = (binding: TeamBinding) =>
     countOf(sql`SELECT count(*) AS n FROM supervisor_team_notifications WHERE owner_thread_id=${binding.threadId} AND owner_generation=${binding.generation}`);
   const addNotification = Effect.fnUntraced(function* (binding: TeamBinding, input: Omit<TeamNotification, "createdAt" | "updatedAt" | "state" | "deliveryAttempt"> & {deliveryAttempt?: number}, now: number) {
@@ -355,6 +367,7 @@ const makeSupervisorTeamStore = Effect.gen(function* () {
       return yield* deny("supervisor_team_event_capacity");
     const event: TeamEvent = { ...input, id, acknowledgedAt: null };
     yield* sql`INSERT OR IGNORE INTO supervisor_team_events VALUES(${binding.threadId},${binding.generation},${event.id},${event.createdAt},${null},${JSON.stringify(event)})`;
+    yield* invalidate(projectKeys(binding.projectId, binding.mainThreadId));
     return event;
   });
   const requestsFor = (binding: TeamBinding) => sql`SELECT document FROM supervisor_team_requests WHERE owner_thread_id=${binding.threadId} AND owner_generation=${binding.generation} ORDER BY created_at`.pipe(
@@ -931,6 +944,7 @@ const makeSupervisorTeamStore = Effect.gen(function* () {
     if (row.acknowledged_at !== null) return current;
     const event = { ...current, acknowledgedAt: at };
     yield* sql`UPDATE supervisor_team_events SET acknowledged_at=${at},document=${JSON.stringify(event)} WHERE owner_thread_id=${binding.threadId} AND owner_generation=${binding.generation} AND id=${eventId} AND acknowledged_at IS NULL`;
+    yield* invalidate(projectKeys(binding.projectId, binding.mainThreadId));
     return event;
   }));
   // the existing-event check, the capacity count and the insert are one transaction (ct-tstore-02)

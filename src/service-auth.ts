@@ -2,7 +2,7 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { constants, type BigIntStats } from "node:fs";
 import { open, type FileHandle } from "node:fs/promises";
 import { join } from "node:path";
-import { Cause, Clock, Context, Data, Effect, FileSystem, Layer, Option, type PlatformError, Predicate, Redacted, Schema, Scope } from "effect";
+import { Cause, Clock, Context, Data, Effect, FileSystem, Layer, Option, type PlatformError, Predicate, PubSub, Redacted, Schema, Scope, Stream } from "effect";
 import type { SqlClient } from "effect/sql";
 import { AccessDb, accessDbLayer, untracedSql } from "./db.js";
 
@@ -69,6 +69,7 @@ export class ServiceAuth extends Context.Service<ServiceAuth, {
   // a canonical single-use grant yields a new session; anything else, including the workflow MCP token, yields null
   readonly login: (token: string) => Effect.Effect<Redacted.Redacted<string> | null>;
   readonly authenticated: (session: string | undefined) => Effect.Effect<boolean>;
+  readonly sessionLifetime: (session: string | undefined) => Effect.Effect<Effect.Effect<void> | null, never, Scope.Scope>;
   // durable revocation, visible to every instance on the same state
   readonly logout: (session: string | undefined) => Effect.Effect<void>;
   // exact `Bearer <token>` against the in-memory workflow MCP token, constant time, no database
@@ -426,6 +427,15 @@ const makeServiceAuth = (dataDirectory: string): Effect.Effect<ServiceAuth["Serv
     // registered after the client, so every check fails closed before the client itself closes
     let closed = false;
     yield* Effect.addFinalizer(() => Effect.sync(() => { closed = true; }));
+    let watchAvailable = true;
+    const revocations = yield* Effect.acquireRelease(PubSub.sliding<void>(1), PubSub.shutdown);
+    // one scoped filesystem watch observes revocations from another access client too; it never polls the database
+    yield* Effect.forkScoped(Stream.runForEach(fs.watch(accessDirectory), () => PubSub.publish(revocations, undefined)).pipe(
+      Effect.catchCause(cause => Cause.hasInterruptsOnly(cause) ? Effect.failCause(cause) : Effect.gen(function* () {
+        watchAvailable = false;
+        yield* PubSub.publish(revocations, undefined);
+        yield* Effect.sync(() => console.log(JSON.stringify({event: "dashboard_session_watch_unavailable"})));
+      }))));
 
     const sessionCount = rowCount(db, SESSION_TABLE);
 
@@ -470,6 +480,7 @@ const makeServiceAuth = (dataDirectory: string): Effect.Effect<ServiceAuth["Serv
     const logout = (session: string | undefined): Effect.Effect<void> => Effect.gen(function* () {
       if (closed || !isCanonicalToken(session)) return;
       yield* db.unsafe(`DELETE FROM ${SESSION_TABLE} WHERE token_hash=?`, [tokenHash(session)]);
+      yield* PubSub.publish(revocations, undefined);
     }).pipe(Effect.orDie, untracedSql);
 
     const mcpAuthorized = (authorization: string | undefined): boolean => {
@@ -479,7 +490,18 @@ const makeServiceAuth = (dataDirectory: string): Effect.Effect<ServiceAuth["Serv
       return sameToken(authorization.slice(7), workflowMcpToken);
     };
 
-    return ServiceAuth.of({ login, authenticated, logout, mcpAuthorized });
+    const sessionLifetime = (session: string | undefined) => Effect.gen(function* () {
+      const queue = yield* PubSub.subscribe(revocations);
+      if (!(yield* authenticated(session)) || !isCanonicalToken(session)) return null;
+      const [row] = yield* db.unsafe<{expires_at: number}>(`SELECT expires_at FROM ${SESSION_TABLE} WHERE token_hash=?`, [tokenHash(session)]);
+      if (!row || typeof row.expires_at !== "number") return null;
+      const remaining = row.expires_at - (yield* wallClock);
+      if (remaining <= 0) return null;
+      const revoked = Stream.fromSubscription(queue).pipe(Stream.filterEffect(() => Effect.map(authenticated(session), value => !watchAvailable || !value)), Stream.take(1), Stream.runDrain);
+      return watchAvailable ? Effect.asVoid(Effect.raceFirst(Effect.sleep(remaining), revoked)) : Effect.void;
+    }).pipe(failClosed(null), untracedSql);
+
+    return ServiceAuth.of({ login, authenticated, logout, sessionLifetime, mcpAuthorized });
   }).pipe(untracedSql);
 
 // a single-use dashboard grant on an initialized instance, over its own short-lived access client; it never creates

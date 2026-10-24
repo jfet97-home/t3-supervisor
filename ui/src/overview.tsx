@@ -7,7 +7,7 @@ import { AsyncResult, Atom } from "effect/reactivity";
 import { readOverviewPages, type DashboardOverviewInfo, type DashboardWorkInfo } from "../../src/dashboard-overview.js";
 import type { GuidanceSnapshot } from "../../src/guidance-contract.js";
 import { ApiClient, classifyMutation } from "./api.js";
-import { authEpoch, environmentAtom, pollWhileVisible, uiRuntime } from "./atoms.js";
+import { authEpoch, environmentAtom, refreshOnDashboardChange, uiRuntime } from "./atoms.js";
 import { directoryRoute, RouteLink, type Route } from "./navigation.js";
 import { Icon } from "./icons.js";
 
@@ -19,15 +19,14 @@ export function ReadTime({value, prefix = "Read"}: {value: number | null; prefix
   return <span className="small muted">{prefix} {value === null ? "time unavailable" : <time dateTime={new Date(value).toISOString()} title={new Date(value).toLocaleString()}>{new Date(value).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"})}</time>}</span>;
 }
 
-export const overviewRefreshMillis = 30_000;
 export const overviewFailureMessage = "The work overview could not be refreshed. The last successful read is kept; current state may have changed.";
 
 // the work overview of a dashboard: while enabled (active and connected) it reads the loaded range, at least 100
 // conversations and 100 more after a load-more request, and keeps its last successful read through refreshes and
-// failures; disabling it interrupts the read in flight and keeps the last result; the poll is mounted only while enabled.
+// failures; disabling it interrupts the read in flight and keeps the last result; the change subscription is mounted only while enabled.
 // it follows the auth epoch and the T3 environment, so a new session or environment reads the range again; a 401 while
-// signed out leaves the epoch as it was, so the read repeats only on its interval
-export const makeOverview = (pollMillis: number) => {
+// signed out leaves the epoch as it was, and a new connection reconciles its mounted reads
+export const makeOverview = () => {
   const enabled = Atom.make(false);
   const more = Atom.make(false);
   const read = uiRuntime.atom((get) => {
@@ -41,9 +40,9 @@ export const makeOverview = (pollMillis: number) => {
     return Effect.flatMap(ApiClient, client => readOverviewPages(offset =>
       classifyMutation(client.guidance.dashboardOverview({query: {offset: String(offset), limit: "100"}})), count));
   });
-  return {enabled, more, read, polled: read.pipe(pollWhileVisible(pollMillis))};
+  return {enabled, more, read, live: read.pipe(refreshOnDashboardChange("overview"))};
 };
-export const overview = makeOverview(overviewRefreshMillis);
+export const overview = makeOverview();
 
 export interface OverviewState {
   readonly data: DashboardOverviewInfo | null;
@@ -64,7 +63,7 @@ export function useOverview(active: boolean, connected: boolean): OverviewState 
   const enabled = active && connected;
   const setEnabled = useAtomSet(overview.enabled);
   useEffect(() => setEnabled(enabled), [enabled, setEnabled]);
-  const result = useAtomValue(enabled ? overview.polled : overview.read);
+  const result = useAtomValue(enabled ? overview.live : overview.read);
   const refresh = useAtomRefresh(overview.read);
   const setMore = useAtomSet(overview.more);
   return {...overviewView(result, enabled), refresh, loadMore: () => { setMore(true); refresh(); }};
@@ -103,8 +102,8 @@ export function Home({data, overview, navigate, startPanel}: {data: GuidanceSnap
     (filter === "all" || filter === "attention" && item.attention.length > 0 || filter === "active" && item.nativeState === "active" || filter === "stopped" && item.supervision !== "enabled") &&
     `${item.title} ${item.objective ?? ""} ${item.reason}`.toLowerCase().includes(query.toLowerCase())) ?? [];
   return <section className="stack home-workspace">
-    <div className="page-heading heading-actions"><div><h1>Work overview</h1><p className="muted">What needs your attention, and where work stands.</p></div><div className="row"><ReadTime value={result?.observedAt ?? null}/><button onClick={overview.refresh} disabled={!data.connected || overview.loading}><Icon name="refresh" size={17}/>{overview.loading ? "Refreshing…" : "Refresh overview"}</button></div></div>
-    {(!data.connected || overview.error || result && !result.available) && <div className="notice" role="status"><strong>Current coverage is limited.</strong> {result ? overview.error || (!data.connected ? "T3 is disconnected. Showing the last read; it may be out of date." : "Supervisor access is unavailable. Current supervision state has not been established.") : !data.connected ? "T3 is disconnected. Reconnect to load current work." : "Could not load current work. No successful read is available."} <button type="button" onClick={overview.refresh} disabled={!data.connected || overview.loading}>Retry overview</button></div>}
+    <div className="page-heading heading-actions"><div><h1>Work overview</h1><p className="muted">What needs your attention, and where work stands.</p></div><div className="row"><ReadTime value={result?.observedAt ?? null}/><button onClick={() => {if (data.connected && !overview.loading) overview.refresh();}} aria-disabled={!data.connected || overview.loading}><Icon name="refresh" size={17}/>{overview.loading ? "Refreshing…" : "Refresh overview"}</button></div></div>
+    {(!data.connected || overview.error || result && !result.available) && <div className="notice" role="status"><strong>Current coverage is limited.</strong> {result ? overview.error || (!data.connected ? "T3 is disconnected. Showing the last read; it may be out of date." : "Supervisor access is unavailable. Current supervision state has not been established.") : !data.connected ? "T3 is disconnected. Reconnect to load current work." : "Could not load current work. No successful read is available."} <button type="button" onClick={() => {if (data.connected && !overview.loading) overview.refresh();}} aria-disabled={!data.connected || overview.loading}>Retry overview</button></div>}
     {result?.projects.some(item => !item.available) && <p className="notice">Some projects are unavailable. Their current work is not included in this overview.</p>}
     {!result && !overview.error && data.connected && <div className="loading-state" role="status"><div className="skeleton"/><div className="skeleton"/><p>Reading current work…</p></div>}
     {result && <>

@@ -10,7 +10,7 @@ import { TestClock } from "effect/testing";
 import { vi } from "vitest";
 import type { ProjectDefinitionSnapshot } from "../src/project-definitions-contract.js";
 import { clockedRegistry, scopedRegistry } from "./support/g7-page.js";
-import { json, liveSleep, makeBrowser, nextTurn, until, type SentRequest } from "./support/g7-browser.js";
+import { json, liveSleep, makeBrowser, until, type SentRequest } from "./support/g7-browser.js";
 
 // target regressions of the dashboard integration (WP-S7-INT) over a stubbed browser and the real page runtime: the
 // shared admit helper, the per-registry claim, the auth epoch as session generation, stale reads, the transitional
@@ -204,7 +204,7 @@ it.effect("D2 an admitted operation is claimed per registry: repeated writes in 
   second.dispose();
 }), { timeout: 10_000 });
 
-it.effect("D3 signed-out 401s leave the auth epoch as it was, so the epoch-keyed reads repeat only on their polls, and a sign-in reads each of them once", () => Effect.gen(function* () {
+it.effect("D3 signed-out 401s leave the auth epoch as it was, so the epoch-keyed reads remain quiet without a session, and a sign-in reads each of them once", () => Effect.gen(function* () {
   // a signed-in page that knows its T3 environment signs out
   browser.local.set("supervisor-session", "session-0");
   browser.sent.length = 0;
@@ -227,30 +227,21 @@ it.effect("D3 signed-out 401s leave the auth epoch as it was, so the epoch-keyed
   browser.state.reply = () => new Promise<Response>((resolve) => setImmediate(() => resolve(json({ message: "Sign in to Supervisor." }, 401))));
   yield* settled(registry, atoms.snapshotAtom, "the signed-out snapshot");
   browser.sent.length = 0;
-  const model = overview.makeOverview(40);
+  const model = overview.makeOverview();
   registry.set(model.enabled, true);
   const search = noProject.chatCandidates("exclude")("")(0);
-  const ticks = atoms.pollSignal(40);
-  const polling = [ticks, shell.snapshotPoll(40), shell.accessRefresh, model.polled].map((atom) => registry.mount(atom as Atom.Atom<unknown>));
+  const watching = [shell.dashboardSnapshot, shell.accessRefresh, model.live].map(atom => registry.mount(atom as Atom.Atom<unknown>));
   const stopSearch = registry.mount(search);
-  // four poll intervals pass on the page runtime's clock, each one's polled reads answered before the next, as the real
-  // intervals allowed
-  for (let interval = 1; interval <= 4; interval++) {
-    yield* TestClock.adjust("40 millis");
-    yield* nextTurn;
-    yield* Effect.all([shell.snapshotPoll(40), model.polled].map((atom) =>
-      settled(registry, atom as Atom.Atom<AsyncResult.AsyncResult<unknown, unknown>>, `the reads of interval ${interval}`)), { concurrency: "unbounded" });
-  }
-  const polls = yield* until(registry, ticks, (value) => AsyncResult.isSuccess(value) && value.value >= 4, "four polls");
-  const count = AsyncResult.isSuccess(polls) ? polls.value : 0;
-  assert.equal(epochOf(registry), signedOut, "no 401 while signed out advances the epoch");
-  assert.ok(sentTo("/api/guidance/snapshot").length <= count + 2, `snapshot reads bounded by the polls: ${sentTo("/api/guidance/snapshot").length}`);
-  assert.ok(sentTo("/api/guidance/dashboard-overview").length <= count + 2, `overview reads bounded by the polls: ${sentTo("/api/guidance/dashboard-overview").length}`);
-  assert.equal(sentTo("/api/guidance/supervision-candidates").length, 1, "an unpolled search is read once");
-  assert.ok(sentTo("/api/csrf").length <= 2 * count + 4, `access refreshes bounded by the reads: ${sentTo("/api/csrf").length}`);
+  yield* Effect.all([shell.dashboardSnapshot, model.live].map(atom => settled(registry, atom as Atom.Atom<AsyncResult.AsyncResult<unknown, unknown>>, "signed-out read")));
+  yield* liveSleep("150 millis");
+  assert.equal(epochOf(registry), signedOut, "signed-out 401s do not advance the epoch");
+  assert.ok(sentTo("/api/guidance/snapshot").length <= 1);
+  assert.equal(sentTo("/api/guidance/dashboard-overview").length, 1);
+  assert.equal(sentTo("/api/guidance/supervision-candidates").length, 1);
+  assert.equal(sentTo("/api/events").length, 0, "no session opens no stream");
 
   // without polls, a sign-in is the only reason to read again
-  for (const stop of polling) stop();
+  for (const stop of watching) stop();
   const stopOverview = registry.mount(model.read);
   yield* Effect.all([atoms.snapshotAtom, model.read, search].map((atom) =>
     settled(registry, atom as Atom.Atom<AsyncResult.AsyncResult<unknown, unknown>>, "the signed-out read")), { concurrency: "unbounded" });
@@ -413,7 +404,7 @@ it.effect("D8 the root snapshot's T3 environment scopes the panels' keys and dra
   assert.equal(browser.sent.length, 0);
   const stops = [atoms.snapshotAtom, atoms.environmentAtom, noProject.noProjectState].map((atom) => registry.mount(atom as Atom.Atom<unknown>));
   yield* until(registry, atoms.environmentAtom, (value) => value === "environment-a", "environment a");
-  const model = overview.makeOverview(60_000);
+  const model = overview.makeOverview();
   registry.set(model.enabled, true);
   stops.push(registry.mount(model.read));
   yield* until(registry, model.read, (result) => AsyncResult.isSuccess(result) && !result.waiting, "the overview of environment a");

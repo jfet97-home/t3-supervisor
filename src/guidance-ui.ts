@@ -2,7 +2,9 @@ import { timingSafeEqual } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import { extname, resolve, sep } from "node:path";
 import { NodeHttpServer, NodeHttpServerRequest } from "@effect/platform-node";
-import { ByteSize, Cause, Context, Crypto, Data, Effect, FileSystem, Layer, Option, Redacted, Schema, type Types } from "effect";
+import { ByteSize, Cause, Context, Crypto, Data, Effect, FileSystem, Layer, Option, Redacted, Schema, Stream, type Types } from "effect";
+import { Sse } from "effect/encoding";
+import { DashboardUpdates } from "./dashboard-updates.js";
 import { HttpApiBuilder } from "effect/http-api";
 import { Headers, HttpEffect, HttpIncomingMessage, HttpRouter, HttpServer, HttpServerError, HttpServerRequest, HttpServerResponse } from "effect/http";
 import { ListenerUnavailable } from "./errors.js";
@@ -107,6 +109,7 @@ const make = Effect.fnUntraced(function* (config: SupervisorConfig, options: Gui
   const fs = yield* FileSystem.FileSystem;
   const crypto = yield* Crypto.Crypto;
   const auth = yield* ServiceAuth;
+  const updates = yield* DashboardUpdates;
   const runtime = yield* GuidanceRuntime;
   const mcp = yield* WorkflowMcp;
   const policy = yield* ThreadPolicyStore;
@@ -246,6 +249,13 @@ const make = Effect.fnUntraced(function* (config: SupervisorConfig, options: Gui
       if (url.pathname.startsWith("/auth/")) return yield* answerFailures(authRequest(routed, origin));
       if (!url.pathname.startsWith("/api/")) return yield* answerFailures(Effect.interruptible(staticFile(routed)));
       if (!(yield* Effect.interruptible(auth.authenticated(sessionOf(request))))) return reject(401, "Sign in to Supervisor.");
+      if (url.pathname === "/api/events") {
+        if (request.method !== "GET" || url.search) return reject(401, "Use header authentication for dashboard updates.");
+        const lifetime = yield* Effect.interruptible(auth.sessionLifetime(sessionOf(request)));
+        if (!lifetime) return reject(401, "Sign in to Supervisor.");
+        const bytes = updates.stream.pipe(Stream.interruptWhen(lifetime), Stream.pipeThroughChannel(Sse.encode()), Stream.encodeText);
+        return HttpServerResponse.stream(bytes, {contentType: "text/event-stream", headers: {...securityHeaders, connection: "keep-alive"}});
+      }
       const csrfHeader: unknown = headers["x-csrf-token"];
       if (request.method !== "GET" && (headers.origin !== origin || typeof csrfHeader !== "string" || !equal(csrfHeader, csrf)))
         return reject(403, "Refresh the local dashboard before changing settings.");

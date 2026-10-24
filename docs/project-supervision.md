@@ -493,3 +493,27 @@ management for project and workflow supervision.
 See [workflow MCP](workflow-mcp.md) for exact write authorization, size limits,
 receipts and mutable-plan history. Source tests, staged VM proof and actual service
 deployment are separate claims; current installed revisions belong in Lab tracking.
+
+## Dashboard updates
+
+The visible dashboard shares one header-authenticated fetch stream at `GET /api/events`.
+A connection begins with `reset`; later `invalidate` events contain at most 64 dependency
+keys (`snapshot`, `overview`, `project:<id>`, `progress:<project>:<main>`), never rows.
+The cursor is process-local. Reconnect and a detected subscriber gap reconcile through
+the existing typed reads; no event log or polling fallback is retained.
+
+Successful semantic SQL writes register notifications through the shared client's
+`afterCommit`, including nested transactions. Rollback, reads, unchanged task documents,
+collection clocks and delivery-observation counters emit nothing. Changes are coalesced
+for 20 ms; snapshot-only connectivity changes also publish. Native T3 ingestion retains
+its own cadence: SSE removes dashboard polling delay, not upstream collection delay.
+
+The stream shares the dashboard registry and `sessionHttpClient`. Hide, logout, auth
+changes and registry disposal release it; visible return opens a connection and reconciles
+mounted readers once. Revoked or expired sessions close an already-open stream, including
+revocation by another access client. An unavailable revocation watch ends SSE streams
+without revoking dashboard or workflow MCP authentication; connection retries still
+check the session. Session values never enter URLs. Retry reconnects
+with bounded exponential backoff; a 401 clears only the requesting session. Dirty drafts,
+admitted mutation IDs, loaded Home prefixes and progress offsets keep their existing
+lifetimes. Manual refresh remains available.

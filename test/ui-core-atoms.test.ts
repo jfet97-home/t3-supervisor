@@ -2,21 +2,19 @@ import assert from "node:assert/strict";
 import { beforeAll, it } from "@effect/vitest";
 import { Deferred, Effect } from "effect";
 import { AsyncResult } from "effect/reactivity";
-import { TestClock } from "effect/testing";
-import { clockedRegistry, installGlobal, scopedRegistry } from "./support/g7-page.js";
+import { installGlobal, scopedRegistry } from "./support/g7-page.js";
 import { orAfter, until } from "./support/g7-browser.js";
 
 // target regressions of the shared ui atom contract (plan 3.8, WP-S7-CORE) over a stubbed browser: admitted mutations,
-// outcome classification, visibility-aware polling, retained last success, keep-alive drafts and the auth epoch. the
-// waits for an atom value are bounded on the live clock; the poll test steps the page runtime's clock with TestClock, and
-// the disposal test is it.live because the absence of an abort can only be observed over real event-loop time
+// outcome classification, change-driven refresh, retained last success, keep-alive drafts and the auth epoch. the
+// waits for an atom value are bounded on the live clock; the disposal test is it.live because the absence of an abort can only be observed over real event-loop time
 
 interface Sent { readonly method: string; readonly path: string; readonly session: string | null; readonly csrf: string | null }
 const sent: Sent[] = [];
 let reply: (path: string, signal: AbortSignal | undefined) => Promise<Response> = async () => new Response("{}");
 const storage = new Map<string, string>();
 const browser = new EventTarget();
-let visibility: "visible" | "hidden" = "visible";
+const visibility = "visible";
 
 type Core = typeof import("../ui/src/atoms.js");
 type Access = typeof import("../ui/src/access.js");
@@ -30,7 +28,7 @@ let api: Api;
 beforeAll(() => Effect.gen(function* () {
   yield* installGlobal("location", { origin: "http://supervisor.test" });
   yield* installGlobal("window", browser);
-  yield* installGlobal("document", { get visibilityState() { return visibility; }, get hidden() { return visibility === "hidden"; } });
+  yield* installGlobal("document", { get visibilityState() { return visibility; }, get hidden() { return false; }, addEventListener: browser.addEventListener.bind(browser), removeEventListener: browser.removeEventListener.bind(browser) });
   yield* installGlobal("localStorage", { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => { storage.set(key, value); },
     removeItem: (key: string) => { storage.delete(key); } });
   yield* installGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -149,29 +147,18 @@ it.effect("mutation failures follow the baseline outcome rules without replaying
   }
 }), { timeout: 10_000 });
 
-it.effect("the poll signal ticks only while the page is visible and a refreshed read keeps its last success after a failure", () => Effect.gen(function* () {
-  const registry = yield* clockedRegistry(core.uiRuntime);
+it.effect("a matching committed-change refresh retains the last success after failure", () => Effect.gen(function* () {
+  const registry = yield* scopedRegistry();
   let reads = 0;
   let fail = false;
-  const read = core.uiRuntime.atom(Effect.suspend(() => { reads++; return fail ? Effect.fail("unavailable" as const) : Effect.succeed(reads); }))
-    .pipe(core.pollWhileVisible(20));
-  const stop = registry.subscribe(read, () => undefined, { immediate: true });
-  // one interval passes on the page runtime's clock
-  yield* TestClock.adjust("20 millis");
-  yield* until(registry, read, (value) => AsyncResult.isSuccess(value) && reads >= 2, "a visible tick refreshes");
-  visibility = "hidden";
-  const hiddenFrom = reads;
-  // six intervals pass while hidden and nothing reads
-  yield* TestClock.adjust("120 millis");
-  assert.equal(reads, hiddenFrom, "no polling while hidden");
-  fail = true;
-  visibility = "visible";
-  yield* TestClock.adjust("20 millis");
-  const failed = yield* until(registry, read, AsyncResult.isFailure, "the next visible tick fails");
-  assert.ok(AsyncResult.isFailure(failed) && failed.previousSuccess._tag === "Some", "the last successful read is kept");
-  stop();
-  registry.dispose();
-}), { timeout: 10_000 });
+  const read = core.uiRuntime.atom(Effect.suspend(() => {reads++; return fail ? Effect.fail("unavailable" as const) : Effect.succeed(reads);}));
+  const stop = registry.subscribe(read, () => undefined, {immediate: true});
+  yield* until(registry, read, AsyncResult.isSuccess, "first success");
+  fail = true; registry.refresh(read);
+  const failed = yield* until(registry, read, AsyncResult.isFailure, "refresh fails");
+  assert.ok(AsyncResult.isFailure(failed) && failed.previousSuccess._tag === "Some");
+  stop(); registry.dispose();
+}));
 
 it.effect("drafts are keep-alive per scope and survive unmount; the auth epoch advances on sign-in and on another tab's change", () => Effect.gen(function* () {
   const registry = yield* scopedRegistry();

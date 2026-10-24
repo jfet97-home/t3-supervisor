@@ -1,3 +1,4 @@
+import { DashboardUpdates } from "../../src/dashboard-updates.js";
 import assert from "node:assert/strict";
 import { join } from "node:path";
 import { NodeCrypto, NodeFileSystem } from "@effect/platform-node";
@@ -75,6 +76,7 @@ export const catalogRuntime = (config: SupervisorConfig) => GuidanceRuntime.laye
   Layer.provideMerge(Layer.succeed(Configuration, config)));
 
 export type ListenerOptions = {
+  readonly updates?: DashboardUpdates["Service"] | undefined;
   readonly controller?: WorkflowWriteController["Service"] | undefined;
   readonly ui?: GuidanceUiOptions | undefined;
   // stand between the listeners and the real access service and file system
@@ -92,7 +94,7 @@ export const listenersLayer = (config: SupervisorConfig, options: ListenerOption
     : NodeFileSystem.layer;
   const mcp = Layer.effect(WorkflowMcp, WorkflowMcp.make(options.controller ?? workflowController()));
   return GuidanceUi.layer(config, options.ui ?? {}).pipe(
-    Layer.provide(Layer.mergeAll(auth, mcp)),
+    Layer.provide(Layer.mergeAll(auth, mcp, options.updates ? Layer.succeed(DashboardUpdates, options.updates) : DashboardUpdates.layer)),
     Layer.provide(Layer.mergeAll(files, NodeCrypto.layer)));
 };
 

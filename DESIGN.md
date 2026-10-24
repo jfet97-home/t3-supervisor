@@ -572,3 +572,14 @@ The remaining (22) findings predate the extension: selection colors, rail/count/
 
 The source basis is `ui/src/style.css`, `workflow-journey.tsx`, `project-supervisor.tsx`, `project-definitions.tsx`, `overview.tsx`, `main.tsx`, `supervisor-control.tsx` and `steps-and-workflows-guide.tsx` under `ui/src/`, together with `PRODUCT.md` and `.impeccable/surfaces/ui-src-main-tsx.md`. Sidecar snippets are static, self-contained examples of these components, with native disclosure interactions; they do not verify live data, navigation, service effects, persisted state or deployment.
 
+
+### Committed-change refresh
+
+The dashboard uses one authenticated SSE hint stream per visible page registry. Snapshot,
+Home, chat status and loaded progress pages refresh through their existing typed readers;
+background changes preserve keyboard focus, dirty drafts and admitted operation identities.
+Hidden pages disconnect and reconcile once visible. Refresh and reconnect interstitials
+are silent; meaningful existing status text retains its native semantics. This changes
+refresh ownership, with no visual, theme or navigation redesign. Refresh buttons use
+`aria-disabled` with guarded activation, so a background read does not drop keyboard
+focus when temporarily unavailable.

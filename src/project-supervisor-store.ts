@@ -1,3 +1,5 @@
+import { dashboardInvalidation } from "./dashboard-updates.js";
+import { projectKeys } from "./dashboard-events.js";
 import { ConversationFacts } from "./supervision-conversation-contract.js";
 import { Clock, Context, Data, Effect, Layer, Ref, Schema } from "effect";
 import type { SqlError } from "effect/sql";
@@ -189,6 +191,7 @@ const expirableTaskStatuses: ReadonlyArray<string> = ["inferred", "needs_context
 
 const makeProjectSupervisorStore = Effect.gen(function* () {
   const sql = yield* GuidanceDb;
+  const invalidate = yield* dashboardInvalidation(sql);
   const ids = yield* SupervisorIds;
   const reset = yield* SupervisorStateReset;
   // the process's ownership set, which the ownership readers hold by reference
@@ -212,8 +215,12 @@ const makeProjectSupervisorStore = Effect.gen(function* () {
     const value = yield* metaValue(key);
     return value === undefined ? null : yield* storedDocument<A, ProjectSupervisorStoreError>(value, guard, rowInvalid("meta"));
   });
-  const putMeta = (key: string, value: string) => sql`INSERT INTO meta VALUES(${key},${value}) ON CONFLICT(key) DO UPDATE SET value=excluded.value`;
-  const deleteMeta = (key: string) => sql`DELETE FROM meta WHERE key=${key}`;
+  const putMeta = (key: string, value: string) => Effect.gen(function* () {
+    const [previous] = yield* sql`SELECT value FROM meta WHERE key=${key}`;
+    yield* sql`INSERT INTO meta VALUES(${key},${value}) ON CONFLICT(key) DO UPDATE SET value=excluded.value`;
+    yield* invalidate(null, previous?.value ?? null, value);
+  });
+  const deleteMeta = (key: string) => sql`DELETE FROM meta WHERE key=${key} RETURNING key`.pipe(Effect.tap(rows => rows.length > 0 ? invalidate(null) : Effect.void));
   const metaExists = (key: string) => Effect.map(sql`SELECT 1 FROM meta WHERE key=${key}`, (rows) => rows.length > 0);
   const countOf = (statement: Effect.Effect<ReadonlyArray<unknown>, SqlError.SqlError>) =>
     statement.pipe(Effect.flatMap(([row]) => decodeCountRow(row)), Effect.map((row) => row.n));
@@ -345,15 +352,18 @@ const makeProjectSupervisorStore = Effect.gen(function* () {
       else delete next[key];
     }
     yield* sql`UPDATE supervisor_main_bindings SET document=${JSON.stringify(next)} WHERE project_id=${value.projectId} AND main_thread_id=${value.mainThreadId}`;
+    yield* invalidate(projectKeys(value.projectId, value.mainThreadId), current, next);
   });
 
   const saveTaskOf = Effect.fnUntraced(function* (task: TaskRecord) {
-    if (!(yield* taskOf(task.threadId))) {
+    const previous = yield* taskOf(task.threadId);
+    if (!previous) {
       // capacity counts only new rows: 10,000 in total, 100 queued, dispatching or waiting per project
       if ((yield* countOf(sql`SELECT count(*) AS n FROM supervisor_task_interpretations`)) >= 10_000 ||
         (yield* tasksOf(task.projectId)).filter((value) => activeTaskStatuses.includes(value.status)).length >= 100) return yield* refuse("supervisor_task_capacity");
     }
     yield* sql`INSERT INTO supervisor_task_interpretations VALUES(${task.threadId},${task.projectId},${JSON.stringify(task)},${task.updatedAt}) ON CONFLICT(thread_id) DO UPDATE SET document=excluded.document,updated_at=excluded.updated_at`;
+    yield* invalidate(projectKeys(task.projectId, task.threadId), previous, task);
   });
   const ownedCount = countOf(sql`SELECT count(*) AS n FROM supervisor_owned_threads`);
 
@@ -545,6 +555,7 @@ const makeProjectSupervisorStore = Effect.gen(function* () {
       ...(modelChanged ? {applyAttempts: 0, applicationMessage: null} : {}),
     };
     yield* sql`INSERT INTO supervisor_project_settings VALUES(${projectId},${JSON.stringify(next)}) ON CONFLICT(project_id) DO UPDATE SET document=excluded.document`;
+    yield* invalidate(projectKeys(projectId));
     return next;
   }));
   const modelState = (binding: BindingRecord) => run(modelStateOf(binding));
@@ -585,16 +596,24 @@ const makeProjectSupervisorStore = Effect.gen(function* () {
     yield* saveUnboundStopOf(mainThreadId, null);
     yield* sql`INSERT INTO supervisor_owned_threads VALUES(${value.threadId})`;
     yield* sql`INSERT INTO supervisor_main_bindings VALUES(${projectId},${mainThreadId},${JSON.stringify(value)})`;
+    yield* invalidate(projectKeys(projectId, mainThreadId));
     yield* adoptOwned(value.threadId);
     return value;
   }));
   const setBinding = (value: BindingRecord) => write(setBindingOf(value));
-  const setSupervisionStop = (value: BindingRecord, stop: SupervisionStop | null) => run(Effect.asVoid(stop
-    ? sql`UPDATE supervisor_main_bindings SET document=json_set(json_remove(document,'$.manualKeepActive','$.stopObservedAt'),'$.supervisionStop',json(${JSON.stringify(stop)})) WHERE project_id=${value.projectId} AND main_thread_id=${value.mainThreadId}`
-    : sql`UPDATE supervisor_main_bindings SET document=json_remove(document,'$.supervisionStop','$.stopObservedAt') WHERE project_id=${value.projectId} AND main_thread_id=${value.mainThreadId}`));
+  const setSupervisionStop = (value: BindingRecord, stop: SupervisionStop | null) => run(Effect.gen(function* () {
+    const previous = yield* bindingOf(value.projectId, value.mainThreadId);
+    yield* stop
+      ? sql`UPDATE supervisor_main_bindings SET document=json_set(json_remove(document,'$.manualKeepActive','$.stopObservedAt'),'$.supervisionStop',json(${JSON.stringify(stop)})) WHERE project_id=${value.projectId} AND main_thread_id=${value.mainThreadId}`
+      : sql`UPDATE supervisor_main_bindings SET document=json_remove(document,'$.supervisionStop','$.stopObservedAt') WHERE project_id=${value.projectId} AND main_thread_id=${value.mainThreadId}`;
+    yield* invalidate(projectKeys(value.projectId, value.mainThreadId), previous?.supervisionStop ?? null, stop);
+  }));
   // the notice CAS on the stored messageId; `IS` makes an expected null match only an absent notice
-  const setStopNotice = (value: BindingRecord, expectedMessageId: string | null, notice: SupervisorStopNotice) => run(Effect.asVoid(
-    sql`UPDATE supervisor_main_bindings SET document=json_set(document,'$.stopNotice',json(${JSON.stringify(notice)})) WHERE project_id=${value.projectId} AND main_thread_id=${value.mainThreadId} AND json_extract(document,'$.stopNotice.messageId') IS ${expectedMessageId}`));
+  const setStopNotice = (value: BindingRecord, expectedMessageId: string | null, notice: SupervisorStopNotice) => run(Effect.gen(function* () {
+    const previous = yield* bindingOf(value.projectId, value.mainThreadId);
+    const changed = yield* sql`UPDATE supervisor_main_bindings SET document=json_set(document,'$.stopNotice',json(${JSON.stringify(notice)})) WHERE project_id=${value.projectId} AND main_thread_id=${value.mainThreadId} AND json_extract(document,'$.stopNotice.messageId') IS ${expectedMessageId} RETURNING main_thread_id`;
+    if (changed.length > 0) yield* invalidate(projectKeys(value.projectId, value.mainThreadId), previous?.stopNotice ?? null, notice);
+  }));
   // only from missing: a new root and generation 1; its agreed tasks become stale history in the same commit
   const replaceMissingBinding = (value: BindingRecord, selection: SupervisorModelSelection) => value.state !== "missing" ? refuse("supervisor_not_missing") : write(Effect.gen(function* () {
     if ((yield* ownedCount) >= 1000) return yield* refuse("supervisor_capacity");

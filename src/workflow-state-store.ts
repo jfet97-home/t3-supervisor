@@ -1,3 +1,5 @@
+import { dashboardInvalidation } from "./dashboard-updates.js";
+import { projectKeys } from "./dashboard-events.js";
 import {definitionGuidanceFields, validDefinitionGuidance} from "./definition-references.js";
 import {Buffer} from "node:buffer";
 import {Clock, Context, Data, Effect, Exit, Layer, Schema} from "effect";
@@ -611,6 +613,7 @@ const acceptedWorkflowPlanHash = (source: WorkflowAgreementImport): string => {
 
 const makeWorkflowStateStore = (enabledFor?: WorkflowEditingEnabled) => Effect.gen(function* () {
   const sql = yield* GuidanceDb;
+  const invalidate = yield* dashboardInvalidation(sql);
   const ids = yield* SupervisorIds;
   const supervisors = yield* ProjectSupervisorStore;
   const isEnabled: WorkflowEditingEnabled = enabledFor ?? (projectId => supervisors.enabled(projectId));
@@ -637,9 +640,10 @@ const makeWorkflowStateStore = (enabledFor?: WorkflowEditingEnabled) => Effect.g
   // the revision cas: exactly one row changes only when the stored revision is still the expected one
   const casUpdate = (owner: WorkflowScope, workflowId: string, revision: number, serialized: string, updatedAt: number, expectedRevision: number) =>
     sql`UPDATE supervisor_workflow_state SET revision=${revision},document=${serialized},updated_at=${updatedAt} WHERE workflow_id=${workflowId} AND project_id=${owner.projectId} AND main_thread_id=${owner.mainThreadId} AND revision=${expectedRevision} RETURNING workflow_id`.pipe(
+      Effect.tap(rows => rows.length === 1 ? invalidate(projectKeys(owner.projectId, owner.mainThreadId)) : Effect.void),
       Effect.map((rows) => rows.length === 1));
   const insertWorkflow = (document: WorkflowStateDocument, serialized: string) =>
-    sql`INSERT INTO supervisor_workflow_state(workflow_id,project_id,main_thread_id,thread_id,parent_workflow_id,parent_thread_id,revision,document,created_at,updated_at) VALUES(${document.workflowId},${document.projectId},${document.mainThreadId},${document.threadId},${document.parentWorkflowId},${document.parentThreadId},${document.revision},${serialized},${document.createdAt},${document.updatedAt})`;
+    sql`INSERT INTO supervisor_workflow_state(workflow_id,project_id,main_thread_id,thread_id,parent_workflow_id,parent_thread_id,revision,document,created_at,updated_at) VALUES(${document.workflowId},${document.projectId},${document.mainThreadId},${document.threadId},${document.parentWorkflowId},${document.parentThreadId},${document.revision},${serialized},${document.createdAt},${document.updatedAt})`.pipe(Effect.tap(() => invalidate(projectKeys(document.projectId, document.mainThreadId))));
   const replaceWorkflow = Effect.fnUntraced(function* (document: WorkflowStateDocument, serialized: string, expectedRevision: number) {
     if (!(yield* casUpdate(document, document.workflowId, document.revision, serialized, document.updatedAt, expectedRevision)))
       return yield* new WorkflowStateStoreError({reason: "workflow_revision_conflict"});

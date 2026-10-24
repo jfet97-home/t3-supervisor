@@ -31,7 +31,7 @@ let access: Access;
 beforeAll(() => Effect.gen(function* () {
   yield* installGlobal("location", {origin: "http://supervisor.test", pathname: "/"});
   yield* installGlobal("window", new EventTarget());
-  yield* installGlobal("document", {visibilityState: "visible", hidden: false});
+  yield* installGlobal("document", {visibilityState: "visible", hidden: false, addEventListener: () => {}, removeEventListener: () => {}});
   yield* installGlobal("localStorage", {getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => {storage.set(key, value);},
     removeItem: (key: string) => {storage.delete(key);}});
   yield* installGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -397,31 +397,36 @@ it.effect("the read that confirms a chat change gives up after 10 s and aborts i
   registry.dispose();
 }), {timeout: 10_000});
 
-it.effect("the chat poll reads nothing when mounted, re-reads on each refresh and replaces only the chat state; it is not mounted while a change is in flight", () => Effect.gen(function* () {
+it.effect("the chat refresh reads nothing when mounted, re-reads on each refresh and updates live task records without moving configured form baselines; it is not mounted while a change is in flight", () => Effect.gen(function* () {
   const idle = {scope: scopeA(), snapshot, readAt: 1, message: null, blocked: false, operation: null, chat: null, chatMessage: null};
   const panel = {projectId: "project", threadId: "task-thread", connected: true, epoch: 0};
-  assert.deepEqual(ps.chatPollScope(idle, panel), {projectId: "project", mainThreadId: "task-thread", epoch: 0});
-  assert.equal(ps.chatPollScope({...idle, operation: {kind: "save", scope: scopeA(), operationId: "save-1"}}, panel), null, "no poll while saving");
-  assert.equal(ps.chatPollScope({...idle, chat: {scope: scopeA(), operationId: "chat-1"}}, panel), null, "no poll while changing chat supervision");
-  assert.equal(ps.chatPollScope(idle, {...panel, connected: false}), null);
-  assert.equal(ps.chatPollScope(idle, {...panel, threadId: undefined}), null);
+  assert.deepEqual(ps.chatRefreshScope(idle, panel), {projectId: "project", mainThreadId: "task-thread", epoch: 0});
+  assert.equal(ps.chatRefreshScope({...idle, operation: {kind: "save", scope: scopeA(), operationId: "save-1"}}, panel), null, "no automatic refresh while saving");
+  assert.equal(ps.chatRefreshScope({...idle, chat: {scope: scopeA(), operationId: "chat-1"}}, panel), null, "no automatic refresh while changing chat supervision");
+  assert.equal(ps.chatRefreshScope(idle, {...panel, connected: false}), null);
+  assert.equal(ps.chatRefreshScope(idle, {...panel, threadId: undefined}), null);
 
   const registry = yield* scopedRegistry();
   sent.length = 0;
-  const stopped = {...snapshot, message: "a newer message", chatSupervision: {...snapshot.chatSupervision!, stopped: true, stoppedBy: "relay" as const, stoppedAt: 3}};
+  const stopped: ProjectSupervisorInfo = {...snapshot, message: "a newer message", settings: {...snapshot.settings, generation: snapshot.settings.generation + 1},
+    tasks: snapshot.tasks.map(task => ({...task, reason: "A newly authorized scope", engagement: {mode: "engaged", availability: "current", consideredAt: 2}})), chatSupervision: {...snapshot.chatSupervision!, stopped: true, stoppedBy: "relay" as const, stoppedAt: 3}};
   reply = async () => json(stopped);
   const scope = {environmentId: null, projectId: "project", mainThreadId: "task-thread", epoch: 0};
-  const stop = registry.subscribe(ps.chatSupervisionPoll(scope), () => undefined, {immediate: true});
+  const stop = registry.subscribe(ps.chatSupervisionLive(scope), () => undefined, {immediate: true});
   yield* until(registry, ps.chatSupervisionRead(scope), value => AsyncResult.isSuccess(value) && !value.waiting, "mounted");
-  assert.equal(sent.length, 0, "mounting reads nothing");
+  assert.equal(sent.filter(request => request.path !== "/api/events").length, 0, "mounting reads no typed query");
   registry.refresh(ps.chatSupervisionRead(scope));
   const polled = yield* until(registry, ps.chatSupervisionRead(scope), value => AsyncResult.isSuccess(value) && !value.waiting && value.value._tag === "Some", "polled");
-  assert.equal(sent.length, 1);
+  assert.equal(sent.filter(request => request.path !== "/api/events").length, 1);
   const read = AsyncResult.isSuccess(polled) && polled.value._tag === "Some" ? polled.value.value : snapshot;
-  const next = ps.settlePoll(idle, scopeA(), read);
+  const next = ps.settleChatRefresh(idle, scopeA(), read);
   assert.equal(next.snapshot?.chatSupervision?.stopped, true);
-  assert.equal(next.snapshot?.message, snapshot.message, "only the chat supervision state is replaced");
-  assert.equal(ps.settlePoll({...idle, operation: {kind: "save", scope: scopeA(), operationId: "save-2"}}, scopeA(), read).snapshot, snapshot);
+  assert.equal(next.snapshot?.message, stopped.message);
+  assert.equal(next.snapshot?.tasks[0]?.engagement?.mode, "engaged", "the newly authorized task replaces quiet Following metadata");
+  assert.equal(next.snapshot?.tasks[0]?.reason, "A newly authorized scope");
+  assert.equal(next.snapshot?.settings.generation, snapshot.settings.generation, "form baselines remain pinned until explicit refresh");
+  assert.equal(ps.settleChatRefresh({...idle, blocked: true}, scopeA(), read).blocked, true, "a background read does not clear an unknown mutation fence");
+  assert.equal(ps.settleChatRefresh({...idle, operation: {kind: "save", scope: scopeA(), operationId: "save-2"}}, scopeA(), read).snapshot, snapshot);
   stop();
   registry.dispose();
 }), {timeout: 10_000});
