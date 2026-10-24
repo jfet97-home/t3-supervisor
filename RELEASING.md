@@ -31,11 +31,11 @@ For example, `0.0.3-beta.20261024140000.gabcdef123456` is a beta snapshot of a
 specific checked commit. Pending changesets determine its base; without pending
 notes, previews target the next patch. Preview generation does not consume notes
 or put the repository into Changesets pre-release mode. Re-running the same commit
-and channel produces the same version. The overnight job selects the latest
-successful main CI whose source remains on main. If that source already has a
-completed nightly release, it does nothing. An unfinished main run can leave the
-previous green source eligible; an unchanged source does not create another
-nightly the next day. Ordinary merges do not publish a nightly immediately.
+and channel produces the same version. The overnight job checks the main revision
+captured by GitHub for that scheduled run. If that revision has no successful main
+CI, or already has a completed nightly release, it does nothing. It never signs
+an older source using a newer workflow revision. An unchanged source does not
+create another nightly the next day. Ordinary merges do not publish a nightly immediately.
 GitHub may delay scheduled jobs. Alpha/beta require an explicit release decision.
 
 Each publication advances only its selected alias. Stable never follows a preview
@@ -54,6 +54,12 @@ Successful main CI immediately releases only an approved version PR. The overnig
 job handles nightly snapshots separately and retains the same exact-source checks.
 Stable requires consumed changesets;
 the absence of an existing Git tag alone never authorizes stable publication.
+
+A new npm publication requires the checked source to equal the workflow's
+`GITHUB_SHA`, which GitHub binds into its OIDC provenance. The manual `main` input
+uses that run's captured main revision. An explicit older SHA remains useful for
+dry runs and completing an already-published npm version's image/receipt, but
+cannot produce a new npm upload under a different workflow revision.
 
 The workflow stamps the disposable build manifest with its version and `gitHead`,
 builds an archive containing `dist`, `ui-dist` and portable skills, installs that
@@ -80,9 +86,10 @@ publication receipt. Never overwrite a conflicting package, image or Git tag.
 
 The requested CI policy still cancels superseded main runs. If a version merge's
 main CI was canceled by a newer push, rerun that original main CI from GitHub's
-run page. It checks the original SHA; after success, its approved stable release
-can proceed even if main has advanced. Publication never treats cancellation as
-success or substitutes a newer, different source tree.
+run page to validate its original SHA. A new npm upload additionally needs a
+matching workflow revision; after main advances, dispatch from the current fully
+checked main with the approved version and consumed changesets. Publication never
+treats cancellation as success or silently substitutes a different source tree.
 
 ## One-time setup and first release
 

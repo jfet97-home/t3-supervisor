@@ -7,10 +7,6 @@ follow their progress from one place.
 Supervisor runs alongside T3. It needs a running T3 server with native access
 credentials; installing Supervisor does not install T3 or configure its providers.
 
-> **First release pending:** the registry package and container image below are
-> the intended installation paths. Until the first release is published, use the
-> [source installation](CONTRIBUTING.md#run-from-source).
-
 ## Install locally
 
 Requires Node.js **24.22.1 or newer**. Install with either package manager:
