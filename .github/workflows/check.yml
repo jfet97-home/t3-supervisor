@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
 permissions:
@@ -23,6 +23,29 @@ jobs:
       - run: pnpm lint
       - run: pnpm typecheck
       - run: pnpm build
+      - name: Prepare the installable artifact
+        id: package
+        env:
+          REVISION: ${{ github.sha }}
+        run: |
+          node -e 'const fs=require("node:fs");const p=JSON.parse(fs.readFileSync("package.json","utf8"));p.gitHead=process.env.REVISION;fs.writeFileSync("package.json",JSON.stringify(p,null,2)+"\n");fs.appendFileSync(process.env.GITHUB_OUTPUT,"version="+p.version+"\n")'
+          mkdir -p "$RUNNER_TEMP/release-package" "$RUNNER_TEMP/release-install"
+          pnpm pack --ignore-scripts --pack-destination "$RUNNER_TEMP/release-package"
+          pnpm --dir "$RUNNER_TEMP/release-install" add --prod --offline --ignore-scripts "$RUNNER_TEMP/release-package/t3-supervisor-$(node -p 'require("./package.json").version').tgz"
+          node --import tsx scripts/smoke-release.ts package "$RUNNER_TEMP/release-install/node_modules/.bin/t3-supervisor"
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: t3-supervisor:ci-check
+          build-args: |
+            VERSION=${{ steps.package.outputs.version }}
+            REVISION=${{ github.sha }}
+          cache-from: type=gha,scope=ci-image
+          cache-to: type=gha,mode=max,scope=ci-image
+      - name: Verify the container artifact
+        run: node --import tsx scripts/smoke-release.ts image t3-supervisor:ci-check
 
   main:
     name: main (${{ matrix.shard }}/4)

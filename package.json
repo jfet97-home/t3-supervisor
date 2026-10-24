@@ -1,7 +1,16 @@
 {
   "name": "t3-supervisor",
   "version": "0.1.0",
-  "private": true,
+  "description": "Dashboard and background service for supervising T3 projects and conversations",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jfet97-home/t3-supervisor.git"
+  },
+  "files": [
+    "dist",
+    "ui-dist",
+    "skills"
+  ],
   "packageManager": "pnpm@12.14.0",
   "engines": {
     "node": ">=24.22.1"
@@ -15,6 +24,9 @@
     "lint": "eslint src test ui/src scripts vite.config.ts vitest.config.ts vitest.harness.config.ts",
     "typecheck": "tsc --noEmit && tsc -p ui/tsconfig.json",
     "build": "tsc -p tsconfig.build.json && vite build",
+    "prepack": "pnpm build",
+    "changeset": "changeset",
+    "release:version": "changeset version",
     "test": "node --import tsx scripts/run-tests.ts --watchdog-phase=main:vitest.config.ts",
     "test:harness": "node --import tsx scripts/run-tests.ts --config vitest.harness.config.ts",
     "start": "node dist/main.js",
@@ -34,6 +46,7 @@
     "yaml": "2.9.1"
   },
   "devDependencies": {
+    "@changesets/cli": "2.31.0",
     "@effect/vitest": "4.0.6",
     "@types/node": "24.10.0",
     "@types/react": "19.3.0",

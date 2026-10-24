@@ -14,6 +14,7 @@ import { T3Client } from "./t3.js";
 import { policyDbLayer } from "./db.js";
 import { ThreadPolicyStore } from "./thread-policy.js";
 import type { SupervisorSettings } from "./types.js";
+import { buildInfo } from "./version.js";
 
 export interface SupervisorStatus {
   startedAt: string;
@@ -63,7 +64,7 @@ const health = (path: "/health" | "/live") => Effect.gen(function* () {
   const status = yield* SubscriptionRef.get(yield* SupervisorStatusRef);
   const checked = readiness(status, config, yield* Clock.currentTimeMillis);
   const healthy = path === "/live" ? checked.alive : checked.ready;
-  return HttpServerResponse.text(JSON.stringify({ ok: healthy, readiness: checked, ...status }),
+  return HttpServerResponse.text(JSON.stringify({ ok: healthy, version: buildInfo.version, revision: buildInfo.gitHead ?? null, readiness: checked, ...status }),
     { status: healthy ? 200 : 503, contentType: "application/json" });
 });
 
