@@ -43,6 +43,9 @@ do not update themselves.
 
 **Publish release** resolves a main commit and requires successful push-to-main CI
 for that exact SHA, including the aggregate `check`. PR checks alone are not enough.
+Main may reuse full PR validation only after proving that its file tree equals
+the checked PR head and every full job passed in the latest matching run. Otherwise
+main runs the complete checks. See [CI policy](docs/ci.md).
 Automatic events skip superseded nightly commits and retain approved stable ones.
 Stable requires consumed changesets;
 the absence of an existing Git tag alone never authorizes stable publication.
