@@ -83,7 +83,7 @@ same version as an npm package and a container image for Linux amd64 and arm64.
 | Stable | `@jfet97/t3-supervisor@latest` | `:latest` | Normal use |
 | Beta | `@jfet97/t3-supervisor@beta` | `:beta` | Testing a release candidate |
 | Alpha | `@jfet97/t3-supervisor@alpha` | `:alpha` | Earlier testing |
-| Nightly | `@jfet97/t3-supervisor@nightly` | `:nightly` | Latest successful main build |
+| Nightly | `@jfet97/t3-supervisor@nightly` | `:nightly` | Overnight snapshot of the latest checked main commit |
 
 Previews are optional and may not exist until one has been published. For example,
 `npm install --global @jfet97/t3-supervisor@beta` selects beta; with Compose, set

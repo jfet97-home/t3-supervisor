@@ -23,7 +23,7 @@ Required `check` still includes all four main shards, the harness and static che
 | Channel | Trigger after publishing is enabled | Version | npm and image aliases |
 | --- | --- | --- | --- |
 | Stable | Successful main CI for the merged version PR, or explicit manual dispatch | Manifest version, e.g. `0.0.2` | `latest` |
-| Nightly | Successful main CI for other main commits, or manual dispatch | Next planned version plus commit timestamp and SHA | `nightly` |
+| Nightly | Daily at 03:17 Europe/Rome for a new checked main commit, or manual dispatch | Next planned version plus commit timestamp and SHA | `nightly` |
 | Alpha | Manual dispatch | Next planned version plus commit timestamp and SHA | `alpha` |
 | Beta | Manual dispatch | Next planned version plus commit timestamp and SHA | `beta` |
 
@@ -31,8 +31,12 @@ For example, `0.0.3-beta.20261024140000.gabcdef123456` is a beta snapshot of a
 specific checked commit. Pending changesets determine its base; without pending
 notes, previews target the next patch. Preview generation does not consume notes
 or put the repository into Changesets pre-release mode. Re-running the same commit
-and channel produces the same version. These are rolling snapshots on green main,
-not a calendar schedule, and alpha/beta require an explicit release decision.
+and channel produces the same version. The overnight job selects the latest
+successful main CI whose source remains on main. If that source already has a
+completed nightly release, it does nothing. An unfinished main run can leave the
+previous green source eligible; an unchanged source does not create another
+nightly the next day. Ordinary merges do not publish a nightly immediately.
+GitHub may delay scheduled jobs. Alpha/beta require an explicit release decision.
 
 Each publication advances only its selected alias. Stable never follows a preview
 automatically. Old commits and versions cannot move an alias backwards. Users opt
@@ -46,7 +50,8 @@ for that exact SHA, including the aggregate `check`. PR checks alone are not eno
 Main may reuse full PR validation only after proving that its file tree equals
 the checked PR head and every full job passed in the latest matching run. Otherwise
 main runs the complete checks. See [CI policy](docs/ci.md).
-Automatic events skip superseded nightly commits and retain approved stable ones.
+Successful main CI immediately releases only an approved version PR. The overnight
+job handles nightly snapshots separately and retains the same exact-source checks.
 Stable requires consumed changesets;
 the absence of an existing Git tag alone never authorizes stable publication.
 
@@ -116,8 +121,8 @@ command remains `t3-supervisor`; the image is `ghcr.io/jfet97/t3-supervisor`.
    if it was created private; repository visibility does not imply package visibility.
 5. Set `RELEASE_PUBLISH_ENABLED=true`. Re-run **Publish release** for the same
    stable SHA with **publish=true**. It reconciles the existing npm version and
-   completes the image and GitHub release. Later green main commits can publish
-   nightly; a merged version PR can publish stable.
+   completes the image and GitHub release. Later green main commits become
+   eligible for the overnight nightly; a merged version PR can publish stable.
 6. Verify installation from the public registry and pull both image platforms
    without privileged credentials. Remove the README's first-release notice only
    after those public paths actually work.
