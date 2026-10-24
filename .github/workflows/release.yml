@@ -252,6 +252,7 @@ jobs:
           docker buildx imagetools inspect "$IMAGE:$VERSION" --format '{{json .Manifest}}' > release/image-manifest.json
           digest=$(jq -er '.digest | select(test("^sha256:[a-f0-9]{64}$"))' release/image-manifest.json)
           for platform in linux/amd64 linux/arm64; do
+            docker pull --platform "$platform" "$IMAGE@$digest"
             SMOKE_PLATFORM="$platform" node --import tsx scripts/smoke-release.ts image "$IMAGE@$digest"
           done
       - name: Publish the immutable package with provenance
