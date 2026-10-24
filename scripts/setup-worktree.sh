@@ -7,4 +7,4 @@ if command -v direnv >/dev/null 2>&1; then
   direnv allow "$repo_root"
 fi
 
-exec nix develop "$repo_root" --command npm --prefix "$repo_root" ci
+exec nix develop "$repo_root" --command npm --prefix "$repo_root" ci --prefer-offline

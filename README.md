@@ -56,6 +56,10 @@ Run `nix develop` in the checkout to enter it, or prefix a command with
 `nix develop --command`. Dependency installation still uses `npm ci` and the
 committed `package-lock.json`.
 
+New worktrees reuse the host's npm download cache with `--prefer-offline`,
+fetching packages that are missing while keeping each worktree's installed
+`node_modules` separate.
+
 T3's **Setup Worktree** action runs `sh scripts/setup-worktree.sh`. The launcher
 approves this checkout's `.envrc` when direnv is installed, then installs dependencies
 inside the pinned Nix shell. It works without an interactive shell hook.
