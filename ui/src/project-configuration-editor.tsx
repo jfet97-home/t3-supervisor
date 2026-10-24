@@ -1,8 +1,10 @@
-import React, { useEffect, useId, useRef } from "react";
+import { EntityDetails } from "./disclosure.js";
+import React, { useEffect, useId, useRef, useState } from "react";
 import { useAtom, useAtomSet, useAtomValue } from "@effect/atom-react";
 import { Cause, Exit, Option } from "effect";
 import { AsyncResult } from "effect/reactivity";
 import { catalogEntryId, catalogSummaryLimits, normalizeProjectConfiguration, projectConfigurationError, requiredReferences, type ProjectConfigSave, type ProjectConfigSaveOutcome, type ProjectConfigurationInfo, type ProjectDefinitionSnapshot } from "../../src/project-definitions-contract.js";
+import { ListPager, pageWindow } from "./pagination.js";
 import { draftFamily, environmentAtom, scopeKey } from "./atoms.js";
 import { resolveSave, saveProjectConfigurationAtom, type ProjectConfigRequestError } from "./project-definitions-api.js";
 
@@ -32,7 +34,7 @@ export const freshDraft = (): ConfigurationDraft =>
 export const configurationDrafts = draftFamily(freshDraft);
 // the draft scope of a loaded snapshot: T3 environment, project, checkout and the revision its save is compared against
 export const configurationScope = (environmentId: string | null, definitions: ProjectDefinitionSnapshot): string =>
-  scopeKey(environmentId, definitions.projectId, definitions.threadId, definitions.revision);
+  scopeKey(environmentId, definitions.projectId, definitions.workspaceRoot, definitions.revision);
 
 export type SavePlan =
   | {readonly _tag: "Invalid"; readonly message: string}
@@ -104,17 +106,22 @@ export function ProjectCatalogFields({kind, config, definitions, disabled, onCha
   const prefix = useId();
   const singular = kind === "steps" ? "step" : "workflow";
   const entries = config[kind];
+  const [page, setPage] = useState(1);
+  const range = pageWindow(entries.length, page, 10);
+  useEffect(() => {if (page !== range.page) setPage(range.page);}, [page, range.page]);
   const unlisted = (definitions.definitionFiles ?? []).filter(file => file.origin === "project" && file.kind === kind && !entries.some(entry => entry.path === file.path));
   const updateEntry = (index: number, change: Partial<ProjectConfigurationInfo["steps"][number]>) =>
     onChange({...config, [kind]: entries.map((entry, position) => position === index ? {...entry, ...change} : entry)});
   return <fieldset disabled={disabled} className="stack">
     <legend>{kind === "steps" ? "Steps" : "Workflows"} <span className="muted">({entries.length})</span></legend>
     <p id={`${prefix}-help`} className="muted">List every reusable {singular} file in this checkout. Paths are relative to <code>.t3-supervisor</code>; removing a row does not delete its file.</p>
-    {entries.map((entry, index) => {
+    <ListPager label={`${kind} in the index`} size={10} total={entries.length} page={range.page} onPage={setPage}/>
+    {entries.slice(range.offset, range.offset + range.size).map((entry, position) => {
+      const index = range.offset + position;
       const field = `${prefix}-${index}`;
       const id = catalogEntryId(kind, entry.path);
       const definition = id ? definitions[kind].find(item => item.origin === "project" && item.id === id) : undefined;
-      return <fieldset key={index} className="stack project-config-entry">
+      return <EntityDetails key={index} icon={kind === "workflows" ? "tree" : "record"} title={<><span>{definition?.name ?? entry.path}</span><span className="small muted"> · {entry.required ? "Required" : "Optional"}</span></>}><fieldset className="stack project-config-entry">
         <legend>{kind === "steps" ? "Step" : "Workflow"} {index + 1}</legend>
         <div className="project-config-identity">
           <label htmlFor={`${field}-path`}>Path
@@ -130,7 +137,7 @@ export function ProjectCatalogFields({kind, config, definitions, disabled, onCha
           <button type="button" onClick={() => onChange({...config, [kind]: entries.filter((_, position) => position !== index)})}>Remove {singular} {index + 1}</button>
         </div>
         {id && !definition && <p className="muted small">Missing or invalid in the current read. This entry and its required flag are kept; saving checks the indexed file again.</p>}
-      </fieldset>;
+      </fieldset></EntityDetails>;
     })}
     {entries.length === 0 && <p>No local {kind} are indexed. Any existing {singular} files must be added before this index is valid.</p>}
     {unlisted.length > 0 && <div className="stack"><p>Files not indexed in this draft:</p><ul className="project-config-unlisted">{unlisted.map(file => <li key={file.path}><code>{file.path}</code> <button type="button" disabled={config.steps.length + config.workflows.length >= catalogSummaryLimits.maxEntries} onClick={() => onChange({...config, [kind]: [...entries, {path: file.path, summary: "", required: false}]})}>Index {file.path}</button></li>)}</ul></div>}
@@ -162,7 +169,7 @@ export function ProjectConfigurationEditor({definitions, onSaved, onDirtyChange,
   useEffect(() => {if (message && messageAlert) error.current?.focus();}, [message, messageAlert]);
   const update = (next: ProjectConfigurationInfo) => setDraft(current => ({...current, config: next, message: "", messageAlert: false}));
   const workflowIds = [...new Set(config.workflows.flatMap(workflow => catalogEntryId("workflows", workflow.path) ?? []))];
-  const unreadableSource = brokenConfigSource && <details className="definition-block"><summary>Inspect the unreadable project.yaml source</summary><pre className="definition-copy">{brokenConfigSource.content}</pre></details>;
+  const unreadableSource = brokenConfigSource && <EntityDetails title={<>Inspect the unreadable project.yaml source</>} className="definition-block"><pre className="definition-copy">{brokenConfigSource.content}</pre></EntityDetails>;
 
   if (definitions.globalOnly) return <div className="panel stack"><h3>Project configuration</h3><p className="muted">This view is global-only. Its definitions are inspectable, but a project editor does not write global files.</p></div>;
   if (!definitions.editingAvailable) return <div className="panel stack"><h3>Project configuration</h3><p className="muted">Editing needs a dedicated filesystem read/write credential configured through deployment setup.</p></div>;
@@ -174,7 +181,7 @@ export function ProjectConfigurationEditor({definitions, onSaved, onDirtyChange,
     return <div className="panel stack project-configuration-summary">
       <div>
         <h3>{projectConfig ? "Project configuration" : "Project configuration needs repair"}</h3>
-        <p className="muted">This editor changes only the selected checkout's <code>.t3-supervisor/project.yaml</code>. Reusable step and workflow files remain read-only here.</p>
+        <p className="definition-path">Target: <code>{definitions.workspaceRoot}/.t3-supervisor/project.yaml</code></p><p className="muted">This is the shared file for conversations using this folder. This editor changes only the selected checkout's <code>.t3-supervisor/project.yaml</code>. Reusable step and workflow files remain read-only here.</p>
       </div>
       {projectConfig
         ? <><p><strong>Local index:</strong> {projectConfig.workflows.length} workflows · {projectConfig.steps.length} steps</p>
@@ -217,7 +224,7 @@ export function ProjectConfigurationEditor({definitions, onSaved, onDirtyChange,
     </fieldset>
     <p id={messageId} ref={error} tabIndex={-1} role={messageAlert ? "alert" : "status"}>{message}</p>
     {blocked && <p>Your draft is kept. Refresh project definitions and inspect project.yaml before trying again.</p>}
-    <div className="row">
+    <div className="row editor-save-bar">
       <button className="primary" type="submit" disabled={saving || blocked}>{saving ? "Saving…" : "Save project configuration"}</button>
       <button type="button" disabled={saving} onClick={() => {
         if (dirty && !confirm("Discard unsaved project configuration changes?")) return;

@@ -1,5 +1,5 @@
 import {journeyCases, type JourneyCase} from "./journey.js";
-import { ByteSize, Cause, Context, Deferred, Effect, Layer } from "effect";
+import { ByteSize, Cause, Context, Deferred, Effect, Layer, Stream } from "effect";
 import { HttpApiBuilder } from "effect/http-api";
 import { HttpIncomingMessage, HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
 import { NodeHttpServer, NodeHttpServerRequest } from "@effect/platform-node";
@@ -165,7 +165,8 @@ export class FixtureController {
   apply(name: ScenarioName, params: ScenarioParams = {path: null, apply: false, ms: null}) {
     const plan = scenarioCatalog[name].plan(params);
     this.scenario = name;
-    if (name === "baseline") this.model.setJourney(null);
+    if (name === "large-interface") this.model.setLargeInterface();
+    else if (name === "baseline") this.model.setJourney(null);
     else if (name.startsWith("journey-") && journeyCases.includes(name.slice(8) as JourneyCase)) this.model.setJourney(name.slice(8) as JourneyCase);
     this.arms = plan.arms;
     if (plan.revokeSessions) this.sessions = [];
@@ -259,6 +260,7 @@ const apiHandlers = (controller: FixtureController) => {
     saveProjectSupervisor: ({payload}) => mutate(forced => model.saveProjectSupervisor(payload, forced)),
     retryProjectSupervisor: ({payload}) => mutate(forced => model.retryProjectSupervisor(payload, forced)),
     chatSupervision: ({payload}) => mutate(forced => model.chatSupervision(payload, forced)),
+    projectCheckouts: ({query}) => read(() => model.checkoutInventory(query.projectId)),
     projectConfiguration: ({query}) => read(() => model.projectDefinitions(query.projectId, query.threadId ?? null)),
     saveProjectConfiguration: ({payload}) => mutate(forced => model.saveProjectConfiguration(payload, forced)),
     threadPolicy: ({payload}) => mutate(forced => model.saveThreadPolicy(payload, forced)),
@@ -402,6 +404,10 @@ const screen = <E, R>(controller: FixtureController, app: Effect.Effect<HttpServ
     controller.logout(session);
     mark("session-expired");
     return finish(message(401, "Sign in to Supervisor."));
+  }
+  if (request.method === "GET" && path === "/api/events") {
+    const bytes = new TextEncoder().encode('event: reset\nid: 0\ndata: {"keys":[]}\n\n');
+    return finish(HttpServerResponse.stream(Stream.concat(Stream.make(bytes), Stream.never), {headers: {"content-type": "text/event-stream", "cache-control": "no-store"}}));
   }
   if (request.method !== "GET") {
     const csrf = header(request, "x-csrf-token");

@@ -1,3 +1,4 @@
+import { EntityDetails } from "./disclosure.js";
 import React from "react";
 import {DefinitionReferences} from "./definition-references.js";
 import type { TaskInterpretationInfo, WorkflowPlanNodeInfo, WorkflowProposalInfo } from "../../src/project-supervisor-contract.js";
@@ -50,9 +51,9 @@ function StepRecords({status, records}: {status: keyof typeof states; records: r
       ? <div className="step-assessment"><strong>Supervisor assessment</strong><p>{current.note}</p>
         <p className="small muted">Recorded {current.statusFrom ? `${recordStates[current.statusFrom]} → ` : ""}{recordStates[status]} · {formatTime(current.recordedAt)}</p></div>
       : status !== "planned" && <p className="small muted">No status record for this step was read.</p>}
-    {others.length > 0 && <details className="step-history"><summary>Earlier step records ({others.length})</summary><ol className="stack">{others.map(item => <li key={item.id}>
+    {others.length > 0 && <EntityDetails title={<>Earlier step records ({others.length})</>} className="step-history"><ol className="stack">{others.map(item => <li key={item.id}>
       <p>{item.note}</p><p className="small muted">{item.kind === "status_changed" ? `Status ${item.statusFrom ? recordStates[item.statusFrom] : "new"} → ${item.statusTo ? recordStates[item.statusTo] : "removed"}` : "Note"} · {formatTime(item.recordedAt)}</p>
-    </li>)}</ol></details>}
+    </li>)}</ol></EntityDetails>}
   </>;
 }
 
@@ -97,12 +98,12 @@ export function PlanJourney({node, mode = "proposed", notes = noNotes, contribut
   const outsideAccepted = live && notes.agreed !== null && !accepted;
   const changeProposed = notes.changed.has(node.nodeId);
   return <div className={`journey-stop state-${state}`}>
-    <details className="journey-step" open={live && hasActiveNode(node) || undefined}>
-      <summary aria-current={live && node.status === "underway" ? "step" : undefined}>
+    <EntityDetails title={<>
         <StepMark state={state}/><span className="step-name">{node.name}{node.kind === "workflow" && <small>Workflow</small>}
           {(changeProposed || outsideAccepted) && <span className="step-flags">{changeProposed && <span className="pill blue">Update proposed</span>}{outsideAccepted && <span className="pill">Not in the accepted plan</span>}</span>}</span>
-        <span className="step-state">{label}</span><svg className="step-chevron" viewBox="0 0 20 20" aria-hidden="true"><path d="m7 5 5 5-5 5" fill="none" stroke="currentColor" strokeWidth="1.7"/></svg>
-      </summary>
+        <span className="step-state">{label}</span>
+      </>} className="journey-step" open={live && hasActiveNode(node) || undefined} summaryProps={{"aria-current":live && node.status === "underway" ? "step" : undefined}}>
+      
       <div className="step-explanation">
         {node.description && <p>{node.description}</p>}
         <DefinitionReferences references={node.references} skills={node.skills}/>
@@ -120,7 +121,7 @@ export function PlanJourney({node, mode = "proposed", notes = noNotes, contribut
       </div>
       {node.kind === "workflow" && node.plan && <div className="nested-journey"><PlanJourney node={node.plan} mode={mode} notes={notes} {...(contributions ? {contributions} : {})}/></div>}
       {node.kind === "workflow" && !node.plan && <p className="small muted">No expanded plan is recorded for this workflow.</p>}
-    </details>
+    </EntityDetails>
   </div>;
 }
 
@@ -163,14 +164,14 @@ export function TaskAlignment({task, supervisorThreadId}: {task: TaskInterpretat
         {agreement && (current || historical) && <p className="alignment-note">{agreement.message}</p>}</div></li>
     </ol>
     <div className="alignment-links">{supervisorThreadId && <a href={`t3-thread://v1/${supervisorThreadId}`}>Open Supervisor</a>}{task && <a href={`t3-thread://v1/${task.threadId}`}>Open agent conversation</a>}</div>
-    {agreement && <details className="small"><summary>{current ? "Acceptance record" : "Earlier acceptance record"}</summary><div className="stack">
+    {agreement && <EntityDetails title={<>{current ? "Acceptance record" : "Earlier acceptance record"}</>} className="small"><div className="stack">
       {!current && <p>{agreement.message}</p>}
       <p>Accepted <time dateTime={new Date(agreement.agreedAt).toISOString()}>{agreedAt}</time> · proposal <code>{agreement.proposalId}</code></p>
       <p>Agent message <code>{agreement.agentMessageId}</code> · {agreement.evidence.kind === "supervisor_message" ? <>Supervisor message <code>{agreement.evidence.messageId}</code></>
         : <>Interpretation submission: attempt <code>{agreement.evidence.attemptId}</code>, item <code>{agreement.evidence.itemId}</code></>}</p>
       <p className="muted">Acceptance records an agreed plan; it does not show that any step was performed.</p>
-    </div></details>}
-    {shown && <details className="small"><summary>Plan provenance</summary><div className="stack">
+    </div></EntityDetails>}
+    {shown && <EntityDetails title={<>Plan provenance</>} className="small"><div className="stack">
       {proposal && (pending || !accepted) && <p>{proposalStatusDescription[proposal.status]}{task?.workflowProposalId && <> Proposal <code>{task.workflowProposalId}</code>.</>}</p>}
       <p>Definitions {shown.definitionsStatus === "ready" ? "valid" : shown.definitionsStatus.replaceAll("_", " ")}{shown.definitionsComplete ? "" : " · read incomplete"}{shown.requirementsKnown ? "" : " · requirements unknown"}</p>
       {shown.workspaceRoot && <p>Checkout <code>{shown.workspaceRoot}</code>{shown.revision && <> · revision <code>{shown.revision}</code></>}</p>}
@@ -179,8 +180,8 @@ export function TaskAlignment({task, supervisorThreadId}: {task: TaskInterpretat
         : <p className="muted">{shown.requirementsKnown && shown.definitionsComplete && shown.definitionsStatus === "ready" ? "No required definitions are configured." : "Requirements may be unknown because the definitions are missing, invalid or incompletely read."}</p>}
       {shown.issues.length > 0 && <ul className="definition-issues">{shown.issues.map((issue, index) => <li key={`${issue.path}:${issue.code}:${index}`}><code>{issue.path}</code><p>{issue.message}</p></li>)}</ul>}
       <p className="muted">A plan or its acceptance does not prove that work was performed.</p>
-    </div></details>}
-    {task && <details className="small"><summary>Task interpretation</summary><p>{task.status === "inferred" ? "Interpreted from the request." : task.status.replaceAll("_", " ")}{task.reason ? ` ${task.reason}` : ""}</p></details>}
+    </div></EntityDetails>}
+    {task && <EntityDetails title={<>Task interpretation</>} className="small"><p>{task.status === "inferred" ? "Interpreted from the request." : task.status.replaceAll("_", " ")}{task.reason ? ` ${task.reason}` : ""}</p></EntityDetails>}
   </section>;
 }
 
@@ -197,7 +198,7 @@ export function PlanChanges({changes, proposal, proposalId}: {changes: readonly 
         : change.kind === "removed" ? <strong>Removes {change.name}</strong>
         : <><strong>{change.previousName === change.name ? change.name : `${change.previousName} → ${change.name}`}</strong>
           <span className="small muted"> · changes {change.fields.map(field => changeLabels[field]).join(", ")}</span>
-          {change.fields.includes("note") && <details className="note-compare-toggle"><summary>Compare plan notes</summary><dl className="note-compare"><div><dt>Accepted</dt><dd>{change.previousNote}</dd></div><div><dt>Proposed</dt><dd>{change.note}</dd></div></dl></details>}</>}
+          {change.fields.includes("note") && <EntityDetails title={<>Compare plan notes</>} className="note-compare-toggle"><dl className="note-compare"><div><dt>Accepted</dt><dd>{change.previousNote}</dd></div><div><dt>Proposed</dt><dd>{change.note}</dd></div></dl></EntityDetails>}</>}
     </li>)}</ul>}
   </section>;
 }

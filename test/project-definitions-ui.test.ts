@@ -72,48 +72,41 @@ const definitions: ProjectDefinitionSnapshot = {
   issues: [],
 };
 
-it("definitions UI shows effective global and project requirements plus nested workflow structure", () => {
-  const html = renderToStaticMarkup(createElement(DefinitionsContent, {definitions}));
-  assert.match(html, /Effective requirements/);
-  assert.match(html, /End-to-end testing/);
-  assert.match(html, /Security review/);
-  assert.match(html, /Workflow reference cycle|Missing or invalid workflow: missing-review/);
-  assert.match(html, /Fixed fragment/);
-  assert.match(html, /Parallel group/);
-  assert.match(html, /Local step:<\/strong> Inspect notes/);
-  assert.match(html, /intended semantic order/);
-  assert.match(html, /project\.yaml/);
-  assert.match(html, /<details/);
-  assert.match(html, /<summary/);
-  assert.match(html, /Workflows index/);
-  assert.match(html, /Steps index/);
-  assert.match(html, /Review changes before delivery/);
-  assert.match(html, /Global · read-only/);
-  assert.match(html, /Optional/);
-  assert.match(html, /task plans can add local steps and new combinations/);
-  assert.doesNotMatch(html, /Project rules|Reusable blocks|instructions|expected result/i);
+it("catalog is bounded and full workflow detail preserves template topology without execution states", () => {
+  const catalog = renderToStaticMarkup(createElement(DefinitionsContent, {definitions}));
+  assert.match(catalog, /Definition catalog/);
+  assert.match(catalog, /Review changes before delivery/);
+  assert.match(catalog, /Global · read-only/);
+  assert.doesNotMatch(catalog, /Definition source files|Full definition|Check the task-specific notes/);
+  const detail = renderToStaticMarkup(createElement(DefinitionsContent, {definitions, selectedDefinition: "workflow:reviewer"}));
+  assert.match(detail, /Back to catalog/);
+  assert.match(detail, /Fixed structure/);
+  assert.match(detail, /In this order/);
+  assert.match(detail, /In parallel — no declared order/);
+  assert.match(detail, /Check the task-specific notes/);
+  assert.match(detail, /referenced workflow could not be read/);
+  assert.doesNotMatch(detail, /Planned|Completed|Awaiting acceptance|aria-current="step"/);
 });
 
-it("invalid and incomplete collections never imply that unreadable requirements are absent", () => {
+it("invalid and incomplete collections keep unavailable requirements explicit", () => {
   const html = renderToStaticMarkup(createElement(DefinitionsContent, {definitions: {...definitions, status: "invalid", complete: false, config: {workflows: [], steps: []}, steps: [],
     issues: [{path: ".t3-supervisor/workflows/reviewer.yaml", code: "workflow_cycle", message: "Workflow reference cycle: reviewer -> nested -> reviewer."}]}}));
   assert.match(html, /Definitions need attention/);
   assert.match(html, /Read incomplete/);
-  assert.match(html, /may be only part of the requirements/);
+  assert.match(html, /requirements have not been established/);
   assert.match(html, /Workflow reference cycle: reviewer -&gt; nested -&gt; reviewer/);
-  assert.match(html, /No readable required references are available/);
-  assert.doesNotMatch(html, /No effective required references are configured/);
+  assert.doesNotMatch(html, /No required definitions are configured in the readable index/);
 });
 
-it("raw repository source is escaped plain text and missing references stay diagnostic text", () => {
-  const html = renderToStaticMarkup(createElement(DefinitionsContent, {definitions: {...definitions,
-    workflows: [{...definitions.workflows[0]!, sequence: [{step: "missing-step"}]}],
-    sources: [{path: ".t3-supervisor/steps/bad.md", origin: "project", content: '<script>window.injected=true</script><img src=x onerror="alert(1)">'}],
+it("definition duty is escaped text, missing references are diagnostic and raw source dumps are absent", () => {
+  const malicious = '<script>window.injected=true</script><img src=x onerror="alert(1)">';
+  const html = renderToStaticMarkup(createElement(DefinitionsContent, {selectedDefinition: "workflow:reviewer", definitions: {...definitions,
+    workflows: [{...definitions.workflows[0]!, description: malicious, sequence: [{step: "missing-step"}]}],
+    sources: [{path: ".t3-supervisor/steps/bad.md", origin: "project", content: "RAW_SOURCE_SHOULD_STAY_INTERNAL"}],
   }}));
-  assert.doesNotMatch(html, /<script>|<img/);
+  assert.doesNotMatch(html, /<script>|<img|RAW_SOURCE_SHOULD_STAY_INTERNAL/);
   assert.match(html, /&lt;script&gt;/);
-  assert.match(html, /&lt;img src=x onerror=&quot;alert\(1\)&quot;&gt;/);
-  assert.match(html, /Missing or invalid step: missing-step/);
+  assert.match(html, /referenced step could not be read/);
 });
 
 it("configuration editor saves checkout-local defaults and remains available to repair a fully read invalid collection", () => {
@@ -158,14 +151,12 @@ it("global-only and incomplete snapshots never expose project configuration edit
   assert.doesNotMatch(incompleteHtml, /Edit project configuration/);
 });
 
-it("catalog UI retains required missing rows and separates authored summaries from full policy", () => {
+it("catalog retains summaries and required missing entries without pretending their duty is known", () => {
   const html = renderToStaticMarkup(createElement(DefinitionsContent, {definitions: {...definitions, status: "invalid", steps: [], workflows: []}}));
   assert.match(html, /Verify changed behavior in the real application/);
-  assert.match(html, /Missing or invalid step: e2e-testing/);
-  assert.match(html, /index entry and required flag are retained/);
-  assert.match(html, /Required step/);
-  assert.match(html, /workflows\/reviewer.yaml/);
-  assert.doesNotMatch(html, /No effective required references/);
+  assert.match(html, /Definition unreadable; index entry retained/);
+  assert.match(html, /Required/);
+  assert.doesNotMatch(html, /No required definitions are configured/);
 });
 
 it("catalog editor fields keep missing and invalid draft rows, label native controls and offer unlisted local files", () => {

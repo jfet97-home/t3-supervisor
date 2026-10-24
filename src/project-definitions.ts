@@ -22,7 +22,7 @@ type DefinitionOrigin = "global" | "project";
 type DefinitionScopeStatus = "ready" | "missing" | "invalid" | "permission_required" | "unavailable";
 export type DefinitionPresence = {status: "present" | "missing" | "unavailable"; message?: string};
 export type GlobalDefinitionPresence = DefinitionPresence & {path: string};
-export type DefinitionCheckoutTarget = {origin: "project"; threadId: string | null; workspaceRoot: string; branch: string | null; isGitRepository: boolean};
+export type DefinitionCheckoutTarget = {origin: "project"; threadId: string | null; workspaceRoot: string; branch: string | null; isGitRepository: boolean; members: Array<{threadId: string; title: string}>};
 export type ProjectDefinitionSetupInput = {origin: "project"; action: "create" | "create_and_commit"; expectedWorkspaceRoot: string; expectedBranch: string | null};
 export type ProjectDefinitionSetupOutcome = {status: "created" | "committed" | "unchanged" | "conflict" | "stale" | "permission_required" | "unavailable" | "uncertain"; workspaceRoot: string | null; branch: string | null; path: string; message: string};
 export type ProjectDefinitionGlobalSetupOutcome = {status: "created" | "unchanged" | "conflict" | "permission_required" | "unavailable" | "uncertain"; workspaceRoot: string; branch: null; path: string; message: string};
@@ -759,6 +759,7 @@ const makeProjectDefinitions = Effect.fnUntraced(function* (sources: ProjectDefi
     if (!projectRoot) return yield* new DefinitionCheckoutUnavailable({reason: "workspace_invalid"});
     if (yield* isScratchProject(projectId, project.project.workspaceRoot)) return [];
     const roots = new Map<string, string | null>([[projectRoot, null]]);
+    const members = new Map<string, Array<{threadId: string; title: string}>>([[projectRoot, []]]);
     const candidates = catalog.threads.filter(thread => thread.projectId === projectId && thread.lineage.parentThreadId === null && !thread.deletedAt && !thread.archivedAt);
     if (candidates.length > 200) return yield* new DefinitionCheckoutUnavailable({reason: "checkout_target_limit"});
     for (const candidate of candidates) {
@@ -766,16 +767,21 @@ const makeProjectDefinitions = Effect.fnUntraced(function* (sources: ProjectDefi
       const thread = projection.projection.thread;
       if (thread.id !== candidate.id || thread.projectId !== projectId || thread.deletedAt || thread.archivedAt) continue;
       if (thread.worktreePath === undefined) return yield* new DefinitionCheckoutUnavailable({reason: "workspace_binding_unavailable"});
-      if (thread.worktreePath === null) continue;
+      if (thread.worktreePath === null) {
+        members.get(projectRoot)!.push({threadId: thread.id, title: thread.title});
+        continue;
+      }
       if (!text(thread.worktreePath, 4096) || !posix.isAbsolute(thread.worktreePath) || thread.worktreePath.includes("\0") || thread.worktreePath.includes("\\"))
         return yield* new DefinitionCheckoutUnavailable({reason: "workspace_invalid"});
       const root = posix.normalize(thread.worktreePath);
       if (root !== projectRoot && !roots.has(root)) roots.set(root, thread.id);
+      const shared = members.get(root) ?? [];
+      shared.push({threadId: thread.id, title: thread.title}); members.set(root, shared);
     }
     const targets: DefinitionCheckoutTarget[] = [];
     for (const [workspaceRoot, threadId] of [...roots].sort(([a], [b]) => a.localeCompare(b))) {
       const vcs = files.vcsInfo ? yield* vcsInfo(workspaceRoot) : {isRepo: false, branch: null};
-      targets.push({origin: "project", threadId, workspaceRoot, branch: vcs.branch, isGitRepository: vcs.isRepo});
+      targets.push({origin: "project", threadId, workspaceRoot, branch: vcs.branch, isGitRepository: vcs.isRepo, members: (members.get(workspaceRoot) ?? []).sort((a, b) => a.threadId.localeCompare(b.threadId))});
     }
     return targets;
   });

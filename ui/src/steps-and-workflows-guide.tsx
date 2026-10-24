@@ -1,3 +1,4 @@
+import { EntityDetails } from "./disclosure.js";
 import React from "react";
 
 const layoutExample = `.t3-supervisor/
@@ -296,10 +297,10 @@ skills:
     </Topic>
 
     <Topic id="guide-faq-title" title="Frequently asked questions">
-      <div className="stack guide-faq-list">{questions.map(({question, answer}) => <details className="panel guide-faq" key={question}>
-        <summary>{question}</summary>
+      <div className="stack guide-faq-list">{questions.map(({question, answer}) => <EntityDetails title={<>{question}</>} className="guide-faq" key={question}>
+        
         <p>{answer}</p>
-      </details>)}</div>
+      </EntityDetails>)}</div>
     </Topic>
   </section>;
 }

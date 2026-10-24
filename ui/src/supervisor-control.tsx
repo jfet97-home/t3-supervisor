@@ -1,3 +1,5 @@
+import { HelpDisclosure } from "./disclosure.js";
+import { GlobalSupervisionStatus, ProjectSupervisionStatus } from "./supervision-status.js";
 import React, { useContext, useEffect, useRef, useState } from "react";
 import { Clock, Effect, Option, Result } from "effect";
 import { AsyncResult, Atom, type AtomRegistry } from "effect/reactivity";
@@ -228,10 +230,10 @@ export function SupervisionControlView({control, busy, blocked, message, onToggl
   const global = control.projectId === null;
   const Heading = global ? "h2" : "h3";
   return <section className="panel stack settings-control" aria-label={global ? "Global supervision" : "Project supervision"}>
-    <div className="row between control-heading"><Heading>{global ? "Global supervision" : "Project supervision"}</Heading><span className="pill">{control.enabled ? "On" : "Off"}</span></div>{!global && control.enabled && !control.globallyEnabled && <p className="notice">The global supervision switch is off.</p>}
+    <div className="row between control-heading"><Heading>{global ? "Global supervision" : "Project supervision"}</Heading>{global ? <GlobalSupervisionStatus enabled={control.globallyEnabled}/> : <ProjectSupervisionStatus enabled={control.enabled} effectiveEnabled={control.effectiveEnabled} globallyEnabled={control.globallyEnabled}/>}</div>{!global && control.enabled && !control.globallyEnabled && <p className="notice">The global supervision switch is off.</p>}
     <p>{global ? "The master switch controls semantic supervision across every project and starts enabled." : "This project is supervised only when both its switch and the master switch are enabled. An existing .t3-supervisor folder enables a project initially; your manual choice is remembered."}</p>
-    <details><summary>How this switch works</summary>{!global && <p>Folder detection: {control.detectionStatus}. {control.detectionError}</p>}
-    <p>Disabling stops new supervisory work. An already-running model turn may finish. Chats, settings and recorded history are retained.</p></details>
+    <HelpDisclosure title={<>How this switch works</>} >{!global && <p>Folder detection: {control.detectionStatus}. {control.detectionError}</p>}
+    <p>Disabling stops new supervisory work. An already-running model turn may finish. Chats, settings and recorded history are retained.</p></HelpDisclosure>
     <div className="row">
       <button type="button" className={control.enabled ? "danger-button" : "primary"} disabled={busy || blocked} onClick={onToggle}>{busy ? "Saving…" : control.enabled ? "Disable supervision" : "Enable supervision"}</button>
       <button type="button" className="quiet-button" title={readAt ? `Last read ${new Date(readAt).toLocaleTimeString()}` : undefined} disabled={busy} onClick={onReload}>Reload status</button>
@@ -359,10 +361,10 @@ export function GlobalDefinitionsControlView({control, busy, blocked, message, o
 }) {
   return <section className="panel stack settings-control" aria-label="Use global steps and workflows">
     <div className="row between control-heading"><h2>Use global steps and workflows</h2><span className="pill">{control.enabled ? "On" : "Off"}</span></div>{control.enabled && !control.effectiveEnabled && <p className="notice">The master supervision switch is off.</p>}
-    <p>Share reusable steps and workflows across enabled projects and No Project chats.</p><details><summary>Shared definition files and behavior</summary><p>Shared definitions: <code>~/.t3-supervisor/project.yaml</code>, <code>steps/</code>, and <code>workflows/</code> in the T3 server user's home.</p>
+    <p>Share reusable steps and workflows across enabled projects and No Project chats.</p><HelpDisclosure title={<>Shared definition files and behavior</>} ><p>Shared definitions: <code>~/.t3-supervisor/project.yaml</code>, <code>steps/</code>, and <code>workflows/</code> in the T3 server user's home.</p>
     <p>This starts disabled. First enabling creates the shared project.yaml and empty steps/ and workflows/ directories if needed. Existing definitions are preserved, and the files are left uncommitted.</p>
     <p>These definitions supply policy to enabled Supervisors. This switch never activates a chat or changes No Project mode. Disabling them leaves project definitions available; No Project plans use task-local steps.</p>
-    <p>Folder detection: {control.detectionStatus}. {control.detectionError}</p></details>
+    <p>Folder detection: {control.detectionStatus}. {control.detectionError}</p></HelpDisclosure>
     <div className="row">
       <button type="button" className={control.enabled ? "danger-button" : "primary"} disabled={busy || blocked} onClick={onToggle}>{busy ? "Saving…" : control.enabled ? "Disable global definitions" : "Enable global definitions"}</button>
       <button type="button" className="quiet-button" title={readAt ? `Last read ${new Date(readAt).toLocaleTimeString()}` : undefined} disabled={busy} onClick={onReload}>Reload global definitions status</button>

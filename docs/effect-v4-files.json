@@ -20269,9 +20269,9 @@
     "createNavigator algorithm kept as a host-injected deterministic state machine (it is already pure over an injected host and pinned by 15 tests)"
    ],
    "residualAdapter": {
-    "what": "History API + hash events + restore timer",
-    "why": "browser history has no Effect platform service; the algorithm is deterministic over an injected host",
-    "cleanup": "listeners and pending restore timer released with the atom/component lifetime"
+    "what": "History API, hash events, optional sessionStorage list context/scroll and one focus-restoring animation frame",
+    "why": "Browser navigation, scroll and focus have no Effect platform service; the navigator remains pure over its injected host, while the frame performs only DOM focus/scroll after navigation.",
+    "cleanup": "History listeners and Effect restore deadlines are owned by the navigation atom; focus frames perform no application effects."
    },
    "sharedCallers": [
     "test/workspace-navigation.test.ts",
@@ -20625,7 +20625,11 @@
    "pureRetained": [
     "definition rendering components, status texts"
    ],
-   "residualAdapter": null,
+   "residualAdapter": {
+    "what": "native details.open updates for Expand/Collapse template controls",
+    "why": "Pure browser presentation over mounted details elements; no asynchronous work, timers or business state.",
+    "cleanup": "No listeners or resources are retained."
+   },
    "sharedCallers": [
     "test/definition-references.test.ts",
     "test/project-definitions-ui.test.ts",

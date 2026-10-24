@@ -13,15 +13,15 @@ it("deep links preserve exact opaque project and conversation identities and exp
   assert.deepEqual(parseRoute("#/projects/%ZZ/task"), directoryRoute);
 });
 
-it("remembered context is per project and cannot override an explicit deep link", () => {
+it("project entry always opens its list while explicit deep links retain exact conversation identity", () => {
   const previous = Object.getOwnPropertyDescriptor(globalThis, "sessionStorage");
   const values = new Map<string, string>();
   Object.defineProperty(globalThis, "sessionStorage", {configurable: true, value: {getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => values.set(key, value)}});
   try {
     rememberContext({...directoryRoute, projectId: "a", main: "old", section: "settings"});
     rememberContext({...directoryRoute, projectId: "b", main: "", section: "definitions"});
-    assert.equal(openProject("a").main, "old");
-    assert.equal(openProject("b").main, "");
+    assert.equal(openProject("a").main, null);
+    assert.equal(openProject("b").main, null);
     assert.equal(openProject("c").main, null);
     assert.equal(parseRoute("#/projects/a/task?main=new").main, "new");
     values.set("supervisor-context:c", '{"main":3,"section":"plan"}');
@@ -327,4 +327,12 @@ it("without the Navigation API, markers written without a lineage never steer a 
     scenario([["pre", null], ["a", 0], ["b", 1]], 2, 1, reinitialize);
     scenario([["pre", null], ["a", 0], ["b", 1]], 2, 2, reinitialize);
   }
+});
+
+it("project-list return retains search and page while clearing the selected conversation", () => {
+  const list = {...directoryRoute, projectId: "project", q: "export flaky", listPage: 3};
+  const task = {...list, main: "chat", section: "task" as const};
+  const back = {...task, main: null, section: "conversations" as const};
+  assert.deepEqual(parseRoute(routeHref(back)), list);
+  assert.equal(openProject("project").section, "conversations");
 });

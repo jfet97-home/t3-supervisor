@@ -1,3 +1,4 @@
+import { ListPager, pageWindow } from "./pagination.js";
 import { conversationLabel } from "./conversation-status.js";
 import {activityTitle} from "./activity-presentation.js";
 import { useEffect, useState } from "react";
@@ -71,9 +72,10 @@ export function useOverview(active: boolean, connected: boolean): OverviewState 
 
 export function WorkState({work, fresh = true}: {work: DashboardWorkInfo; fresh?: boolean}) {
   const off = work.supervision !== "enabled";
-  const conversation = conversationLabel(work.engagement, fresh);
+  const conversation = conversationLabel(work.engagement, fresh, work.supervision === "stopped");
   const state = off ? work.supervision === "stopped" ? "Supervision stopped" : "Supervision disabled" : work.attention.length ? "Needs attention" : conversation ?? (work.assessment?.status === "completed" ? "Completed" : work.assessment?.status === "underway" ? "In progress" : work.planStatus === "agreed" ? "Plan agreed" : "Awaiting assessment");
-  return <div className="work-state"><span className={`pill ${work.attention.length && !off ? "amber" : work.assessment?.status === "completed" && !off ? "green" : ""}`}>{state}</span></div>;
+  const outcome = work.assessment?.status === "completed" ? "Completed" : work.assessment?.status === "underway" ? "In progress" : work.planStatus === "agreed" ? "Plan agreed" : null;
+  return <div className="work-state"><span className={`pill ${work.attention.length && !off ? "amber" : work.assessment?.status === "completed" && !off ? "green" : ""}`}>{state}</span>{!off && conversation === "Engaged in the task" && outcome && <span className="small muted">{outcome}</span>}</div>;
 }
 
 export function WorkTable({work, data, navigate, empty = "No supervised conversations match these filters.", emptyTitle = "No matching work", fresh = true}: {
@@ -94,6 +96,7 @@ export function WorkTable({work, data, navigate, empty = "No supervised conversa
 
 export function Home({data, overview, navigate, startPanel}: {data: GuidanceSnapshot; overview: OverviewState; navigate: (route: Route) => void; startPanel?: React.ReactNode}) {
   const [query, setQuery] = useState("");
+  const [page, setPage] = useState(1);
   const [filter, setFilter] = useState("all");
   const [project, setProject] = useState("");
   const result = overview.data;
@@ -101,6 +104,9 @@ export function Home({data, overview, navigate, startPanel}: {data: GuidanceSnap
   const work = result?.work.filter(item => (!project || item.projectId === project) &&
     (filter === "all" || filter === "attention" && item.attention.length > 0 || filter === "active" && item.nativeState === "active" || filter === "stopped" && item.supervision !== "enabled") &&
     `${item.title} ${item.objective ?? ""} ${item.reason}`.toLowerCase().includes(query.toLowerCase())) ?? [];
+  const sorted = [...work].sort((a, b) => a.mainThreadId.localeCompare(b.mainThreadId));
+  const range = pageWindow(sorted.length, page);
+  useEffect(() => {if (page !== range.page) setPage(range.page);}, [page, range.page]);
   return <section className="stack home-workspace">
     <div className="page-heading heading-actions"><div><h1>Work overview</h1><p className="muted">What needs your attention, and where work stands.</p></div><div className="row"><ReadTime value={result?.observedAt ?? null}/><button onClick={() => {if (data.connected && !overview.loading) overview.refresh();}} aria-disabled={!data.connected || overview.loading}><Icon name="refresh" size={17}/>{overview.loading ? "Refreshing…" : "Refresh overview"}</button></div></div>
     {(!data.connected || overview.error || result && !result.available) && <div className="notice" role="status"><strong>Current coverage is limited.</strong> {result ? overview.error || (!data.connected ? "T3 is disconnected. Showing the last read; it may be out of date." : "Supervisor access is unavailable. Current supervision state has not been established.") : !data.connected ? "T3 is disconnected. Reconnect to load current work." : "Could not load current work. No successful read is available."} <button type="button" onClick={() => {if (data.connected && !overview.loading) overview.refresh();}} aria-disabled={!data.connected || overview.loading}>Retry overview</button></div>}
@@ -113,8 +119,9 @@ export function Home({data, overview, navigate, startPanel}: {data: GuidanceSnap
       </section>
       {startPanel}
       <section className="work-section" aria-labelledby="current-work-heading"><div className="section-heading row between"><div><h2 id="current-work-heading">Supervised work <span className="count">{result.total}</span></h2><p className="muted small">Native activity and Supervisor records describe different things.</p></div><RouteLink to={directoryRoute} navigate={navigate}>Browse projects<Icon name="arrow" size={16}/></RouteLink></div>
-        {result.total > 0 && <div className="filter-bar"><label className="search"><span className="sr-only">Search work</span><Icon name="search" size={18}/><input type="search" aria-label="Search work" placeholder="Search conversations or objectives" value={query} onChange={event => setQuery(event.target.value)}/></label><label><span className="sr-only">Filter by project</span><select aria-label="Filter by project" value={project} onChange={event => setProject(event.target.value)}><option value="">All projects</option>{result.projects.map(item => <option key={item.id} value={item.id}>{item.title}</option>)}</select></label><label><span className="sr-only">Filter work status</span><select aria-label="Filter work status" value={filter} onChange={event => setFilter(event.target.value)}><option value="all">All states</option><option value="attention">Needs attention</option><option value="active">Native activity: active</option><option value="stopped">Supervision off</option></select></label></div>}
-        <WorkTable fresh={data.connected && result.available && !overview.error} work={work} data={data} navigate={navigate} emptyTitle={result.total ? "No matching work" : "No supervised conversations yet"} empty={result.total ? "Try another search or filter. Filters apply to the loaded conversations." : "Open a project to inspect its conversations and supervision settings. No bound main conversations were found in available projects."}/>
+        {result.total > 0 && <div className="filter-bar"><label className="search"><span className="sr-only">Search work</span><Icon name="search" size={18}/><input type="search" aria-label="Search work" placeholder="Search conversations or objectives" value={query} onChange={event => {setQuery(event.target.value); setPage(1);}}/></label><label><span className="sr-only">Filter by project</span><select aria-label="Filter by project" value={project} onChange={event => {setProject(event.target.value); setPage(1);}}><option value="">All projects</option>{result.projects.map(item => <option key={item.id} value={item.id}>{item.title}</option>)}</select></label><label><span className="sr-only">Filter work status</span><select aria-label="Filter work status" value={filter} onChange={event => {setFilter(event.target.value); setPage(1);}}><option value="all">All states</option><option value="attention">Needs attention</option><option value="active">Native activity: active</option><option value="stopped">Supervision off</option></select></label></div>}
+        <p className="small muted">Searching {result.work.length} loaded conversations of {result.total} available. Load more below to extend this read.</p><ListPager label="Loaded work" total={sorted.length} page={range.page} onPage={setPage}/>
+        <WorkTable fresh={data.connected && result.available && !overview.error} work={sorted.slice(range.offset, range.offset + range.size)} data={data} navigate={navigate} emptyTitle={result.total ? "No matching work" : "No supervised conversations yet"} empty={result.total ? "Try another search or filter. Filters apply to the loaded conversations." : "Open a project to inspect its conversations and supervision settings. No bound main conversations were found in available projects."}/>
         {result.total === 0 && <RouteLink to={directoryRoute} navigate={navigate} className="button-link primary-link">Choose a project</RouteLink>}
         {result.hasMore && <div className="pagination"><p className="muted small">{result.work.length} of {result.total} conversations loaded. Filters apply to this loaded set.</p><button disabled={overview.loading || !data.connected} onClick={overview.loadMore}>Load more conversations</button></div>}
       </section>

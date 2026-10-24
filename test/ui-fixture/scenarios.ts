@@ -200,6 +200,19 @@ export class FixtureModel {
   private datasets = {a: initialFixtureData("a"), b: initialFixtureData("b")};
   private current: FixtureEnvironmentName = "a";
   private journey: JourneyCase | null = null;
+  private largeInterface = false;
+  setLargeInterface() {
+    if (this.largeInterface) return;
+    this.largeInterface = true;
+    const project = this.project(fixtureIds.projectA);
+    for (let i = 1; i <= 86; i++) {
+      const id = `fixture-long-${String(i).padStart(3, "0")}`;
+      this.data.threads.push({id, title: `Fixture ${String(i).padStart(3, "0")}: Scanner-like repository analysis and delivery conversation`, projectId: project.id, binding: binding(project.id, id, "ready"), selectedModel: null, task: task(project.id, id, "Synthetic long-list task; no native work or settings are changed.")});
+    }
+    project.checkouts.push({origin: "project", threadId: fixtureIds.threadA2, workspaceRoot: "/fixture/worktrees/export-reliability", branch: "fix/export-reliability", isGitRepository: true, folderStatus: "present"});
+    project.checkouts.push({origin: "project", threadId: fixtureIds.threadA3, workspaceRoot: "/fixture/worktrees/review-without-branch-name", branch: null, isGitRepository: true, folderStatus: "present"});
+    project.projectConfig = {...project.projectConfig!, steps: [...project.projectConfig!.steps, ...Array.from({length: 45}, (_, i) => ({path: `steps/fixture-duty-${i + 1}.md`, summary: `Synthetic duty ${i + 1}: preserve scoped verification, evidence and documented remaining obligations.`, required: i % 7 === 0}))]};
+  }
   setJourney(phase: JourneyCase | null) {this.journey = phase;}
   // the reconstructed packing journey replaces chat A1 everywhere it appears, so Home, Conversations and the task agree
   private journeyFor(threadId: string) {
@@ -223,6 +236,7 @@ export class FixtureModel {
 
   reset() {
     this.journey = null;
+    this.largeInterface = false;
     this.datasets = {a: initialFixtureData("a"), b: initialFixtureData("b")};
     this.current = "a";
   }
@@ -250,7 +264,7 @@ export class FixtureModel {
       threadPolicy: this.threadPolicy(),
       threads: this.data.threads.map(thread => ({id: thread.id, title: this.titleOf(thread), projectId: thread.projectId, available: true})),
       projects: this.data.projects.map(project => ({id: project.id, title: project.title, available: true, classification: project.classification})),
-      rules: [], mutes: [], activity, coverage: "Fixture coverage: synthetic API data for UI recordings.", tokensUsed: 0,
+      rules: [], mutes: [], activity: this.largeInterface ? [...activity, ...Array.from({length: 80}, (_, i) => ({...activity[0]!, id: `fixture-long-activity-${i}`, createdAt: fixtureEpoch + (i + 3) * minute}))] : activity, coverage: "Fixture coverage: synthetic API data for UI recordings.", tokensUsed: 0,
     };
   }
 
@@ -505,7 +519,19 @@ export class FixtureModel {
     const page = parseWorkflowProgressPageQuery(query);
     if (!page) throw new FixtureFailure("Fixture: invalid workflow progress page.");
     const thread = this.thread(page.projectId, page.mainThreadId);
-    if (this.journeyFor(thread.id)) return {...fixtureJourney(this.journey!, page.projectId, thread.id, thread.binding!.threadId, now).progress, workflowOffset: page.workflowOffset, lineageOffset: page.lineageOffset};
+    if (this.journeyFor(thread.id)) {
+      const progress = fixtureJourney(this.journey!, page.projectId, thread.id, thread.binding!.threadId, now).progress;
+      if (this.largeInterface && progress.scope && this.journey?.startsWith("nested")) {
+        const childId = "fixture-contributing-child";
+        const main = progress.workflows[0]!;
+        return {...progress, workflowOffset: page.workflowOffset, lineageOffset: page.lineageOffset,
+          scope: {...progress.scope, lineageTotal: progress.scope.lineageTotal + 1, threads: [...progress.scope.threads, {...progress.scope.threads[0]!, threadId: childId, parentThreadId: thread.id, depth: 1, origin: "delegated_child", title: "Fixture contributing correctness review", lifecycle: "completed", lifecycleDetail: "completed"}]},
+          coverage: [...(progress.coverage ?? []), {threadId: childId, state: "assigned", assigneeThreadId: "fixture-review-helper", assigneeTitle: "Fixture review helper", assignmentRootThreadId: thread.binding!.threadId}],
+          workflows: [...progress.workflows, {...main, workflowId: "fixture-child-workflow", threadId: childId, parentThreadId: thread.id, objective: "Synthetic child review contribution; parent completion remains separate.", plan: {kind: "sequence", templatePath: null, nodes: []}, assessment: null,
+            parentNodeReferences: [{parentWorkflowId: main.workflowId, parentThreadId: thread.id, nodeId: "packing-review-correctness", nodeKind: "step", nodeName: "Correctness review"}], observations: [], contributions: []}]};
+      }
+      return {...progress, workflowOffset: page.workflowOffset, lineageOffset: page.lineageOffset};
+    }
     return {status: "ok", message: null, projectId: page.projectId, mainThreadId: page.mainThreadId, observedAt: now, scope: null, coverage: [],
       incompatibleWorkflows: [], workflows: [], workflowOffset: page.workflowOffset, workflowHasMore: false, lineageOffset: page.lineageOffset, lineageHasMore: false};
   }
@@ -513,20 +539,21 @@ export class FixtureModel {
   projectDefinitions(projectId: string, threadId: string | null): ProjectDefinitionSnapshot {
     const project = this.project(projectId);
     if (threadId !== null) this.thread(projectId, threadId);
+    const workspaceRoot = project.checkouts.find(target => target.threadId === threadId && threadId !== null)?.workspaceRoot ?? project.workspaceRoot;
     const scratch = project.classification === "scratch";
     const empty = {steps: [], workflows: [], config: {workflows: [], steps: []}, projectConfig: null, definitionFiles: [], sources: [], issues: []};
     if (scratch) return {projectId, threadId, workspaceRoot: "", globalOnly: true, globalRevision: null, revision: null, editingAvailable: true, status: "missing", complete: true, ...empty};
     const config = project.projectConfig;
-    if (!config || !this.folderPresent(project)) return {projectId, threadId, workspaceRoot: project.workspaceRoot, globalOnly: false, globalRevision: null,
+    if (!config || !this.folderPresent(project)) return {projectId, threadId, workspaceRoot, globalOnly: false, globalRevision: null,
       revision: null, editingAvailable: true, status: "missing", complete: true, ...empty};
     const entries = (kind: "workflows" | "steps") => config[kind].flatMap(entry => {
       const id = catalogEntryId(kind, entry.path);
       return id ? [{id, path: entry.path, summary: entry.summary, required: entry.required, origin: "project" as const, sourceId: id}] : [];
     });
-    const files = project.id === fixtureIds.projectA ? {steps: stepFiles, workflows: workflowFiles} : {steps: {}, workflows: {}};
+    const files = project.id === fixtureIds.projectA ? {steps: {...stepFiles, ...(this.largeInterface ? Object.fromEntries(Array.from({length: 45}, (_, i) => [`fixture-duty-${i + 1}`, {name: `Fixture duty ${i + 1}`, description: `Preserve the actual scope, verified evidence and remaining obligations for synthetic duty ${i + 1}.\n\nInspect the changed boundary, retain existing progress, verify relevant behavior and report any unverified claims clearly.`, references: ["docs/synthetic-reference.md"], skills: []}])) : {})}, workflows: this.largeInterface ? {...workflowFiles, "fixture-delivery": {...workflowFiles["fixture-delivery"]!, sequence: [{step: "fixture-tests"}, {parallel: [{step: "fixture-duty-1"}, {step: "fixture-review"}]}, {sequence: [{step: "fixture-duty-2"}, {step: "fixture-duty-3"}]}]}} : workflowFiles} : {steps: {}, workflows: {}};
     const missing = [...entries("workflows").filter(entry => !(entry.id in files.workflows)), ...entries("steps").filter(entry => !(entry.id in files.steps))];
     return {
-      projectId, threadId, workspaceRoot: project.workspaceRoot, globalOnly: false, globalRevision: null, revision: sha256(JSON.stringify(config)), editingAvailable: true,
+      projectId, threadId, workspaceRoot, globalOnly: false, globalRevision: null, revision: sha256(JSON.stringify(config)), editingAvailable: true,
       status: missing.length ? "invalid" : "ready", complete: true,
       steps: entries("steps").flatMap(entry => {const file = files.steps[entry.id];return file ? [{id: entry.id, name: file.name, description: file.description, summary: entry.summary, ...definitionGuidanceFields(file),
         origin: "project" as const, path: `.t3-supervisor/${entry.path}`, sourceId: entry.id}] : [];}),
@@ -541,6 +568,13 @@ export class FixtureModel {
       sources: [{path: ".t3-supervisor/project.yaml", origin: "project", content: `# fixture: synthetic project.yaml\n${stringify(config)}`}],
       issues: missing.map(entry => ({path: `.t3-supervisor/${entry.path}`, code: "missing_definition", message: `Fixture: ${entry.path} is indexed but has no synthetic file.`})),
     };
+  }
+
+  checkoutInventory(projectId: string) {
+    const project = this.project(projectId);
+    const targets = project.checkouts.map(target => ({workspaceRoot: target.workspaceRoot, threadId: target.threadId, branch: target.branch, isGitRepository: target.isGitRepository,
+      members: this.data.threads.filter(thread => thread.projectId === projectId && (target.threadId === null ? !project.checkouts.some(checkout => checkout.threadId === thread.id) : target.threadId === thread.id)).map(thread => ({threadId: thread.id, title: thread.title}))}));
+    return {projectId, available: true, reason: null, targets};
   }
 
   saveProjectConfiguration(input: ProjectConfigSave, forced: ForcedOutcome | null): ProjectConfigSaveOutcome {
@@ -563,7 +597,7 @@ export class FixtureModel {
 export const scenarioNames = [
   "journey-request", "journey-following", "journey-catching-up", "journey-paused", "journey-proposal", "journey-agreed", "journey-working", "journey-attention", "journey-revised", "journey-reagreed", "journey-verified",
   "journey-nested", "journey-nested-attention", "journey-completed", "journey-stale", "journey-retained",
-  "baseline", "session-expiry-next-call", "signout-other-tab", "mutation-never-answered", "mutation-dropped",
+  "large-interface", "baseline", "session-expiry-next-call", "signout-other-tab", "mutation-never-answered", "mutation-dropped",
   "save-401", "save-403", "save-409", "save-413", "editor-conflict", "editor-uncertain", "slow-reads", "setup-race", "reload",
 ] as const;
 export type ScenarioName = typeof scenarioNames[number];
@@ -586,6 +620,7 @@ const setupPath = "/api/guidance/supervision-setup";
 const plan = (arms: Arm[], revokeSessions = false): ScenarioPlan => ({arms, revokeSessions});
 
 export const scenarioCatalog: Record<ScenarioName, {description: string; plan: (params: ScenarioParams) => ScenarioPlan}> = {
+  "large-interface": {description: "synthetic 89-conversation collection, 45 additional full duties and distinct/shared working folders", plan: () => plan([])},
   "journey-request": {description: "reconstructed packing example: the request is being interpreted", plan: () => plan([])},
   "journey-following": {description: "reconstructed packing example: quiet discussion and draft understanding", plan: () => plan([])},
   "journey-catching-up": {description: "reconstructed packing example: a newer requester message is being considered", plan: () => plan([])},

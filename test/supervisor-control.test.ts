@@ -140,7 +140,7 @@ it.effect("unavailable folder checks back off for a minute without rewriting the
   yield* TestClock.setTime(1_000_000);
   const supervisor = yield* makeProjectSupervisor(stores, {
     presence: () => {presenceCalls += 1;return Effect.succeed({status: "unavailable", message: "read denied"});},
-    checkoutTargets: () => Effect.succeed([{origin: "project", threadId: null, workspaceRoot: "/work/project-a", branch: "main", isGitRepository: true}]),
+    checkoutTargets: () => Effect.succeed([{origin: "project", threadId: null, workspaceRoot: "/work/project-a", branch: "main", isGitRepository: true, members: []}]),
     presenceForCheckout: () => {checkoutPresenceCalls += 1;return Effect.succeed({status: "present"});},
   });
   yield* supervisor.control("project-a");
@@ -212,7 +212,7 @@ it.effect("project setup captures the native enable boundary before writing and 
   const events: string[] = [];
   const supervisor = yield* makeProjectSupervisor(stores, {
     presence: () => Effect.succeed({status: "missing"}),
-    checkoutTargets: () => Effect.succeed([{origin: "project", threadId: null, workspaceRoot: "/work/project-a", branch: "main", isGitRepository: true}]),
+    checkoutTargets: () => Effect.succeed([{origin: "project", threadId: null, workspaceRoot: "/work/project-a", branch: "main", isGitRepository: true, members: []}]),
     presenceForCheckout: () => Effect.succeed({status: "missing"}),
     activation: () => {events.push("boundary");return Effect.succeed(baseline("run-2"));},
     initialize: (_projectId, _threadId, input) => {events.push(`initialize:${input.action}`);return Effect.succeed({status: "created", workspaceRoot: input.expectedWorkspaceRoot, branch: input.expectedBranch, message: "created"});},
@@ -235,7 +235,7 @@ it.effect("enable_existing adopts a present checkout without running the project
   let initializeCalls = 0;
   const supervisor = yield* makeProjectSupervisor(stores, {
     presence: () => {events.push("auto-presence");return Effect.succeed({status: "unavailable", message: "not readable from the default scope"});},
-    checkoutTargets: () => {events.push("checkout-targets");return Effect.succeed([{origin: "project", threadId: null, workspaceRoot: "/work/project-a", branch: "main", isGitRepository: true}]);},
+    checkoutTargets: () => {events.push("checkout-targets");return Effect.succeed([{origin: "project", threadId: null, workspaceRoot: "/work/project-a", branch: "main", isGitRepository: true, members: []}]);},
     presenceForCheckout: () => {events.push("checkout-presence");return Effect.succeed({status: "present"});},
     initialize: (_projectId, _threadId, input) => {initializeCalls += 1;return Effect.succeed({status: "created", workspaceRoot: input.expectedWorkspaceRoot, branch: input.expectedBranch, message: "unexpected create"});},
     activation: () => {events.push("boundary");return Effect.succeed(baseline("run-2"));},
@@ -262,7 +262,7 @@ it.effect("enable_existing rechecks folder presence after capturing its boundary
   let boundaryCaptures = 0;
   const supervisor = yield* makeProjectSupervisor(stores, {
     presence: () => Effect.succeed({status: "unavailable", message: "default presence unavailable"}),
-    checkoutTargets: () => Effect.succeed([{origin: "project", threadId: null, workspaceRoot: "/work/project-a", branch: "main", isGitRepository: true}]),
+    checkoutTargets: () => Effect.succeed([{origin: "project", threadId: null, workspaceRoot: "/work/project-a", branch: "main", isGitRepository: true, members: []}]),
     presenceForCheckout: () => {checkoutPresenceChecks += 1;return Effect.succeed({status: checkoutPresenceChecks === 1 ? "present" as const : "missing" as const});},
     activation: () => {boundaryCaptures += 1;return Effect.succeed(baseline("run-2"));},
   });
@@ -291,7 +291,7 @@ it.effect("enable_existing rejects a worktree whose selected branch changed duri
     presence: () => Effect.succeed({status: "unavailable", message: "default presence unavailable"}),
     checkoutTargets: () => {
       targetChecks += 1;
-      return Effect.succeed([{origin: "project" as const, threadId: "main", workspaceRoot: "/work/feature", branch: targetChecks === 1 ? "feature" : "other", isGitRepository: true}]);
+      return Effect.succeed([{origin: "project" as const, threadId: "main", workspaceRoot: "/work/feature", branch: targetChecks === 1 ? "feature" : "other", isGitRepository: true, members: []}]);
     },
     presenceForCheckout: () => {presenceChecks += 1;return Effect.succeed({status: "present" as const});},
   });
@@ -313,7 +313,7 @@ it.effect("enable_existing requires a present folder and create still rejects ex
   let boundaries = 0;
   const supervisor = yield* makeProjectSupervisor(stores, {
     presence: () => Effect.succeed({status: "unavailable", message: "default presence unavailable"}),
-    checkoutTargets: () => Effect.succeed([{origin: "project", threadId: null, workspaceRoot: "/work/project-a", branch: "main", isGitRepository: true}]),
+    checkoutTargets: () => Effect.succeed([{origin: "project", threadId: null, workspaceRoot: "/work/project-a", branch: "main", isGitRepository: true, members: []}]),
     presenceForCheckout: () => Effect.succeed({status: folderStatus}),
     initialize: (_projectId, _threadId, input) => {initialized += 1;return Effect.succeed({status: "created", workspaceRoot: input.expectedWorkspaceRoot, branch: input.expectedBranch, message: "created"});},
     activation: () => {boundaries += 1;return Effect.succeed(baseline("run-2"));},

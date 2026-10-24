@@ -1,3 +1,5 @@
+import { Icon } from "./icons.js";
+import { EntityDetails, HelpDisclosure } from "./disclosure.js";
 import { ConversationStatus, ConversationUnderstanding } from "./conversation-status.js";
 import {alignmentLabel, PlanChanges, PlanJourney, planSteps, StepContributions, TaskAlignment, TaskOutcome} from "./workflow-journey.js";
 import {acceptedAgreement, journeyRecord, pendingProposal, planChanges, recordsByStep, stepNotes} from "./task-record.js";
@@ -200,8 +202,8 @@ function DefinitionReviewView({review}: {review: DefinitionReviewInfo}) {
     <h5 id="workflow-definition-review-title">Project definition review</h5>
     <p><strong>Status:</strong> {definitionReviewMessages[review.status]}</p>
     {review.message && <p>{review.message}</p>}
-    {outcome && <details className="stack">
-      <summary>Definition review details</summary>
+    {outcome && <EntityDetails title={<>Definition review details</>} >
+      
       <p><strong>Expected revision:</strong> <code>{review.expectedRevision}</code></p>
       <p><strong>Observed revision:</strong> {review.observedRevision === null ? "Not recorded" : <code>{review.observedRevision}</code>}</p>
       <p><strong>Supervisor message ID:</strong> {review.supervisorMessageId === null ? "Not recorded" : <code>{review.supervisorMessageId}</code>}</p>
@@ -214,7 +216,7 @@ function DefinitionReviewView({review}: {review: DefinitionReviewInfo}) {
       <p><strong>Updated:</strong> {updatedAt
         ? <time dateTime={updatedAt.toISOString()}>{updatedAt.toLocaleString()}</time>
         : "Unknown"}</p>
-    </details>}
+    </EntityDetails>}
   </section>;
 }
 function WorkflowProtocolDiagnosticView({diagnostic}: {diagnostic: WorkflowProtocolDiagnostic | null | undefined}) {
@@ -329,10 +331,10 @@ function ProjectSupervisorTeamPanel({team, settings, mainThreadId}: {team: Proje
       <h3 id="supervisor-team-title">Supervisor team</h3>
       <span className="pill">Saved maximum helpers per root: {settings.maxHelpersPerRoot}</span>
     </div>
-    <details><summary>How the Supervisor team works</summary><div className="stack"><p className="muted">The Supervisor team is separate from the operational workflow tree. The root owns unassigned work; each helper covers its assigned subtree and future operational descendants.</p>
+    <HelpDisclosure title={<>How the Supervisor team works</>} ><div className="stack"><p className="muted">The Supervisor team is separate from the operational workflow tree. The root owns unassigned work; each helper covers its assigned subtree and future operational descendants.</p>
     <p className="small muted">A person who messages a helper in T3 follows T3’s native follow-up behavior. Root-to-helper notes and routine check-ins use Supervisor team operations, not raw <code>t3_thread_send</code>.</p>
     <p className="small muted">Quarantine revokes a helper’s Supervisor authority and returns coverage to the root. Unresolved effects stay fenced, and the helper’s native T3 conversation or a turn already running there may continue.</p>
-    </div></details>
+    </div></HelpDisclosure>
     {!mainThreadId
       ? <p className="muted">Select a main conversation to inspect its Supervisor team.</p>
       : !team
@@ -467,7 +469,7 @@ const contributionsByNode = (workflow: WorkflowProgressWorkflow) => {
 
 function SupportingActivity({thread}: {thread: WorkflowProgressThreadView}) {
   if (thread.activityRefs.length === 0) return null;
-  return <details><summary>Supporting activity ({thread.activityRefs.length})</summary>
+  return <EntityDetails title={<>Supporting activity ({thread.activityRefs.length})</>} >
     <ul className="stack">{thread.activityRefs.map((activity, index) => <li key={`${activity.sourceThreadId}:${activity.sourceItemId ?? activity.sourceMessageId ?? index}`}>
       <p>{activity.label} · {formatProgressTime(activity.observedAt)}</p>
       <p className="small"><a href={threadHref(activity.sourceThreadId)}>Open supporting conversation {activity.sourceThreadId}</a></p>
@@ -477,16 +479,16 @@ function SupportingActivity({thread}: {thread: WorkflowProgressThreadView}) {
         {activity.sourceItemId && <>Item <code>{activity.sourceItemId}</code></>}
       </p>}
     </li>)}</ul>
-  </details>;
+  </EntityDetails>;
 }
 
 function ConnectedWork({threads, mainThreadId, workflows, coverage, task, complete}: {threads: readonly WorkflowProgressThreadView[]; mainThreadId: string;
   workflows: ReadonlyMap<string, WorkflowProgressWorkflow>; coverage: ReadonlyMap<string, WorkflowProgressCoverage>; task: TaskInterpretationInfo | undefined; complete: boolean}) {
   const children = threads.filter(thread => thread.threadId !== mainThreadId);
   const mainCoverage = coverage.get(mainThreadId);
-  if (children.length === 0 && (!mainCoverage || mainCoverage.state === "root")) return null;
+  
   return <section className="stack connected-work" aria-labelledby="connected-work-title">
-    <h2 id="connected-work-title">Connected work</h2>
+    <h2 id="connected-work-title">Connected work</h2><p className="muted">Conversations started from this task. Their workflows and contributions are recorded separately; a finished child does not complete a parent step.</p>{children.length === 0 && <p>{complete ? "No contributing child conversations are recorded in this read." : "No children in the loaded pages. More conversations may be on a later page."}</p>}
     {mainCoverage && mainCoverage.state !== "root" && <WorkflowAssignee coverage={mainCoverage}/>}
     <ul className="stack">{children.map(thread => {
       const lifecycle = lifecyclePresentation(thread);
@@ -497,8 +499,8 @@ function ConnectedWork({threads, mainThreadId, workflows, coverage, task, comple
           <div><strong>{thread.title || workflow?.objective || `Conversation ${thread.threadId}`}</strong><p className="muted small">{childOriginText[thread.origin]}{workflow ? ` · ${workflowExecutionStatusText[workflow.status]}` : ""}</p></div>
           <span className={`pill ${lifecycle.tone}`}>{lifecycle.label}</span>
         </div>
-        <div className="conversation-meta"><WorkflowAssignee coverage={coverage.get(thread.threadId)}/>{!thread.deletedAt && <a href={threadHref(thread.threadId)}>Open in T3 →</a>}</div>
-        <details><summary>{workflow ? "Child workflow and records" : "Conversation details"}</summary><div className="stack">
+        <p className="small">{workflow?.parentNodeReferences.length ? <>Contributes to: {workflow.parentNodeReferences.map(reference => reference.nodeName).join(", ")}</> : "No recorded contribution to a parent step"}</p><div className="conversation-meta"><WorkflowAssignee coverage={coverage.get(thread.threadId)}/>{!thread.deletedAt && <a href={threadHref(thread.threadId)}>Open in T3 →</a>}</div>
+        <EntityDetails title={<>{workflow ? "Child workflow and records" : "Conversation details"}</>} ><div className="stack">
           {workflow?.objective && <p>{workflow.objective}</p>}
           {workflow?.parentNodeReferences.length ? <p className="small">Contributes to parent steps: {workflow.parentNodeReferences.map(reference => reference.nodeName).join(", ")}</p> : null}
           {workflow?.plan && notes && <PlanJourney node={workflow.plan} mode="live" notes={{...notes, agreed: null, proposed: null, changed: new Set()}} contributions={contributionsByNode(workflow)}/>}
@@ -508,7 +510,7 @@ function ConnectedWork({threads, mainThreadId, workflows, coverage, task, comple
           {lifecycle.label === "Unknown" && <p className="small muted">T3 has not established this conversation’s current lifecycle. An idle thread mirror alone does not establish that its work is finished.</p>}
           {thread.contactLimit && <p className="small muted">{thread.contactLimit}</p>}
           {!workflow && <p className="small muted">{complete ? "No workflow document is recorded for this conversation." : "Workflow state for this conversation may be on a later page."}</p>}
-        </div></details>
+        </div></EntityDetails>
       </li>;
     })}</ul>
   </section>;
@@ -518,9 +520,9 @@ function ConnectedWork({threads, mainThreadId, workflows, coverage, task, comple
  * The canonical task workspace: the task and its current state, one journey, one agreement context and one place for
  * evidence and history. Statuses come only from the live workflow bound to this task.
  */
-export function TaskWorkspace({snapshot, task, threadId, progress, connected, attention, stopped, readAt, refreshing, onRefresh, onLoadMore, supervisionLink, currentRead = true}: {
+export function TaskWorkspace({snapshot, task, threadId, progress, connected, attention, stopped, readAt, refreshing, onRefresh, onLoadMore, supervisionLink, connectedWorkLink, currentRead = true}: {
   snapshot: ProjectSupervisorInfo; task: TaskInterpretationInfo | undefined; threadId: string; progress: WorkflowProgressPanelState | undefined; connected: boolean;
-  attention: readonly string[]; stopped: boolean; readAt: number | null; refreshing: boolean; onRefresh: () => void; onLoadMore: () => void; supervisionLink?: React.ReactNode; currentRead?: boolean;
+  attention: readonly string[]; stopped: boolean; readAt: number | null; refreshing: boolean; onRefresh: () => void; onLoadMore: () => void; supervisionLink?: React.ReactNode; connectedWorkLink?: React.ReactNode; currentRead?: boolean;
 }) {
   const view = progressView(progress?.pages ?? []);
   const mainWorkflow = view.workflowByThreadId.get(threadId);
@@ -545,7 +547,7 @@ export function TaskWorkspace({snapshot, task, threadId, progress, connected, at
     : progress?.loading ? "Reading assessment…" : "No assessment recorded";
   return <div className="task-workspace stack">
     <section className="task-band" aria-label="Task">
-      <ConversationStatus engagement={task?.engagement} fresh={connected && snapshot.available && currentRead}/>
+      <ConversationStatus explicitlyStopped={stopped} engagement={task?.engagement} fresh={connected && snapshot.available && currentRead}/>
       <p className="task-objective">{task?.objective ?? (snapshot.available ? "No task objective has been recorded for this conversation." : "The task could not be read.")}</p>
       {task?.reason && task.status !== "inferred" && <p className="muted">{task.reason}</p>}
       <TaskOutcome {...(currentAssessment && current ? {currentStep: current} : {})} assessment={currentAssessment} fallback={fallback} stopped={stopped}/>
@@ -583,25 +585,25 @@ export function TaskWorkspace({snapshot, task, threadId, progress, connected, at
           <p>{latestObservation.note}</p><p className="small muted">{latestObservation.targetNodeId ? latestObservation.targetNodeName ?? "Step" : "Whole task"} · {formatProgressTime(latestObservation.recordedAt)}</p></section>}
       </aside>
     </div>
-    <ConnectedWork threads={[...view.threadById.values()]} mainThreadId={threadId} workflows={view.workflowByThreadId} coverage={view.coverageByThreadId} task={task} complete={view.complete}/>
-    <details className="evidence-history"><summary>Evidence and history</summary><div className="stack">
+    <div className="connected-summary"><Icon name="tree" size={18}/><span>{[...view.threadById.keys()].filter(id => id !== threadId).length} connected conversations in this read</span>{connectedWorkLink}</div>
+    <EntityDetails title={<>Evidence and history</>} className="evidence-history"><div className="stack">
       <p className="small muted">Statuses and notes are the Supervisor’s assessments of the conversation’s work; they are not independent proof of execution. A parent step does not complete when a child finishes.</p>
       {record.kind === "live" && <section className="stack"><h3>Supervisor records</h3><SupervisorRecords workflow={record.workflow}/></section>}
       {removedContributions.length > 0 && <section className="stack"><h3>Contributions for steps no longer in the plan</h3><StepContributions items={removedContributions}/></section>}
       {mainThread && <section className="stack"><h3>Native conversation</h3><p className="small">{lifecyclePresentation(mainThread).label}{mainThread.lifecycleDetail ? ` · ${mainThread.lifecycleDetail}` : ""} · <a href={threadHref(threadId)}>Open in T3</a></p>{mainThread.contactLimit && <p className="small muted">{mainThread.contactLimit}</p>}<SupportingActivity thread={mainThread}/></section>}
-      {staleAgreement?.workflow.plan && <details className="retained-workflow"><summary>Earlier acceptance (out of date)</summary><p className="notice">This acceptance is history. The current plan still needs acceptance.</p><PlanJourney node={staleAgreement.workflow.plan} mode="historical"/></details>}
-      {retained.map(workflow => <details key={workflow.workflowId} className="retained-workflow"><summary>Earlier workflow: {workflow.objective ?? "Objective not recorded"}</summary>
+      {staleAgreement?.workflow.plan && <EntityDetails title={<>Earlier acceptance (out of date)</>} className="retained-workflow"><p className="notice">This acceptance is history. The current plan still needs acceptance.</p><PlanJourney node={staleAgreement.workflow.plan} mode="historical"/></EntityDetails>}
+      {retained.map(workflow => <EntityDetails title={<>Earlier workflow: {workflow.objective ?? "Objective not recorded"}</>} key={workflow.workflowId} className="retained-workflow">
         <p className="notice">Retained workflow record. It is not linked to the current task.</p>
         {workflow.plan && <PlanJourney node={workflow.plan} mode="live" notes={{agreed: null, proposed: null, records: recordsByStep(workflow.observations), changed: new Set()}} contributions={contributionsByNode(workflow)}/>}
-        <SupervisorRecords workflow={workflow}/></details>)}
+        <SupervisorRecords workflow={workflow}/></EntityDetails>)}
       {(view.latest?.incompatibleWorkflows.length ?? 0) > 0 && <p className="notice" role="status">Some retained workflow records use an incompatible format and remain read-only: {view.latest!.incompatibleWorkflows.map(item => item.workflowId).join(", ")}.</p>}
-    </div></details>
+    </div></EntityDetails>
     {view.canLoadMore && <button type="button" disabled={!connected || progress?.loading} onClick={onLoadMore}>Load more connected workflows and activity</button>}
   </div>;
 }
 
 
-export type ConversationSection = "all" | "task" | "supervision" | "settings";
+export type ConversationSection = "all" | "task" | "supervision" | "settings" | "connected";
 
 // outside projects the instance's No Project mode, not a project switch, decides which chats are supervised
 const noProjectEligibility = {
@@ -622,7 +624,7 @@ export function ProjectSupervisorView({
   refreshing = false,
   currentRead = true,
   onRefresh = () => {},
-  supervisionLink,
+  supervisionLink, connectedWorkLink,
   attentionEnabled = true,
   snapshot,
   selection,
@@ -664,6 +666,7 @@ export function ProjectSupervisorView({
   currentRead?: boolean;
   onRefresh?: () => void;
   supervisionLink?: React.ReactNode;
+  connectedWorkLink?: React.ReactNode;
   snapshot: ProjectSupervisorInfo;
   selection: SupervisorModelSelection;
   monitoring: MonitoringDraft;
@@ -717,7 +720,11 @@ export function ProjectSupervisorView({
     {!snapshot.available && <p className="panel" role="alert">Supervisor state is unavailable. {snapshot.message}</p>}
     {(section === "all" || section === "task") && threadId && <TaskWorkspace currentRead={currentRead} snapshot={snapshot} task={selectedTask} threadId={threadId} progress={workflowProgress} connected={connected}
       attention={attention} stopped={Boolean(snapshot.chatSupervision?.stopped)} readAt={readAt} refreshing={refreshing} onRefresh={onRefresh}
-      onLoadMore={onWorkflowProgressLoadMore ?? (() => {})} {...(supervisionLink ? {supervisionLink} : {})}/>}
+      onLoadMore={onWorkflowProgressLoadMore ?? (() => {})} {...(supervisionLink ? {supervisionLink} : {})} {...(connectedWorkLink ? {connectedWorkLink} : {})}/>}
+    {section === "connected" && threadId && (() => {
+      const view = progressView(workflowProgress?.pages ?? []);
+      return <div className="stack"><Freshness readAt={readAt} refreshing={refreshing} connected={connected} onRefresh={onRefresh}/><ConnectedWork threads={[...view.threadById.values()]} mainThreadId={threadId} workflows={view.workflowByThreadId} coverage={view.coverageByThreadId} task={selectedTask} complete={view.complete}/>{workflowProgress?.error && <p role="status">{workflowProgress.error}</p>}{view.canLoadMore && <button type="button" disabled={!connected || workflowProgress?.loading} onClick={onWorkflowProgressLoadMore}>Load more connected workflows and activity</button>}</div>;
+    })()}
     {section === "supervision" && <Freshness readAt={readAt} refreshing={refreshing} connected={connected} onRefresh={onRefresh}/>}
     {(section === "all" || section === "supervision") && snapshot.mainThreadId && snapshot.chatSupervision?.stopped && snapshot.chatSupervision.stoppedAt !== null && <StopNotice title={threadId ?? snapshot.mainThreadId} audit={{route: snapshot.chatSupervision.stoppedBy ?? "unknown", stoppedAt: snapshot.chatSupervision.stoppedAt, callerThreadId: snapshot.chatSupervision.stoppedCallerThreadId ?? null, userMessageId: snapshot.chatSupervision.stoppedUserMessageId ?? null}} onEnable={() => onChatSupervision(true)} busy={!connected || chatSupervisionBusy || chatSupervisionLocked}/>}
     <div hidden={section !== "all" && section !== "supervision"} className="panel stack">
@@ -731,7 +738,7 @@ export function ProjectSupervisorView({
         : snapshot.binding
           ? <p>Bound conversation: <a href={`t3-thread://v1/${snapshot.binding.threadId}`}>Open in T3</a> <code>{snapshot.binding.threadId}</code></p>
         : <p>{snapshot.mainThreadId ? "No Supervisor is bound to this main conversation yet." : "Select a main conversation to inspect its Supervisor."}</p>}
-      <details><summary>Conversation and model details</summary><div className="stack"><p className="muted">Saving settings does not start a conversation. T3 creates the Supervisor conversation for the first task that needs it, then reuses it when that main conversation resumes. Independent main conversations have separate Supervisors.</p>
+      <EntityDetails title={<>Conversation and model details</>} ><div className="stack"><p className="muted">Saving settings does not start a conversation. T3 creates the Supervisor conversation for the first task that needs it, then reuses it when that main conversation resumes. Independent main conversations have separate Supervisors.</p>
       {snapshot.binding?.settlementState && <p>Automatic settlement: {snapshot.binding.settlementState}. Resumed work uses this same conversation.</p>}
       {snapshot.binding?.settlementBlockedBy && !snapshot.binding.settlementState && <p className="muted">Automatic settlement is waiting on: {snapshot.binding.settlementBlockedBy.replaceAll("_", " ")}.</p>}
       {snapshot.binding?.keptActive && <p>Automatic settlement is held by a user keep-active choice.</p>}
@@ -740,7 +747,7 @@ export function ProjectSupervisorView({
       {snapshot.mainThreadId && <p><strong>Selected Supervisor model in T3:</strong> {formatModel(snapshot, snapshot.modelSelection)}. Edit this conversation’s model using T3 controls.</p>}
       {snapshot.modelApplication?.pending && snapshot.binding?.state === "ready" && <p role="status">T3 is waiting to apply the saved model selection while the Supervisor is idle.</p>}
       {snapshot.settings.pending && !snapshot.binding && <p role="status">The saved model selection will apply when T3 creates the Supervisor conversation for the first needed task.</p>}
-      </div></details>
+      </div></EntityDetails>
       <p>{snapshot.message}</p>
       {!snapshot.available && <p role="status">Supervisor status is currently unavailable.</p>}
 
@@ -750,13 +757,13 @@ export function ProjectSupervisorView({
 
     <div hidden={section !== "all" && section !== "supervision"} className="panel stack">
         {snapshot.monitoringStatus && <section className="stack" aria-labelledby="supervisor-monitoring-status-title">
-          <h4 id="supervisor-monitoring-status-title">Monitoring</h4><p>{snapshot.monitoringStatus.message}</p><details><summary>Monitoring details and check-ins</summary><div className="stack">
+          <h4 id="supervisor-monitoring-status-title">Monitoring</h4><p>{snapshot.monitoringStatus.message}</p><EntityDetails title={<>Monitoring details and check-ins</>} ><div className="stack">
           <p><strong>Status:</strong> {snapshot.monitoringStatus.state}</p>
           <p><strong>Pending activities:</strong> {snapshot.monitoringStatus.pendingItems}</p>
           <p><strong>Next review:</strong> {formatMonitoringTime(snapshot.monitoringStatus.nextReviewAt)}</p>
           <p><strong>Last notice:</strong> {formatMonitoringTime(snapshot.monitoringStatus.lastNoticeAt)}</p>
           <p>{snapshot.monitoringStatus.message}</p>
-          {snapshot.monitoringStatus.review && <ReviewOutcomes review={snapshot.monitoringStatus.review} />}</div></details>
+          {snapshot.monitoringStatus.review && <ReviewOutcomes review={snapshot.monitoringStatus.review} />}</div></EntityDetails>
         </section>}
     </div>
 
@@ -1163,12 +1170,13 @@ export const startChatSupervisionChange = (registry: AtomRegistry.AtomRegistry, 
   registry.set(changeChatSupervision(scopeKey(key.scope, key.operationId)), {projectKey, key, input});
 };
 
-export function ProjectSupervisorPanel({projectId, threadId, section = "all", attentionEnabled = true, connected, onDirtyChange, onSavingChange, supervisionLink}: {
+export function ProjectSupervisorPanel({projectId, threadId, section = "all", attentionEnabled = true, connected, onDirtyChange, onSavingChange, supervisionLink, connectedWorkLink}: {
   projectId: string;
   threadId?: string;
   section?: ConversationSection;
   attentionEnabled?: boolean;
   supervisionLink?: React.ReactNode;
+  connectedWorkLink?: React.ReactNode;
   connected: boolean;
   onDirtyChange?: (dirty: boolean) => void;
   onSavingChange?: (saving: boolean) => void;
@@ -1355,7 +1363,7 @@ export function ProjectSupervisorPanel({projectId, threadId, section = "all", at
       readAt={view.readAt}
       refreshing={isLoading || workflowProgressState.loading}
       onRefresh={() => { refresh(); refreshWorkflowProgress(); }}
-      {...(supervisionLink ? {supervisionLink} : {})}
+      {...(supervisionLink ? {supervisionLink} : {})} {...(connectedWorkLink ? {connectedWorkLink} : {})}
       onWorkflowProgressLoadMore={loadMoreWorkflowProgress}
       onSelectionChange={updateSelection}
       onMonitoringChange={updateMonitoring}

@@ -77,3 +77,10 @@ export const resolveSave = (input: ProjectConfigSave) =>
 // the classified save request resolved as the editor resolves its admitted save
 export const saveProjectConfiguration = (input: ProjectConfigSave) =>
   Effect.flatMap(Effect.exit(classifyMutation(requestSave(input))), resolveSave(input));
+
+// native folder and Git facts are read on Definitions entry or explicit refresh, never from the SSE hint stream
+export const projectCheckouts = Atom.family((key: string) => uiRuntime.atom(Effect.gen(function* () {
+  const [, projectId] = JSON.parse(key) as [string | null, string, number, number];
+  const client = yield* ApiClient;
+  return yield* client.guidance.projectCheckouts({query: {projectId}});
+})));

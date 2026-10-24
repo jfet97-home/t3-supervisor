@@ -1,3 +1,7 @@
+import { CheckoutChooser, CheckoutIdentity } from "./checkout-identity.js";
+import { projectCheckouts } from "./project-definitions-api.js";
+import type { ProjectCheckoutInventoryInfo } from "../../src/project-definitions-contract.js";
+import { EntityDetails, HelpDisclosure } from "./disclosure.js";
 import React, { useContext, useEffect, useMemo, useRef, useState } from "react";
 import { RegistryContext, useAtomValue } from "@effect/atom-react";
 import { Option } from "effect";
@@ -9,9 +13,10 @@ import { definitionsReadKey, projectDefinitionsAtom, type LoadedDefinitions, typ
 import { configurationDrafts, configurationScope, freshDraft, ProjectConfigurationEditor } from "./project-configuration-editor.js";
 import { discardSupervisorDrafts, ProjectSupervisorPanel } from "./project-supervisor.js";
 import { type OverviewState, ReadTime, WorkState } from "./overview.js";
+import { ListPager, pageWindow } from "./pagination.js";
 import { Icon } from "./icons.js";
 import { DefinitionReferences } from "./definition-references.js";
-import { conversationSections, directoryRoute, isConversationView, openProject, RouteLink, type NavigationGuard, type Route } from "./navigation.js";
+import { conversationSections, directoryRoute, rememberedConversation, isConversationView, openProject, RouteLink, type NavigationGuard, type Route } from "./navigation.js";
 
 const statusText: Record<ProjectDefinitionSnapshot["status"], string> = {
   ready: "Definitions valid",
@@ -22,166 +27,89 @@ const statusText: Record<ProjectDefinitionSnapshot["status"], string> = {
 };
 
 function DefinitionSource({definition}: {definition: {origin?: "global" | "project" | undefined; path?: string | undefined}}) {
-  if (!definition.origin && !definition.path) return null;
-  return <p className="small muted">Source: {definition.origin ?? "unknown"}{definition.path && <> · <code>{definition.path}</code></>}</p>;
+  return definition.path ? <p className="small muted definition-path">{definition.origin === "global" ? "Global source · read-only" : "Project source"} <code>{definition.path}</code></p> : null;
 }
-
 function DefinitionLink({kind, id, steps, workflows}: {kind: "step" | "workflow"; id: string; steps: readonly DefinitionStepInfo[]; workflows: readonly DefinitionWorkflowInfo[]}) {
-  const item = kind === "step" ? steps.find(step => step.id === id) : workflows.find(workflow => workflow.id === id);
-  return item
-    ? <span>{item.name} <span className="muted small">({id}{item.origin === "global" ? " · global" : ""})</span></span>
-    : <span className="pill amber">Missing or invalid {kind}: {id}</span>;
+  const entry = (kind === "step" ? steps : workflows).find(item => item.id === id);
+  return entry ? <span>{entry.name} <code className="small">{id}</code></span> : <span className="pill amber">Unreadable {kind}: {id}</span>;
 }
-
-function NodeDescription({node, definitions}: {node: DefinitionNode; definitions: ProjectDefinitionSnapshot}) {
+function TemplateNode({node, definitions, ancestors = []}: {node: DefinitionNode; definitions: ProjectDefinitionSnapshot; ancestors?: readonly string[]}) {
+  if ("sequence" in node || "parallel" in node) {
+    const parallel = "parallel" in node;
+    const children = "parallel" in node ? node.parallel : node.sequence;
+    const List = parallel ? "ul" : "ol";
+    return <div className={parallel ? "template-parallel" : "template-sequence"}><p className="small muted">{parallel ? "In parallel — no declared order" : "In this order"}</p><List className="template-tree" role="list">{children.map((child, i) => <li key={i}><TemplateNode node={child} definitions={definitions} ancestors={ancestors}/></li>)}</List></div>;
+  }
   if ("step" in node) {
-    if (typeof node.step === "string") {
-      const step = definitions.steps.find(item => item.id === node.step);
-      return <div className="stack definition-node-content">
-        <p><strong>Step:</strong> <DefinitionLink kind="step" id={node.step} steps={definitions.steps} workflows={definitions.workflows}/></p>
-        {step && <p className="definition-copy">{step.description}</p>}
-        {step && <DefinitionReferences references={step.references} skills={step.skills}/>}
-      </div>;
-    }
-    return <div className="stack definition-node-content">
-      <p><strong>Local step:</strong> {node.step.name} <span className="muted small">({node.step.id})</span></p>
-      <p className="definition-copy">{node.step.description}</p>
-      <DefinitionReferences references={node.step.references} skills={node.step.skills}/>
-    </div>;
+    const step = typeof node.step === "string" ? definitions.steps.find(item => item.id === node.step) : node.step;
+    return <EntityDetails icon="record" title={<>Step: {step?.name ?? String(node.step)}</>} className="template-node">
+      {step ? <><p className="definition-copy">{step.description}</p><DefinitionReferences references={step.references} skills={step.skills}/></> : <p className="notice">This referenced step could not be read. Its obligations are not known to be absent.</p>}
+    </EntityDetails>;
   }
-  if ("workflow" in node) {
-    const workflow = definitions.workflows.find(item => item.id === node.workflow);
-    return <div className="stack definition-node-content">
-      <p><strong>Workflow:</strong> <DefinitionLink kind="workflow" id={node.workflow} steps={definitions.steps} workflows={definitions.workflows}/></p>
-      {workflow && <><p className="definition-copy">{workflow.description}</p><p className="muted small">Open “{workflow.name}” below to inspect its contents.</p></>}
-      {workflow && <DefinitionReferences references={workflow.references} skills={workflow.skills}/>}
-    </div>;
-  }
-  const kind = "sequence" in node ? "sequence" : "parallel";
-  const nodes = "sequence" in node ? node.sequence : node.parallel;
-  return <div className="stack definition-node-group">
-    <p><strong>{kind === "sequence" ? "Sequence" : "Parallel group"}</strong> <span className="muted">{kind === "sequence" ? "— intended order" : "— members have no declared order"}</span></p>
-    <DefinitionNodes kind={kind} nodes={nodes} definitions={definitions}/>
-  </div>;
+  const workflow = definitions.workflows.find(item => item.id === node.workflow);
+  const cycle = ancestors.includes(node.workflow) || ancestors.length >= 16;
+  return <EntityDetails icon="tree" title={<>Workflow: {workflow?.name ?? node.workflow}</>} className="template-node">
+    {!workflow ? <p className="notice">The referenced workflow could not be read.</p> : <><p className="definition-copy">{workflow.description}</p><DefinitionReferences references={workflow.references} skills={workflow.skills}/>
+      {cycle ? <p className="notice">This reference cannot be expanded further. Review the definition issues and source reference.</p> : <TemplateNode node={workflow.sequence ? {sequence: workflow.sequence} : {parallel: workflow.parallel ?? []}} definitions={definitions} ancestors={[...ancestors, node.workflow]}/>}</>}
+  </EntityDetails>;
 }
-
-function DefinitionNodes({kind, nodes, definitions}: {kind: "sequence" | "parallel"; nodes: readonly DefinitionNode[]; definitions: ProjectDefinitionSnapshot}) {
-  const List = kind === "sequence" ? "ol" : "ul";
-  return <List className="stack definition-nodes">{nodes.map((node, index) => <li key={`${kind}:${index}`}><NodeDescription node={node} definitions={definitions}/></li>)}</List>;
+function TemplateTopology({workflow, definitions}: {workflow: DefinitionWorkflowInfo; definitions: ProjectDefinitionSnapshot}) {
+  const root = useRef<HTMLDivElement>(null);
+  const expand = (open: boolean) => root.current?.querySelectorAll("details").forEach(element => {element.open = open;});
+  return <section className="template-topology stack" aria-label="Workflow template structure">
+    <div className="row between"><div><h3>Template structure</h3><p className="small muted">Required duties and their relationships. These are definitions, with no execution status.</p></div><div className="row"><button type="button" onClick={() => expand(true)}>Expand all</button><button type="button" onClick={() => expand(false)}>Collapse all</button></div></div>
+    <div ref={root}><TemplateNode node={workflow.sequence ? {sequence: workflow.sequence} : {parallel: workflow.parallel ?? []}} definitions={definitions} ancestors={[workflow.id]}/></div>
+  </section>;
 }
-
-function WorkflowContents({workflow, definitions}: {workflow: DefinitionWorkflowInfo; definitions: ProjectDefinitionSnapshot}) {
-  const kind = workflow.sequence ? "sequence" : "parallel";
-  const nodes = workflow.sequence ?? workflow.parallel ?? [];
-  return <div className="stack">
-    <DefinitionSource definition={workflow}/>
-    {workflow.fixed && <p className="pill blue">Fixed fragment: original members and relationships are preserved; support work may be inserted around or between them.</p>}
-    <p className="definition-copy">{workflow.description}</p>
-    <DefinitionReferences references={workflow.references} skills={workflow.skills}/>
-    <div><h4>{kind === "sequence" ? "Sequence" : "Parallel group"}</h4>
-      <p className="muted small">{kind === "sequence" ? "The sequence states intended semantic order; it is not an execution scheduler." : "Members have no declared order and may overlap; the group does not launch agents."}</p>
-      <DefinitionNodes kind={kind} nodes={nodes} definitions={definitions}/>
-    </div>
-  </div>;
-}
-
 function EffectiveConfiguration({definitions}: {definitions: ProjectDefinitionSnapshot}) {
-  const readable = definitions.complete && definitions.status === "ready";
-  const config = definitions.config;
-  const required = requiredReferences(config);
-  return <section className="stack" aria-labelledby="effective-config-title">
-    <div><h3 id="effective-config-title">Effective requirements <span className="muted">({required.length} {required.length === 1 ? "reference" : "references"})</span></h3>
-      <p className="muted">This view combines the selected checkout with enabled global definitions. The project editor below changes only the checkout's project.yaml.</p></div>
-    {required.length === 0
-      ? <p className="panel muted">{readable ? "No effective required references are configured." : "No readable required references are available. Invalid or incomplete source may contain additional requirements."}</p>
-      : <ul className="panel stack effective-requirements">{required.map((reference, index) => {
-        const kind = "step" in reference ? "step" : "workflow";
-        const id = "step" in reference ? reference.step : reference.workflow;
-        return <li key={`${kind}:${id}:${index}`}><strong>{kind === "step" ? "Required step" : "Required workflow"}:</strong> <DefinitionLink kind={kind} id={id} steps={definitions.steps} workflows={definitions.workflows}/></li>;
-      })}</ul>}
-    <p><strong>Effective default workflow:</strong> {config.default_workflow
-      ? <DefinitionLink kind="workflow" id={config.default_workflow} steps={definitions.steps} workflows={definitions.workflows}/>
-      : "None"} <span className="muted">· starting suggestion</span></p>
+  const required = requiredReferences(definitions.config);
+  return <section className="effective-definition-rules stack"><div><h3>Requirements for this folder</h3><p className="small muted">Project and enabled global definitions are combined here. A required definition remains a commitment when a task plan is formed.</p></div>
+    <p><strong>Default workflow:</strong> {definitions.config.default_workflow ? <DefinitionLink kind="workflow" id={definitions.config.default_workflow} steps={definitions.steps} workflows={definitions.workflows}/> : "No starting suggestion"}</p>
+    <EntityDetails title={<>Required definitions ({required.length})</>} icon="record">{required.length ? <ul>{required.map((reference, i) => <li key={i}><DefinitionLink kind={"step" in reference ? "step" : "workflow"} id={"step" in reference ? reference.step : reference.workflow} steps={definitions.steps} workflows={definitions.workflows}/></li>)}</ul> : <p>{definitions.complete ? "No required definitions are configured in the readable index." : "The read is incomplete; requirements have not been established."}</p>}</EntityDetails>
   </section>;
 }
-
-function DefinitionCatalog({kind, definitions}: {kind: "workflows" | "steps"; definitions: ProjectDefinitionSnapshot}) {
-  const entries = definitions.config[kind];
-  const title = kind === "workflows" ? "Workflows" : "Steps";
-  const singular = kind === "workflows" ? "workflow" : "step";
-  return <section className="stack" aria-labelledby={`project-${kind}-title`}>
-    <div><h3 id={`project-${kind}-title`}>{title} index <span className="muted">({entries.length})</span></h3>
-      <p className="muted">Summaries help you choose what to read. Open the full definition for its policy; global entries are read-only here.</p></div>
-    {entries.length === 0 && <p className="panel muted">{definitions.complete && definitions.status === "ready" ? `No reusable ${kind} are indexed in the effective scope.` : `No readable ${kind} index entries are available. See the status and issues above.`}</p>}
-    {entries.map(entry => {
-      const step = kind === "steps" ? definitions.steps.find(item => item.id === entry.id && item.origin === entry.origin) : undefined;
-      const workflow = kind === "workflows" ? definitions.workflows.find(item => item.id === entry.id && item.origin === entry.origin) : undefined;
-      return <div className="definition-index-row stack" key={`${entry.origin}:${entry.id}`}>
-        <div className="row between"><h4 className="definition-path">{step?.name ?? workflow?.name ?? entry.sourceId}</h4><div className="row">
-          <span className="muted small">{entry.origin === "global" ? "Global · read-only" : "Project"}</span>
-          <span className={`pill ${entry.required ? "blue" : ""}`}>{entry.required ? "Required" : "Optional"}</span>
-          {workflow?.fixed && <span className="pill blue">Fixed</span>}
-        </div></div>
-        <p className="muted small definition-path"><code>{entry.path}</code></p>
-        <p className="definition-index-summary">{entry.summary}</p>
-        {step || workflow ? <details className="definition-block">
-          <summary>Full definition: {step?.name ?? workflow!.name}</summary>
-          {workflow ? <WorkflowContents workflow={workflow} definitions={definitions}/> : <>
-            <DefinitionSource definition={step!}/>
-            <p className="definition-copy">{step!.description}</p>
-            <DefinitionReferences references={step!.references} skills={step!.skills}/>
-          </>}
-        </details> : <p className="pill amber">Missing or invalid {singular}: {entry.sourceId}. Its index entry and required flag are retained.</p>}
-      </div>;
-    })}
-  </section>;
-}
-
-export function DefinitionsContent({definitions}: {definitions: ProjectDefinitionSnapshot}) {
-  const readableAndValid = definitions.complete && definitions.status === "ready";
-  return <div className="stack">
-    <div className="panel stack">
-      <div className="row between">
-        <h3>{statusText[definitions.status]}</h3>
-        <span className={`pill ${readableAndValid ? "green" : "amber"}`}>{readableAndValid ? "Valid and complete" : definitions.complete ? "Read complete; review validity" : "Read incomplete"}</span>
-      </div>
-      {definitions.workspaceRoot && <p className="muted definition-path">Working checkout: <code>{definitions.workspaceRoot}</code></p>}
-      {definitions.workspaceRoot && !definitions.globalOnly && <p className="muted definition-path">Project source: <code>{definitions.workspaceRoot}/.t3-supervisor</code></p>}
-      {definitions.globalOnly && <p>Global-only scope. Project editing does not write global definitions.</p>}
-      <details><summary>How these definitions are used</summary><p>Start with <code>project.yaml</code>, the index of all reusable definitions in this checkout, then read relevant full definitions. Enabled global definitions use the same layout and their origin is shown with each item.</p>
-      <p className="muted">The index inventories reusable files; task plans can add local steps and new combinations while preserving required and fixed commitments.</p></details>
-      {definitions.status === "missing" && <p>No definitions were found in the selected scope. The expected layout is <code>.t3-supervisor/project.yaml</code>, <code>steps/</code> and <code>workflows/</code>. A missing scope does not establish that another enabled scope is empty.</p>}
-      {definitions.status === "invalid" && <p>This collection has invalid files or references. Readable definitions are shown below, but an invalid or incomplete collection never means requirements are absent.</p>}
-      {!definitions.complete && <p>The read was incomplete. The items shown may be only part of the requirements; resolve the access or source issues and refresh.</p>}
-      {definitions.status === "permission_required" && <p>The deployment needs file-reading permission. Credentials cannot be entered or changed from this page.</p>}
-      {definitions.issues.length > 0 && <ul className="definition-issues">{definitions.issues.map((issue, index) => <li key={`${issue.path}:${issue.code}:${index}`}>
-        {issue.path && <code>{issue.path}</code>}<p>{issue.message}</p>
-      </li>)}</ul>}
-    </div>
-
-    <EffectiveConfiguration definitions={definitions}/>
-
-    <DefinitionCatalog kind="workflows" definitions={definitions}/>
-    <DefinitionCatalog kind="steps" definitions={definitions}/>
-
-    <details className="panel stack" aria-labelledby="project-source-title">
-      <summary id="project-source-title">Definition source files</summary><p className="muted">Raw bounded content is shown as text to help diagnose invalid files.</p>
-      {definitions.sources.length === 0 && <p className="panel muted">No source contents were readable.</p>}
-      {definitions.sources.map((source, index) => <details className="panel definition-block" key={`${source.origin ?? ""}:${source.path}:${index}`}>
-        <summary><code>{source.path}</code> <span className="muted small">{source.origin ?? "unknown source"}</span></summary>
-        <pre className="definition-copy">{source.content}</pre>
-      </details>)}
-    </details>
+export function DefinitionsContent({definitions, selectedDefinition = null, onSelect}: {definitions: ProjectDefinitionSnapshot; selectedDefinition?: string | null; onSelect?: (id: string | null) => void}) {
+  const [localSelected, setLocalSelected] = useState<string | null>(null);
+  const [search, setSearch] = useState("");
+  const [kind, setKind] = useState("all");
+  const [page, setPage] = useState(1);
+  const select = (value: string | null) => onSelect ? onSelect(value) : setLocalSelected(value);
+  const selected = onSelect ? selectedDefinition : selectedDefinition ?? localSelected;
+  const entries = ([...definitions.config.workflows.map(entry => ({...entry, kind: "workflow" as const})), ...definitions.config.steps.map(entry => ({...entry, kind: "step" as const}))])
+    .filter(entry => (kind === "all" || entry.kind === kind || kind === "required" && entry.required) && `${entry.id} ${entry.summary} ${entry.sourceId} ${(entry.kind === "step" ? definitions.steps : definitions.workflows).find(item => item.id === entry.id)?.name ?? ""}`.toLowerCase().includes(search.toLowerCase()));
+  const range = pageWindow(entries.length, page);
+  useEffect(() => {if (range.page !== page) setPage(range.page);}, [range.page, page]);
+  const [selectedKind, ...idParts] = selected?.split(":") ?? [];
+  const id = idParts.join(":");
+  const step = selectedKind === "step" ? definitions.steps.find(item => item.id === id) : undefined;
+  const workflow = selectedKind === "workflow" ? definitions.workflows.find(item => item.id === id) : undefined;
+  const entry = step ?? workflow;
+  const valid = definitions.complete && definitions.status === "ready";
+  return <div className="stack definition-workspace">
+    <div className="definition-health"><strong>{statusText[definitions.status]}</strong><span className={`pill ${valid ? "green" : "amber"}`}>{valid ? "Valid and complete" : definitions.complete ? "Review validity" : "Read incomplete"}</span></div>
+    {!valid && <p className="notice">{definitions.status === "missing" ? "No definitions were found in this folder. Another enabled scope may still have requirements." : "Requirements may be unreadable or incomplete. Review the issues before interpreting this catalog as complete."}</p>}
+    {selected ? <section className="definition-detail stack"><button type="button" className="back-link quiet-button" onClick={() => select(null)}><Icon name="back" size={17}/>Back to catalog</button>
+      {entry ? <><header className="stack"><div className="row between"><h2>{entry.name}</h2><span className="pill">{entry.origin === "global" ? "Global · read-only" : "Project"}</span></div><p className="small muted">{workflow ? "Workflow template" : "Reusable step"} · <code>{entry.id}</code>{workflow?.fixed && " · Fixed structure"}</p><DefinitionSource definition={entry}/></header>
+        <p className="definition-copy">{entry.description}</p><DefinitionReferences references={entry.references} skills={entry.skills}/>{workflow && <TemplateTopology workflow={workflow} definitions={definitions}/>}</> : <p className="notice">This definition is unreadable or no longer in the selected folder. Its reference is retained; return to the catalog to inspect the current issues.</p>}
+    </section> : <><EffectiveConfiguration definitions={definitions}/><section className="stack"><div className="row between"><h2>Definition catalog</h2><span className="small muted">Templates, not execution records</span></div>
+      <div className="filter-bar"><label className="search"><Icon name="search" size={18}/><span className="sr-only">Search definitions</span><input type="search" value={search} placeholder="Search names, IDs and summaries" onChange={event => {setSearch(event.target.value); setPage(1);}}/></label><label>Show<select value={kind} onChange={event => {setKind(event.target.value);setPage(1);}}><option value="all">All definitions</option><option value="workflow">Workflows</option><option value="step">Steps</option><option value="required">Required</option></select></label></div>
+      <ul className="definition-catalog-list" role="list">{entries.slice(range.offset, range.offset + range.size).map(item => {
+        const definition = (item.kind === "step" ? definitions.steps : definitions.workflows).find(definition => definition.id === item.id);
+        return <li key={`${item.kind}:${item.id}`}><button type="button" className="catalog-row" onClick={() => select(`${item.kind}:${item.id}`)}><Icon name={item.kind === "workflow" ? "tree" : "record"}/><span className="catalog-copy"><strong>{definition?.name ?? item.sourceId}</strong><span className="small muted"><code>{item.id}</code> · {item.origin === "global" ? "Global · read-only" : "Project"}{item.required ? " · Required" : " · Optional"}{definition && "fixed" in definition && definition.fixed ? " · Fixed structure" : ""}{!definition ? " · Definition unreadable; index entry retained" : ""}</span><span className="catalog-summary">{item.summary}</span></span><Icon name="arrow" size={17}/></button></li>;
+      })}</ul>{!entries.length && <p className="empty-state muted">No definitions match this view.</p>}<ListPager label="Definition catalog" total={entries.length} page={range.page} onPage={setPage}/>
+    </section></>}
+    {definitions.issues.length > 0 && <section className="definition-issues stack"><h3>Definition issues</h3><ul>{definitions.issues.map((issue, i) => <li key={`${issue.path}:${i}`}><code>{issue.path}</code><p>{issue.message}</p></li>)}</ul></section>}
+    <HelpDisclosure title="How definitions are used"><p>The catalog combines reusable project and enabled global definitions. The index lists available files; a task can add local duties while preserving required and fixed commitments. The Edit index view changes only this folder’s project.yaml. Full duty text, references and skills are available in each definition.</p></HelpDisclosure>
   </div>;
 }
 
 // the checkout a definitions view is scoped to; it is retained while the workspace is not shown
-export type DefinitionsSelection = {readonly projectId: string; readonly threadId: string; readonly contextSelected: boolean};
+export type DefinitionsSelection = {readonly projectId: string; readonly threadId: string; readonly contextSelected: boolean; readonly checkout?: string};
 
 // the route of the pending project draft that the shell links to, or null while nothing is pending
 export const draftTarget = (selection: DefinitionsSelection, pending: {dirty: boolean; saving: boolean; configurationDirty: boolean}): Route | null =>
   pending.dirty || pending.saving
-    ? {page: "projects", projectId: selection.projectId, main: selection.contextSelected ? selection.threadId : null, section: pending.configurationDirty ? "definitions" : "settings"}
+    ? {page: "projects", projectId: selection.projectId, main: selection.contextSelected ? selection.threadId : null, section: pending.configurationDirty ? "editor" : "settings", ...(selection.checkout ? {checkout: selection.checkout} : {})}
     : null;
 
 // whether a navigation leaves the selected scope; leaving the projects page or changing only the section stays in scope
@@ -267,18 +195,24 @@ export const definitionsShown = (read: AsyncResult.AsyncResult<LoadedDefinitions
   reading: saved === null && read.waiting,
 });
 
+const noCheckouts = Atom.make(AsyncResult.initial<ProjectCheckoutInventoryInfo>());
 const noDefinitions: Atom.Atom<AsyncResult.AsyncResult<LoadedDefinitions, ProjectDefinitionsReadError>> = Atom.make(AsyncResult.initial());
 const epochOf = (epoch: AsyncResult.AsyncResult<number, unknown>) => Option.getOrElse(AsyncResult.value(epoch), () => 0);
 
-export function ProjectDefinitionsPanel({data, overview, route, navigate, guard, onDirtyChange, onDraftTargetChange}: {
-  data: GuidanceSnapshot; overview?: OverviewState; route: Route; navigate: (route: Route) => void; guard: React.RefObject<NavigationGuard>;
+export function ProjectDefinitionsPanel({data, overview, route, navigate, guard, onDirtyChange, onDraftTargetChange, dataCurrent = true}: {
+  data: GuidanceSnapshot; dataCurrent?: boolean; overview?: OverviewState; route: Route; navigate: (route: Route, options?: {replace?: boolean}) => void; guard: React.RefObject<NavigationGuard>;
   onDirtyChange?: (dirty: boolean) => void; onDraftTargetChange?: (route: Route | null) => void;
 }) {
   const [projectQuery, setProjectQuery] = useState("");
-  const [conversationQuery, setConversationQuery] = useState("");
+  const [projectPage, setProjectPage] = useState(1);
+  const matchingProjects = data.projects.filter(project => project.title.toLowerCase().includes(projectQuery.toLowerCase())).sort((a, b) => a.id.localeCompare(b.id));
+  const projectRange = pageWindow(matchingProjects.length, projectPage);
+  useEffect(() => {if (projectPage !== projectRange.page) setProjectPage(projectRange.page);}, [projectPage, projectRange.page]);
+  const conversationQuery = route.q ?? "";
+  const conversationPage = route.listPage ?? 1;
   const retained = useRef<DefinitionsSelection>({projectId: "", threadId: "", contextSelected: false});
   const inWorkspace = route.page === "projects" && Boolean(route.projectId);
-  const selection: DefinitionsSelection = inWorkspace ? {projectId: route.projectId, threadId: route.main ?? "", contextSelected: route.main !== null} : retained.current;
+  const selection: DefinitionsSelection = inWorkspace ? {projectId: route.projectId, threadId: route.main ?? "", contextSelected: route.main !== null, ...(route.checkout ? {checkout: route.checkout} : {})} : retained.current;
   retained.current = selection;
   const [revision, setRevision] = useState(0);
   const environmentId = useAtomValue(environmentAtom);
@@ -289,16 +223,32 @@ export function ProjectDefinitionsPanel({data, overview, route, navigate, guard,
   const dirty = configurationDirty || supervisorDirty;
   const saving = configurationSaving || supervisorSaving;
   useEffect(() => {onDirtyChange?.(dirty || saving);}, [dirty, saving, onDirtyChange]);
-  useEffect(() => {onDraftTargetChange?.(draftTarget(selection, {dirty, saving, configurationDirty}));}, [dirty, saving, selection.projectId, selection.threadId, selection.contextSelected, configurationDirty, onDraftTargetChange]);
+  useEffect(() => {onDraftTargetChange?.(draftTarget(selection, {dirty, saving, configurationDirty}));}, [dirty, saving, selection.projectId, selection.threadId, selection.contextSelected, selection.checkout, configurationDirty, onDraftTargetChange]);
   const projects = data.projects.filter(project => project.available);
   const projectId = projects.some(project => project.id === selection.projectId) ? selection.projectId : "";
-  const threads = data.threads.filter(thread => thread.available && thread.projectId === projectId);
+  const threads = data.threads.filter(thread => thread.available && thread.projectId === projectId).sort((a, b) => a.id.localeCompare(b.id));
+  const matchingThreads = threads.filter(thread => `${thread.title} ${thread.id}`.toLowerCase().includes(conversationQuery.toLowerCase()));
+  const conversationRange = pageWindow(matchingThreads.length, conversationPage);
+  const visibleThreads = matchingThreads.slice(conversationRange.offset, conversationRange.offset + conversationRange.size);
+  const resume = rememberedConversation(projectId);
+  const listRoute: Route = {...route, page: "projects", projectId, main: null, section: "conversations"};
+  useEffect(() => {
+    if (dataCurrent && data.connected && projectId && route.section === "conversations" && conversationPage !== conversationRange.page)
+      navigate({...listRoute, listPage: conversationRange.page}, {replace: true});
+  }, [projectId, conversationQuery, conversationPage, conversationRange.page, route.section, dataCurrent, data.connected]);
   const threadUnavailable = Boolean(projectId && selection.threadId && !threads.some(thread => thread.id === selection.threadId));
   const threadId = selection.threadId;
-  const canLoad = Boolean(projectId && selection.contextSelected && !threadUnavailable && data.connected);
-  const key = JSON.stringify([environmentId, projectId, threadId, revision, canLoad]);
   const epoch = useAtomValue(authEpochAtom, epochOf);
-  const live = {key, read: canLoad ? definitionsReadKey(environmentId, projectId, threadId || null, epoch) : null, environmentId};
+  const definitionView = inWorkspace && ["definitions", "editor"].includes(route.section);
+  const globalOnly = data.projects.find(project => project.id === projectId)?.classification === "scratch";
+  const inventoryKey = scopeKey(environmentId, projectId, epoch, revision);
+  const inventoryRead = useAtomValue(definitionView && projectId && !globalOnly ? projectCheckouts(inventoryKey) : noCheckouts);
+  const inventory = AsyncResult.isFailure(inventoryRead) ? {projectId, available: false, reason: "Working folders could not be read. Check the connection and refresh folders.", targets: []} : Option.getOrNull(AsyncResult.value(inventoryRead));
+  const selectedCheckout = inventory?.targets.find(target => route.checkout ? target.workspaceRoot === route.checkout : route.main !== null && (route.main === "" ? target.threadId === null : target.members.some(member => member.threadId === route.main)));
+  const definitionThreadId = selectedCheckout?.threadId ?? null;
+  const canLoad = Boolean(projectId && definitionView && (globalOnly || selectedCheckout) && data.connected);
+  const key = JSON.stringify([environmentId, projectId, selectedCheckout?.workspaceRoot ?? "global", revision, canLoad]);
+  const live = {key, read: canLoad ? definitionsReadKey(environmentId, projectId, definitionThreadId, epoch) : null, environmentId};
   const held = useRef(live);
   held.current = heldView(held.current, live, configurationDirty || configurationSaving);
   const view = held.current;
@@ -328,83 +278,77 @@ export function ProjectDefinitionsPanel({data, overview, route, navigate, guard,
   };
   useEffect(() => {
     guard.current = next => {
-      const change = scopeChange(next, selection);
+      const folder = loaded?.definitions.workspaceRoot;
+      const nextFolder = inventory?.targets.find(target => next.checkout && ["definitions", "editor"].includes(next.section) ? target.workspaceRoot === next.checkout : next.main === "" ? target.threadId === null : target.members.some(member => member.threadId === next.main));
+      if (!saving && !supervisorDirty && next.projectId === selection.projectId && folder && nextFolder?.workspaceRoot === folder) return true;
+      const changedFolder = ["definitions", "editor"].includes(next.section) && next.checkout && next.checkout !== folder;
+      const change = changedFolder ? {projectChanges: next.projectId !== selection.projectId} : scopeChange(next, selection);
       return change === null || discard(change.projectChanges);
     };
     return () => { guard.current = () => true; };
   });
-  const changeContext = (main: string, section = route.section) => navigate({...route, page: "projects", projectId: selection.projectId, main, section});
   const workspaceRoute = {...route, page: "projects" as const, projectId: selection.projectId};
-  const showDefinitions = inWorkspace && route.section === "definitions";
-  const showSupervisor = inWorkspace && route.section !== "definitions" && route.section !== "conversations";
+  const showDefinitions = inWorkspace && (route.section === "definitions" || route.section === "editor");
+  const showSupervisor = inWorkspace && route.section !== "definitions" && route.section !== "editor" && route.section !== "conversations";
   const conversation = inWorkspace && Boolean(threadId) && isConversationView(route);
   const selectedProject = data.projects.find(project => project.id === selection.projectId);
   return <section className="stack project-definitions" aria-label="Projects">
     <div hidden={inWorkspace} className="stack">
       <div className="page-heading heading-actions"><div><h1>Projects</h1><p className="muted">A workspace for each project, with its conversations, definitions and supervision settings.</p></div><ReadTime value={overview?.data?.observedAt ?? null}/></div>
-      <label className="search project-search"><Icon name="search" size={18}/><span className="sr-only">Find a project</span><input type="search" aria-label="Find a project" placeholder="Find a project" value={projectQuery} onChange={event => setProjectQuery(event.target.value)}/></label>
+      <label className="search project-search"><Icon name="search" size={18}/><span className="sr-only">Find a project</span><input type="search" aria-label="Find a project" placeholder="Find a project" value={projectQuery} onChange={event => {setProjectQuery(event.target.value);setProjectPage(1);}}/></label>
       <div className="project-list">
-        {data.projects.filter(project => project.title.toLowerCase().includes(projectQuery.toLowerCase())).map(project => {
+        {matchingProjects.slice(projectRange.offset, projectRange.offset + projectRange.size).map(project => {
           const status = overview?.data?.projects.find(item => item.id === project.id);
           const work = overview?.data?.work.filter(item => item.projectId === project.id) ?? [];
           return <RouteLink key={project.id} to={openProject(project.id)} navigate={navigate} className="project-card">
             <span className="project-avatar" aria-hidden="true"><Icon name="projects"/></span>
             <span className="project-card-copy"><strong>{project.title}</strong><span className="muted small">{data.threads.filter(thread => thread.available && thread.projectId === project.id).length} conversations{project.classification === "scratch" ? " · Scratch workspace" : ""}</span></span>
-            <span className="project-status"><span className={`pill ${!project.available ? "amber" : status?.effectiveEnabled ? "green" : ""}`}>{!project.available ? "Project unavailable" : status ? status.effectiveEnabled ? "Supervision on" : status.enabled ? "Not active" : "Supervision off" : "Supervision status not read"}</span><span className="small muted">{work.some(item => item.attention.length) ? "Attention needed in loaded work" : "Open workspace"}</span></span><Icon name="arrow" size={18}/>
+            <span className="project-status"><span className={`pill ${!project.available ? "amber" : status?.effectiveEnabled ? "green" : ""}`}>{!project.available ? "Project unavailable" : status ? status.effectiveEnabled ? "Supervision on" : status.enabled ? "Off — global supervision is off" : "Supervision off" : "Supervision status not read"}</span><span className="small muted">{work.some(item => item.attention.length) ? "Attention needed in loaded work" : "Open workspace"}</span></span><Icon name="arrow" size={18}/>
           </RouteLink>;
         })}
       </div>
+      <ListPager label="Projects" total={matchingProjects.length} page={projectRange.page} onPage={setProjectPage}/>
       {!data.projects.some(project => project.title.toLowerCase().includes(projectQuery.toLowerCase())) && <p className="empty-state muted">{projectQuery ? "No projects match your search." : "No T3 projects are available. Add a project in T3 to begin."}</p>}
     </div>
     <div hidden={!inWorkspace} className={`stack ${conversation ? "conversation-workspace" : ""}`}>
-      <div className="page-heading"><nav className="workspace-breadcrumb" aria-label="Workspace breadcrumb"><RouteLink to={directoryRoute} navigate={navigate}>Projects</RouteLink><span aria-hidden="true">/</span><RouteLink to={{...workspaceRoute, main: null, section: "conversations"}} navigate={navigate}>{selectedProject?.title ?? "Unavailable project"}</RouteLink></nav><div className="row between page-title-row"><h1>{conversation ? threads.find(thread => thread.id === threadId)?.title ?? "Unavailable conversation" : selectedProject?.title ?? "Unavailable project"}</h1>{conversation && <div className="title-actions"><nav className="section-nav" aria-label="Conversation views">{conversationSections.map(section => <RouteLink key={section} to={{...workspaceRoute, section}} navigate={navigate} aria-current={route.section === section ? "page" : undefined}>{section === "task" ? "Task" : "Supervision"}</RouteLink>)}</nav><a className="button-link" href={`t3-thread://v1/${threadId}`}><Icon name="external" size={16}/>Open in T3</a></div>}</div></div>
+      <div className="page-heading">{conversation && <RouteLink className="back-link" to={listRoute} navigate={navigate}><Icon name="back" size={17}/>Back to conversations</RouteLink>}<nav className="workspace-breadcrumb" aria-label="Workspace breadcrumb"><RouteLink to={directoryRoute} navigate={navigate}>Projects</RouteLink><span aria-hidden="true">/</span><RouteLink to={{...workspaceRoute, main: null, section: "conversations"}} navigate={navigate}>{selectedProject?.title ?? "Unavailable project"}</RouteLink></nav><div className="row between page-title-row"><h1>{conversation ? threads.find(thread => thread.id === threadId)?.title ?? "Unavailable conversation" : selectedProject?.title ?? "Unavailable project"}</h1>{conversation && <div className="title-actions"><nav className="section-nav" aria-label="Conversation views">{conversationSections.map(section => <RouteLink key={section} to={{...workspaceRoute, section}} navigate={navigate} aria-current={route.section === section ? "page" : undefined}>{section === "task" ? "Task" : section === "connected" ? "Connected work" : "Supervision"}</RouteLink>)}</nav><a className="button-link" href={`t3-thread://v1/${threadId}`}><Icon name="external" size={16}/>Open in T3</a></div>}</div></div>
       <nav className="project-nav" aria-label="Project sections" hidden={conversation}>
         <RouteLink to={{...workspaceRoute, main: null, section: "conversations"}} navigate={navigate} aria-current={route.section === "conversations" || conversationSections.includes(route.section) ? "page" : undefined}>Conversations</RouteLink>
         <RouteLink to={{...workspaceRoute, section: "definitions"}} navigate={navigate} aria-current={route.section === "definitions" ? "page" : undefined}>Definitions</RouteLink>
+        <RouteLink to={{...workspaceRoute, section: "editor"}} navigate={navigate} aria-current={route.section === "editor" ? "page" : undefined}>Edit index</RouteLink>
         <RouteLink to={{...workspaceRoute, section: "settings"}} navigate={navigate} aria-current={route.section === "settings" ? "page" : undefined}>Project settings</RouteLink>
       </nav>
-      {inWorkspace && !conversation && <div className="section-heading"><h2 id="project-section-heading" className="sr-only">{route.section === "definitions" ? "Definitions" : route.section === "settings" ? "Project settings" : "Conversations"}</h2><p className="muted">{route.section === "definitions" ? "Reusable steps and workflows in a chosen checkout, and its project.yaml index." : route.section === "settings" ? "Which conversations are supervised here, and the defaults for new Supervisors." : "Open a conversation to see its task, plan and supervision."}</p></div>}
-      {route.section === "definitions" && (route.main === null
-        ? <section className="panel stack checkout-chooser" aria-labelledby="checkout-chooser-title">
-          <h3 id="checkout-chooser-title">Choose a checkout</h3>
-          <p className="muted small">Definitions belong to a working checkout. Choose the project root or the checkout a main conversation works in.</p>
-          <ul className="checkout-options" role="list">
-            <li><RouteLink to={{...workspaceRoute, main: "", section: "definitions"}} navigate={navigate}><strong>Project root</strong><span className="muted small">The project’s own folder</span><Icon name="arrow" size={18}/></RouteLink></li>
-            {threads.map(thread => <li key={thread.id}><RouteLink to={{...workspaceRoute, main: thread.id, section: "definitions"}} navigate={navigate}><strong>{thread.title}</strong><span className="muted small">The checkout this conversation works in</span><Icon name="arrow" size={18}/></RouteLink></li>)}
-          </ul>
-        </section>
-        : <div className="checkout-bar">
-          <label htmlFor="definition-thread">Checkout<select id="definition-thread" value={threadId} disabled={!projectId || saving} onChange={event => changeContext(event.target.value, "definitions")}>
-            {threadUnavailable && <option value={threadId} disabled>Conversation unavailable</option>}
-            <option value="">Project root</option>{threads.map(thread => <option key={thread.id} value={thread.id}>{thread.title}</option>)}
-          </select></label>
-          {current?.result?.definitions.workspaceRoot && <code className="definition-path">{current.result.definitions.workspaceRoot}</code>}
-          <button type="button" className="quiet-button" disabled={!canLoad || busy || saving} onClick={refresh}>Refresh</button>
-        </div>)}
+      {inWorkspace && !conversation && <div className="section-heading"><h2 id="project-section-heading" className="sr-only">{route.section === "definitions" ? "Definitions" : route.section === "editor" ? "Edit index" : route.section === "settings" ? "Project settings" : "Conversations"}</h2><p className="muted">{route.section === "definitions" ? "Reusable steps and workflow templates in the selected working folder." : route.section === "editor" ? "Edit the shared working folder’s definition index. Reusable definitions remain read-only." : route.section === "settings" ? "Which conversations are supervised here, and the defaults for new Supervisors." : "Open a conversation to see its task, plan and supervision."}</p></div>}
+      {showDefinitions && !globalOnly && <CheckoutChooser inventory={inventory} selected={selectedCheckout?.workspaceRoot ?? null} disabled={saving || !data.connected} onSelect={checkout => navigate({...workspaceRoute, checkout, definition: ""})} onRefresh={() => registry.refresh(projectCheckouts(inventoryKey))}/>}
+      {showDefinitions && globalOnly && <p className="notice">Global definitions · No Project has no project-owned configuration to edit.</p>}
+      {showDefinitions && selectedCheckout && <div className="checkout-bar"><CheckoutIdentity target={selectedCheckout} projectFolder={selectedCheckout.threadId === null}/><button type="button" className="quiet-button" disabled={!canLoad || busy || saving} onClick={refresh}>Refresh definitions</button></div>}
       {!projectId && <p className="panel" role="status">The selected project is unavailable. Its context is kept; choose an available project to continue.</p>}
       {threadUnavailable && !["settings", "conversations"].includes(route.section) && <p className="panel" role="status">The selected conversation is no longer available in this project. Choose another conversation.</p>}
       {!data.connected && <p className="panel" role="status">T3 is disconnected. Any unsaved project configuration draft is kept.</p>}
       {saving && <p className="notice" role="status">A save or supervision setup outcome is pending. Inspect Project settings and reload an uncertain outcome before changing scope.</p>}
-      {dirty && !onDraftTargetChange && <p className="draft-notice" role="status">Unsaved changes · <RouteLink to={{...workspaceRoute, section: configurationDirty ? "definitions" : "settings"}} navigate={navigate}>Return to your draft</RouteLink>. Switching views keeps your changes.</p>}
+      {dirty && !onDraftTargetChange && <p className="draft-notice" role="status">Unsaved changes · <RouteLink to={{...workspaceRoute, section: configurationDirty ? "editor" : "settings"}} navigate={navigate}>Return to your draft</RouteLink>. Switching views keeps your changes.</p>}
       {(route.section === "conversations" || route.main === null && conversationSections.includes(route.section)) && <div className="panel stack">
-        <label className="search"><span className="sr-only">Find a conversation</span><input aria-label="Find a conversation" type="search" placeholder="Search conversation titles" value={conversationQuery} onChange={event => setConversationQuery(event.target.value)}/></label>
-        <div className="conversation-list">{threads.filter(thread => thread.title.toLowerCase().includes(conversationQuery.toLowerCase())).map(thread => {
+        <label className="search"><span className="sr-only">Find a conversation</span><input aria-label="Find a conversation" type="search" placeholder="Search conversation titles" value={conversationQuery} onChange={event => navigate({...listRoute, q: event.target.value, listPage: 1}, {replace: true})}/></label>
+        {resume && threads.some(thread => thread.id === resume.main) && <p className="small muted">Continue where you left off: <RouteLink to={resume} navigate={navigate}>{threads.find(thread => thread.id === resume.main)?.title} · {resume.section}</RouteLink></p>}
+        <ListPager label="Conversations" total={matchingThreads.length} page={conversationRange.page} onPage={listPage => navigate({...listRoute, listPage})}/>
+        <div className="conversation-list">{visibleThreads.map(thread => {
           const work = overview?.data?.work.find(item => item.mainThreadId === thread.id);
-          return <RouteLink key={thread.id} to={{...workspaceRoute, main: thread.id, section: "task"}} navigate={navigate}><div className="conversation-list-copy"><strong>{thread.title}</strong><p className="muted small">{work?.objective ?? "Open to inspect task, plan and current supervision."}</p></div>{work && <WorkState work={work}/>}<Icon name="arrow" size={18}/></RouteLink>;
+          return <RouteLink key={thread.id} to={{...workspaceRoute, main: thread.id, section: "task"}} navigate={navigate}><div className="conversation-list-copy"><strong>{thread.title}</strong><p className="muted small">{work?.objective ?? "Open to inspect task, plan and current supervision."}</p></div>{work ? <WorkState work={work}/> : <span className="small muted">Outside the current supervision read</span>}<Icon name="arrow" size={18}/></RouteLink>;
         })}</div>
-        {threads.length === 0 && <p>No available main conversations in this project.</p>}
+        {matchingThreads.length === 0 && <p>{conversationQuery ? "No conversations match your search." : "No available main conversations in this project."}</p>}
       </div>}
     </div>
     {selection.projectId && <div hidden={!showSupervisor || (route.main === null && route.section !== "settings")} inert={configurationSaving}><ProjectSupervisorPanel key={selection.projectId} projectId={selection.projectId} threadId={route.section === "settings" ? "" : threadId}
-      section={route.section === "settings" ? "settings" : route.section === "supervision" ? "supervision" : "task"} attentionEnabled={overview?.data?.projects.find(project => project.id === selection.projectId)?.effectiveEnabled ?? false} connected={data.connected && Boolean(projectId)}
+      section={route.section === "settings" ? "settings" : route.section === "supervision" ? "supervision" : route.section === "connected" ? "connected" : "task"} attentionEnabled={overview?.data?.projects.find(project => project.id === selection.projectId)?.effectiveEnabled ?? false} connected={data.connected && Boolean(projectId)}
       supervisionLink={conversation && route.section === "task" ? <RouteLink to={{...workspaceRoute, section: "supervision"}} navigate={navigate}>Open Supervision for recovery and controls</RouteLink> : undefined}
+      connectedWorkLink={conversation ? <RouteLink to={{...workspaceRoute, section: "connected"}} navigate={navigate}>View connected work</RouteLink> : undefined}
       onDirtyChange={setSupervisorDirty} onSavingChange={setSupervisorSaving}/></div>}
     <div hidden={!showDefinitions} className="stack">
       {busy && <p className="panel" role="status">Reading project definitions…</p>}
       {canLoad && current?.error && <p className="panel" role="alert">Could not load definitions. Refresh to try again or check the Supervisor connection.</p>}
       {messageFor(completion, {read: view.read, environmentId}) !== null && <p role="status">{messageFor(completion, {read: view.read, environmentId})}</p>}
-      {canLoad && current?.result && <div className="stack"><p className="muted small" role="status">Read {new Date(current.loadedAt!).toLocaleTimeString()}. Refresh after repository changes.</p><DefinitionsContent key={key} definitions={current.result.definitions}/></div>}
-      {loaded && <div hidden={!canLoad || view.key !== key} inert={supervisorSaving || configurationSaving}>
+      {canLoad && current?.result && <div className="stack"><p className="muted small" role="status">Read {new Date(current.loadedAt!).toLocaleTimeString()}. Refresh after repository changes.</p><div hidden={route.section !== "definitions"}><DefinitionsContent key={key} definitions={current.result.definitions} selectedDefinition={route.definition ?? null} onSelect={definition => navigate({...workspaceRoute, definition: definition ?? ""})}/></div></div>}
+      {loaded && <div hidden={!canLoad || view.key !== key || route.section !== "editor"} inert={supervisorSaving || configurationSaving}>
         <ProjectConfigurationEditor key={JSON.stringify([loaded.environmentId, loaded.definitions.projectId, loaded.definitions.threadId, loaded.definitions.revision, revision])} definitions={loaded.definitions} onDirtyChange={editorReports.onDirtyChange}
           onSavingChange={editorReports.onSavingChange} onSaved={editorReports.onSaved}/>
       </div>}

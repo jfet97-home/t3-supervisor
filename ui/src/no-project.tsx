@@ -1,3 +1,4 @@
+import { HelpDisclosure, EntityDetails } from "./disclosure.js";
 import {useEffect, useState} from "react";
 import {useAtomSet, useAtomValue} from "@effect/atom-react";
 import {Effect, Exit, Option} from "effect";
@@ -99,7 +100,7 @@ export function NoProjectPanel({active, onStateChange}: {active: boolean; onStat
       {([ ["off", "Off", "No supervision, including explicit Start requests."], ["on_request", "On request", "Start only the chat you choose. New and replacement chats stay off."], ["automatic", "Automatic", "Follow new requests in every eligible No Project chat."] ] as const).map(([value, label, help]) =>
         <label className="toggle" key={value}><input type="radio" name="noProjectMode" value={value} checked={mode === value} onChange={() => setMode(value)}/><span>{label}<small>{help}</small></span></label>)}
     </fieldset>
-    <details><summary>How activation works</summary><p className="small muted">On request is the default. Start remains enabled until Stop; a settled Supervisor is only parked. Shared definitions supply policy independently. With shared definitions off, plans use task-local steps.</p></details>
+    <HelpDisclosure title={<>How activation works</>} ><p className="small muted">On request is the default. Start remains enabled until Stop; a settled Supervisor is only parked. Shared definitions supply policy independently. With shared definitions off, plans use task-local steps.</p></HelpDisclosure>
     <div className="row"><button type="submit" disabled={busy || uncertain || !dirty}>Save No Project mode</button><button type="button" className="quiet-button" disabled={busy} onClick={() => reload()}>Reload mode</button>{dirty && <button type="button" disabled={busy} onClick={() => setMode(control!.mode)}>Discard mode draft</button>}</div>
     <p role="status">{message}</p>
   </form>;
@@ -221,13 +222,13 @@ export function StartSupervisionPanel({active, onStateChange, onChanged}: {activ
   // the shell refreshes its snapshot after a Start settles
   const settled = async (outcome: Promise<Exit.Exit<boolean, unknown>>) => {const exit = await outcome;if (Exit.isSuccess(exit) && exit.value) onChanged();};
   return <section hidden={!active} className="panel stack" aria-labelledby="start-supervision-heading">
-    <details><summary id="start-supervision-heading">Start supervision for a No Project chat</summary><div className="stack"><p>Choose a recent chat, search by title or ID, or paste its T3 link. Start stays enabled until explicit Stop.</p>
+    <EntityDetails title={<>Start supervision for a No Project chat</>}  summaryProps={{"id":"start-supervision-heading"}}><div className="stack"><p>Choose a recent chat, search by title or ID, or paste its T3 link. Start stays enabled until explicit Stop.</p>
     <label htmlFor="start-chat-search">Find a chat</label><input id="start-chat-search" type="search" value={query} maxLength={512} autoCapitalize="off" autoCorrect="off" spellCheck={false} aria-describedby="start-chat-help" onChange={event => setQuery(event.target.value)}/>
     <p id="start-chat-help" className="small muted">{candidates.error || candidates.data?.message || "Loading recent chats…"}</p>
     {candidates.error && <button type="button" onClick={candidates.reload}>Reload chat search</button>}
     <ul className="candidate-list">{candidates.data?.candidates.map(chat => <li key={chat.id} className="row between"><div><strong>{chat.title}</strong><p className="small muted">{chat.id}{chat.active ? " · Started" : chat.excluded ? " · Stopped" : ""}</p></div><button type="button" disabled={busy || intent !== null || chat.active} aria-label={`Start supervision for ${chat.title}`} onClick={() => void settled(start(chat.id))}>{chat.active ? "Started" : "Start supervision"}</button></li>)}</ul>
     {intent && <div className="notice stack"><p>Retained Start for <code>{intent.threadId}</code></p><button type="button" disabled={busy} onClick={() => void settled(check())}>Check Start status</button></div>}
     <p role="status">{message}</p>
-    </div></details>
+    </div></EntityDetails>
   </section>;
 }

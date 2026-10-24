@@ -583,3 +583,31 @@ are silent; meaningful existing status text retains its native semantics. This c
 refresh ownership, with no visual, theme or navigation redesign. Refresh buttons use
 `aria-disabled` with guarded activation, so a background read does not drop keyboard
 focus when temporarily unavailable.
+
+### Operate interface correction
+
+The persistent status header uses a shield or availability icon plus explicit text for
+global supervision, native T3 connectivity and the open project's effective supervision.
+Teal indicates enabled state, a red-tinted outline indicates disabled state, and amber
+indicates an unavailable read. Every state is also named in text in light and dark themes.
+
+Use the 4/8/12/16/24/32 spacing scale: 6px label-to-control, 8px within a compact disclosure,
+16px between fields, 24px between form groups and 32px between major sections. Selects fit
+content up to 36rem; numeric inputs fit 10rem. Mobile navigation wraps whole labels.
+
+Product help uses an info icon and one subtle inset containing both trigger and text.
+Entity details use record, folder or tree icons in the same compact boundary. Native
+summary semantics remain; plus/minus SVG cues replace the native triangle. Focus stays on
+the compact trigger. Current status and primary actions remain visible outside product help.
+
+Bounded catalog rows lead to individual definition details. Template topology uses neutral
+ordered tracks and explicitly named parallel groups, with per-node duty, reference and skill
+disclosures. It carries no execution markers. Connected work has a dedicated conversation
+view with visible relation, assignment and workflow state; Task carries a compact link.
+
+Interaction references: [Carbon pagination](https://www.carbondesignsystem.com/building-blocks/core/components/pagination/guidelines),
+[GOV.UK details](https://design-system.service.gov.uk/components/details/),
+[inset text](https://design-system.service.gov.uk/components/inset-text/) and
+[back links](https://design-system.service.gov.uk/components/back-link/), and the
+[GitHub workflow graph](https://docs.github.com/en/actions/how-tos/monitor-workflows/use-the-visualization-graph).
+The brief explicitly requires both a list-targeted Back link and breadcrumbs.
