@@ -71,6 +71,8 @@ another suite in the same runner. Isolation, the leak gate, per-test bounds and
 the 20-minute watchdog stay the same. The `check` status requires every job
 to pass, including every shard; failed, cancelled or skipped jobs fail the gate.
 The existing npm download cache is reused; test results are never cached.
+New runs cancel older runs of this workflow for the same branch or pull request,
+including `main`; unrelated branches and pull requests run independently.
 
 While editing, run focused files through the watchdog, for example
 `npm test -- test/config.test.ts`. Leave the final complete main and harness
