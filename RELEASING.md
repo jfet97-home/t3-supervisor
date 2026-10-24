@@ -43,14 +43,17 @@ do not update themselves.
 
 **Publish release** resolves a main commit and requires successful push-to-main CI
 for that exact SHA, including the aggregate `check`. PR checks alone are not enough.
-Automatic events skip superseded main commits. Stable requires consumed changesets;
+Automatic events skip superseded nightly commits and retain approved stable ones.
+Stable requires consumed changesets;
 the absence of an existing Git tag alone never authorizes stable publication.
 
 The workflow stamps the disposable build manifest with its version and `gitHead`,
 builds an archive containing `dist`, `ui-dist` and portable skills, installs that
 exact archive outside the checkout, and starts it against a bounded native T3
 fixture. It checks health metadata, CLI version, dashboard HTML, its hashed asset
-and clean cancellation. It also checks the actual container before publication.
+and clean cancellation. It checks a local container before pushing, then exercises
+both published image variants by their immutable index digest before moving an
+image channel or publishing the package. ARM64 runs under QEMU on the hosted runner.
 It reuses the successful full CI verdict; it does not run the full suite again.
 
 The npm package, Linux amd64/arm64 image, Git tag and GitHub release share one
@@ -60,18 +63,28 @@ the frozen pnpm lockfile. A normal npm/pnpm consumer install resolves transitive
 dependency ranges at installation time; use the image digest when an immutable
 dependency tree matters.
 
-Publication is serialized and does not cancel in progress. Existing immutable
+Publication is serialized with GitHub's queue (up to 100 pending runs) and does not
+replace pending releases or cancel publication in progress. Existing immutable
 versions/tags must identify the same source before a retry can continue. A failure
 between registries can leave a partial publication; rerun the same commit/channel
 to finish it. Do not bump a version merely to retry. GitHub releases are the final
 publication receipt. Never overwrite a conflicting package, image or Git tag.
+
+The requested CI policy still cancels superseded main runs. If a version merge's
+main CI was canceled by a newer push, rerun that original main CI from GitHub's
+run page. It checks the original SHA; after success, its approved stable release
+can proceed even if main has advanced. Publication never treats cancellation as
+success or substitutes a newer, different source tree.
 
 ## One-time setup and first release
 
 No account credentials, repository settings or publishing flags are changed by
 this PR. The maintainer must own the npm package name before enabling publication.
 
-1. Allow GitHub Actions to create pull requests for this repository. Enable the
+1. Create a GitHub Actions environment named **`release`**, with **Selected
+   branches and tags** allowing only branch **`main`**. This environment is for
+   registry publication, not a running Supervisor deployment. Allow GitHub Actions
+   to create pull requests for this repository. Enable the
    repository Actions variable `RELEASE_VERSIONING_ENABLED=true`, then dispatch
    **Prepare version** on main. Review the first 0.2.0 version PR and its full CI.
 2. Merge the version PR and wait for its main CI. Keep
@@ -84,7 +97,9 @@ this PR. The maintainer must own the npm package name before enabling publicatio
    checkout so its repository metadata matches the archive. Do not create a dummy
    package or commit a publishing token.
 4. In npm's package settings, configure a GitHub Actions trusted publisher for
-   owner `jfet97-home`, repository `t3-supervisor`, workflow **`release.yml`**.
+   owner `jfet97-home`, repository `t3-supervisor`, workflow **`release.yml`**,
+   environment **`release`**. Keep the main-only environment restriction in place;
+   a filename-only trusted publisher does not restrict publishing to main.
    Use OIDC rather than a long-lived registry token. GitHub-hosted runners are
    required by this workflow. Make the GHCR package public after its first push
    if it was created private; repository visibility does not imply package visibility.

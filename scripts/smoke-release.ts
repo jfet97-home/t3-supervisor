@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { NodeFileSystem, NodeRuntime } from "@effect/platform-node";
-import { Effect } from "effect";
+import { Config, Effect, Schema } from "effect";
 import { buildInfo } from "../src/version.js";
 import { supervisorHarness } from "../test/support/g8-cli.js";
 import { runProcess, startProcess } from "../test/support/g8-process.js";
@@ -13,12 +13,14 @@ const program = Effect.gen(function* () {
   const target = process.argv[3];
   if (!target || (kind !== "package" && kind !== "image")) return yield* Effect.fail(new Error("expected package BIN or image IMAGE"));
   const harness = yield* supervisorHarness();
+  const platform = yield* Config.String("SMOKE_PLATFORM").pipe(Config.withDefault("linux/amd64"),
+    Effect.flatMap(Schema.decodeUnknownEffect(Schema.Literals(["linux/amd64", "linux/arm64"]))));
   const name = `supervisor-release-${randomUUID()}`;
   const dockerOptions = { env: process.env, cwd: harness.home, timeoutMs: 15_000 };
   if (kind === "image") {
     yield* Effect.acquireRelease(Effect.void, () => runProcess("docker", ["rm", "--force", name], dockerOptions).pipe(Effect.ignore));
   }
-  const container = ["run", "--rm", "--name", name, "--network", "host", "--init", "--read-only", "--cap-drop", "ALL",
+  const container = ["run", "--rm", "--name", name, "--platform", platform, "--network", "host", "--init", "--read-only", "--cap-drop", "ALL",
     "--security-opt", "no-new-privileges:true", "--user", `${process.getuid!()}:${process.getgid!()}`,
     "--mount", `type=bind,src=${harness.home},dst=${harness.home}`,
     ...Object.entries(harness.env).filter(([key]) => key !== "PATH").flatMap(([key, value]) => ["--env", `${key}=${value}`]),

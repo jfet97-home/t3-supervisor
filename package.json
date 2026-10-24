@@ -2,7 +2,10 @@
   "name": "t3-supervisor",
   "version": "0.1.0",
   "description": "Dashboard and background service for supervising T3 projects and conversations",
-  "repository": "github:jfet97-home/t3-supervisor",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jfet97-home/t3-supervisor.git"
+  },
   "files": [
     "dist",
     "ui-dist",
