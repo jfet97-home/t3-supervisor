@@ -217,7 +217,7 @@ export function ProjectConfigurationEditor({definitions, onSaved, onDirtyChange,
     <ProjectCatalogFields kind="steps" config={config} definitions={definitions} disabled={saving || blocked} onChange={update}/>
     <fieldset disabled={saving || blocked} className="stack">
       <legend>Default workflow</legend>
-      <label htmlFor="project-config-default-workflow">Starting workflow suggestion</label>
+      <div className="field-group"><label htmlFor="project-config-default-workflow">Starting workflow suggestion</label>
       <select id="project-config-default-workflow" value={config.default_workflow ?? ""} aria-describedby="project-config-default-help" onChange={event => {
         const index = {workflows: config.workflows, steps: config.steps};
         update(event.target.value ? {...index, default_workflow: event.target.value} : index);
@@ -226,7 +226,7 @@ export function ProjectConfigurationEditor({definitions, onSaved, onDirtyChange,
         {config.default_workflow && !workflowIds.includes(config.default_workflow) && <option value={config.default_workflow}>{config.default_workflow} · missing from index</option>}
         {workflowIds.map(id => <option key={id} value={id}>{id}</option>)}
       </select>
-      <p id="project-config-default-help" className="muted">Choose an indexed workflow in this checkout. Task plans can use other workflows, new combinations and local steps while preserving required and fixed commitments.</p>
+      <p id="project-config-default-help" className="muted">Choose an indexed workflow in this checkout. Task plans can use other workflows, new combinations and local steps while preserving required and fixed commitments.</p></div>
     </fieldset>
     <p id={messageId} ref={error} tabIndex={-1} role={messageAlert ? "alert" : "status"}>{message}</p>
     {blocked && <p>Your draft is kept. Refresh project definitions and inspect project.yaml before trying again.</p>}
