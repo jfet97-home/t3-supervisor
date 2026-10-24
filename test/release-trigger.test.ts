@@ -15,6 +15,7 @@ const nightly = { draft: false, prerelease: true, tag_name: "v0.0.3-nightly.2026
 
 const fixture = () => ({
   event: "schedule",
+  trigger: sha,
   main: "b".repeat(40),
   comparison: "ahead",
   candidates: [green],
@@ -54,14 +55,14 @@ const execute = async (input = fixture()) => {
         throw new Error("unexpected API pagination");
       },
     },
-    context: { eventName: input.event, repo: { owner: "jfet97", repo: "t3-supervisor" }, payload: { workflow_run: green } },
+    context: { eventName: input.event, sha: input.trigger, repo: { owner: "jfet97", repo: "t3-supervisor" }, payload: { workflow_run: green } },
     process: { env: { REQUESTED_REVISION: input.event === "schedule" ? "" : input.requested, REQUESTED_CHANNEL: input.channel } },
     core: { setOutput: (key: string, value: string) => { outputs[key] = value; }, info: () => {} },
   });
   return outputs;
 };
 
-it("selects the latest checked main source overnight while a newer main source is unfinished", async () => {
+it("selects the checked scheduled revision even if main advances while the run starts", async () => {
   assert.equal(workflow.on.schedule.length, 1);
   assert.deepEqual(workflow.on.schedule[0], { cron: "17 3 * * *", timezone: "Europe/Rome" });
   assert.deepEqual(await execute(), { sha, channel: "nightly", commitTime: "2026-10-24T01:00:00Z" });
@@ -69,6 +70,7 @@ it("selects the latest checked main source overnight while a newer main source i
 
 it("does nothing overnight without green main CI or when that source already has a completed nightly", async () => {
   assert.deepEqual(await execute({ ...fixture(), candidates: [] }), {});
+  assert.deepEqual(await execute({ ...fixture(), trigger: "b".repeat(40) }), {});
   assert.deepEqual(await execute({ ...fixture(), releases: [nightly] }), {});
 });
 
@@ -96,6 +98,22 @@ it("preserves explicit manual channels and exact-source checks", async () => {
     assert.equal((await execute({ ...fixture(), event: "workflow_dispatch", channel })).channel, channel);
   }
   await assert.rejects(execute({ ...fixture(), event: "workflow_dispatch", comparison: "diverged" }), /not on main/u);
+  assert.equal((await execute({ ...fixture(), event: "workflow_dispatch", requested: "main" })).sha, sha);
+});
+
+it("rejects mismatched provenance before a new immutable image or npm publication", () => {
+  const steps = workflow.jobs.release.steps as Array<{ name?: string; run?: string; if?: string; with?: { push?: boolean } }>;
+  const index = steps.findIndex(step => step.name === "Require source-bound provenance for new publications");
+  const guard = steps[index];
+  assert.ok(guard?.run);
+  assert.ok(index < steps.findIndex(step => step.with?.push === true));
+  assert.match(guard.if!, /env.PUBLISH == 'true'/u);
+  assert.match(guard.if!, /steps.registry.outputs.exists != 'true'/u);
+  const check = (revision: string) => execFileSync("bash", ["-e", "-c", guard.run!], {
+    env: { ...process.env, GITHUB_SHA: sha, REVISION: revision }, stdio: "pipe",
+  });
+  assert.doesNotThrow(() => check(sha));
+  assert.throws(() => check("b".repeat(40)));
 });
 
 it("uses distinct platform manifest digests so Docker's legacy store cannot collide on the shared index", () => {

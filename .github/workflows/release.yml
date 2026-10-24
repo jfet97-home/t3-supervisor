@@ -60,6 +60,7 @@ jobs:
             if (scheduled) {
               const candidates = await github.paginate(github.rest.actions.listWorkflowRuns, { ...context.repo, workflow_id: workflow.id, branch: 'main', event: 'push', status: 'success', per_page: 100 });
               for (const candidate of candidates) {
+                if (candidate.head_sha !== context.sha) continue;
                 if (candidate.head_repository?.full_name !== `${context.repo.owner}/${context.repo.repo}` || candidate.head_branch !== 'main' || candidate.event !== 'push') continue;
                 const { data } = await github.rest.repos.compareCommitsWithBasehead({ ...context.repo, basehead: `${candidate.head_sha}...${main.commit.sha}` });
                 if (['ahead', 'identical'].includes(data.status)) { ref = candidate.head_sha; break; }
@@ -67,7 +68,7 @@ jobs:
               if (!ref) { core.info('No successfully checked main commit is available for tonight.'); return; }
             }
             if (ref !== 'main' && !/^[a-f0-9]{40}$/.test(ref)) throw new Error('use main or a full commit SHA');
-            const sha = ref === 'main' ? main.commit.sha : ref;
+            const sha = ref === 'main' ? context.sha : ref;
             const { data: comparison } = await github.rest.repos.compareCommitsWithBasehead({ ...context.repo, basehead: `${sha}...${main.commit.sha}` });
             if (!['ahead', 'identical'].includes(comparison.status)) throw new Error('source is not on main');
             const { data: runs } = await github.rest.actions.listWorkflowRuns({ ...context.repo, workflow_id: workflow.id, head_sha: sha, branch: 'main', event: 'push', status: 'success', per_page: 100 });
@@ -231,6 +232,11 @@ jobs:
               const { data } = await github.rest.git.getRef({ ...context.repo, ref: `tags/${process.env.TAG}` });
               if (data.object.type !== 'commit' || data.object.sha !== process.env.REVISION) throw new Error('tag belongs to a different source revision');
             } catch (error) { if (error.status !== 404) throw error; }
+      - name: Require source-bound provenance for new publications
+        if: ${{ env.PUBLISH == 'true' && steps.registry.outputs.exists != 'true' }}
+        env:
+          REVISION: ${{ steps.plan.outputs.revision }}
+        run: test "$GITHUB_SHA" = "$REVISION"
       - uses: docker/build-push-action@v6
         id: pushed
         if: ${{ env.PUBLISH == 'true' && steps.image.outputs.exists != 'true' }}
