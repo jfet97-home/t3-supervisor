@@ -24596,6 +24596,13 @@
     "reason": null,
     "facadeImports": []
    },
+   "src/task-requester.ts": {
+    "kind": "source",
+    "baselineDisposition": null,
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
    "src/thread-policy-contract.ts": {
     "kind": "source",
     "baselineDisposition": "keep-pure",
@@ -26728,7 +26735,7 @@
    "doc": 22,
    "entry": 15,
    "pure": 25,
-   "effect": 119,
+   "effect": 120,
    "adapter": 16,
    "effect-test": 139,
    "pure-test": 11,

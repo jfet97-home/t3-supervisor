@@ -5,7 +5,8 @@ import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { stringify } from "yaml";
 import { NodeFileSystem } from "@effect/platform-node";
-import { Effect, Exit, FileSystem } from "effect";
+import { Clock, Effect, Exit, FileSystem } from "effect";
+import { TestClock } from "effect/testing";
 import { fingerprint } from "../src/guidance-store.js";
 import type { ProjectDefinitionSnapshot } from "../src/project-definitions-contract.js";
 import { defaultSupervisorModel, type BindingRecord, type TaskRecord } from "../src/project-supervisor-store.js";
@@ -4923,6 +4924,45 @@ it.effect("a proposal may restate the objective only from genuine cited user mes
   yield* observeAgreement(fixture, clock.now + 60_000);
   assert.ok(yield* fixture.conversation.requests.agreementCandidate(task.id, "objective-human"));
   assert.equal((yield* fixture.projectStore.task(task.threadId))?.objective, "Implement the export and change the retry policy", "the dashboard objective catches up");
+}));
+
+it.effect("in an agent-created main a proposal may cite the launching agent's request only while the project allows it", () => Effect.gen(function* () {
+  const clock = {now: baseTime};
+  const fixture = yield* makeFixture(clock);
+  const anchorRequest = yield* prepareTaskContext(fixture, {text: "The current task context.", completionMarker: "objective context completed"}, clock.now - 2);
+  const anchorRun = appendRun({projection: fixture.supervisor, id: "objective-context-run", ordinal: 1, status: "completed",
+    messageId: anchorRequest.messageId, text: anchorRequest.text, now: clock.now - 2});
+  completeRun(fixture.supervisor, anchorRun, anchorRequest.completionMarker, clock.now - 1);
+  yield* fixture.conversation.requests.saveRequest({...anchorRequest, state: "completed", runId: anchorRun.id, sentAt: clock.now - 2, error: null});
+  yield* appendNoticeToOperative(fixture);
+  const task = (yield* fixture.projectStore.task(fixture.task.threadId))!;
+  // the operative main was launched through T3's MCP server and its opening task is the coordinator agent's request
+  Object.assign(fixture.operative.thread, {creationSource: "mcp", lineage: {parentThreadId: null, relationshipToParent: null, rootThreadId: operativeThreadId}});
+  Object.assign(fixture.operative.messages.find(message => message.id === task.sourceMessageId)!, {createdBy: "agent", creationSource: "mcp", senderThreadId: "coordinator"});
+  appendAssistantTurn(fixture.supervisor, "objective-while-off", workflowFence("workflow-proposal",
+    {...compactDraft(task, workflowRecord(task, "objective-off")), objective: {text: "Implement the export workflow", sourceMessageIds: [task.sourceMessageId]}}), clock.now + 1);
+  yield* observeAgreement(fixture, clock.now + 2);
+  assert.equal((yield* fixture.projectStore.task(task.threadId))?.workflowProtocolDiagnostic?.code, "objective_source_invalid", "off: an agent request is not requester authority");
+  assert.equal(yield* fixture.conversation.requests.agreementCandidate(task.id, "objective-off"), null);
+
+  // the setting is turned on before the agent wrote its request, on the fixture's timeline
+  const settings = yield* fixture.projectStore.settings(projectId);
+  const wall = yield* Clock.currentTimeMillis;
+  yield* TestClock.setTime(clock.now - 180_000);
+  yield* fixture.projectStore.saveSettings(projectId, settings.generation, settings.modelSelection, undefined, undefined, true);
+  yield* TestClock.setTime(wall);
+  const foreign = appendActualUserMessage(fixture.operative, "other-agent-scope", "Also rewrite the retry policy.", clock.now + 3);
+  Object.assign(foreign, {createdBy: "agent", creationSource: "mcp", senderThreadId: "other-agent"});
+  appendAssistantTurn(fixture.supervisor, "objective-from-other-agent", workflowFence("workflow-proposal",
+    {...compactDraft(task, workflowRecord(task, "objective-foreign")), objective: {text: "Implement the export and rewrite the retry policy",
+      sourceMessageIds: [task.sourceMessageId, foreign.id]}}), clock.now + 4);
+  yield* observeAgreement(fixture, clock.now + 60_000);
+  assert.equal(yield* fixture.conversation.requests.agreementCandidate(task.id, "objective-foreign"), null, "another agent's message is never requester authority");
+  appendAssistantTurn(fixture.supervisor, "objective-from-launcher", workflowFence("workflow-proposal",
+    {...compactDraft(task, workflowRecord(task, "objective-launcher")), objective: {text: "Implement the export workflow with tests",
+      sourceMessageIds: [task.sourceMessageId]}}), clock.now + 60_001);
+  yield* observeAgreement(fixture, clock.now + 120_000);
+  assert.ok(yield* fixture.conversation.requests.agreementCandidate(task.id, "objective-launcher"), "the launching agent's request supports the proposal");
 }));
 
 it.effect("a stop needs one chat chosen by the human: naming the caller, a child or another Supervisor never selects a target", () => Effect.gen(function* () {

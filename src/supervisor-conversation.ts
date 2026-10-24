@@ -7,6 +7,7 @@ import { fixedOccurrencesPreserved, readerWorkflowInstruction, manifestMembers, 
 import { compactProposalDigest, exactFenceRecords, extractWorkflowAgreementRecords, parseWorkflowAgreementRecord, resolveCompactAcceptance, resolveCompactProposal, workflowAgreementPlanHash, workflowProtocolDiagnosticCodes, type CompactProposalPins, type StoredProposalDigest, type WorkflowAgreementRecordKind } from "./supervisor-workflow-agreement.js";
 import { extractApprovedProjectDefinitions, extractProjectDefinitionDecisionRecords, parseProjectDefinitionDecisionRecord, buildProjectDefinitionReviewRequest } from "./supervisor-definition-review.js";
 import { isSupervisorThread, prepareStopNotice, ProjectSupervisorStore, type BindingRecord, type ProtocolAnchor, type TaskRecord } from "./project-supervisor-store.js";
+import { projectRequesterPolicy, taskRequester, type TaskRequesterPolicy } from "./task-requester.js";
 import type { ProjectDefinitionSnapshot } from "./project-definitions-contract.js";
 import { ProjectDefinitions } from "./project-definitions.js";
 import type { SupervisorContextViewInput, SupervisorContextViewResult } from "./workflow-write-controller.js";
@@ -1100,8 +1101,7 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
   const refreshEditedSource = (task: TaskRecord, agent: Projection, now: number, revisionId: string) => Effect.gen(function* () {
     const message = agent.messages.find(item => item.id === task.sourceMessageId && item.threadId === task.threadId && item.runId === task.sourceRunId);
     const run = agent.runs.find(item => item.id === task.sourceRunId);
-    if (!message || !run || !nativeUserMessageVisible(agent, run, message) || message.createdBy !== "user" ||
-      (message.creationSource !== "web" && message.creationSource !== "mobile") || message.senderThreadId || message.scheduledTaskId || message.source ||
+    if (!message || !run || !taskRequester(agent, run, message, yield* projectRequesterPolicy(store, task.projectId)) ||
       !message.text.trim() || message.text.length > 24_000) return false;
     const sourceHash = fingerprint(message.text);
     if (sourceHash === task.sourceHash) return false;
@@ -1228,7 +1228,7 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
         path: null, expected: "a compact draft {taskId, taskRevision, proposalId, revision, draft}; check it with workflow_read view check", detail: null};
       const resolved = resolveCompactProposal(value, proposalPins(task), context, storedProposal(task, yield* namedCandidates(task, value)));
       if (!resolved.ok) return resolved;
-      if (resolved.proposal.objective && !genuineUserMessages(agent, task, resolved.proposal.objective.sourceMessageIds))
+      if (resolved.proposal.objective && !genuineUserMessages(agent, task, resolved.proposal.objective.sourceMessageIds, yield* projectRequesterPolicy(store, task.projectId)))
         return {code: "objective_source_invalid", proposalId: resolved.proposal.proposalId, path: "/objective/sourceMessageIds",
           expected: "IDs of genuine user messages in the operative main conversation", detail: null};
       const stored = yield* requests.agreementCandidate(task.id, resolved.proposal.proposalId);
@@ -1255,10 +1255,12 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
       (message.creationSource === "web" || message.creationSource === "mobile") && !message.senderThreadId && !message.scheduledTaskId &&
       !message.id.startsWith("supervisor-notice:") && nativeUserMessageVisible(agent, run, message));
   };
-  const genuineUserMessages = (agent: Projection, task: TaskRecord, messageIds: readonly string[]): boolean =>
+  // an objective cites only requests of the main's permitted requesters: its human, and with the project setting the launching agent
+  const genuineUserMessages = (agent: Projection, task: TaskRecord, messageIds: readonly string[], requesters: TaskRequesterPolicy): boolean =>
     messageIds.length > 0 && messageIds.every(id => {
       const message = agent.messages.find(item => item.id === id && item.threadId === task.threadId);
-      return Boolean(message && genuineUserMessage(agent, task.threadId, message));
+      const run = message?.runId ? agent.runs.find(item => item.id === message.runId) : undefined;
+      return Boolean(message && (genuineUserMessage(agent, task.threadId, message) || run && taskRequester(agent, run, message, requesters)?.kind === "agent"));
     });
   // whether a human wrote in the main after a time and after the activation boundary of a re-enabled project; an unreadable
   // main keeps the pair asleep
@@ -1542,6 +1544,7 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
       // the binding checked above names this Supervisor thread
       const supervisorMessages = completedAssistantMessages(supervisor, task.supervisorThreadId);
       const agentMessages = completedAssistantMessages(agent, task.threadId);
+      const requesters = yield* projectRequesterPolicy(store, task.projectId);
       yield* reconcileWorkflowProtocolDiagnostics(task, introduction, agent, supervisor, context, supervisorMessages, agentMessages, now);
       let currentProposalId = task.workflowProposalId ?? null;
       for (const message of supervisorMessages) {
@@ -1550,7 +1553,7 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
           const resolved = resolveCompactProposal(value, proposalPins(task), context, storedProposal(task, yield* namedCandidates(task, value)));
           if (!resolved.ok || !resolved.proposal.formal) continue;
           const proposal = resolved.proposal;
-          if (proposal.objective && !genuineUserMessages(agent, task, proposal.objective.sourceMessageIds)) continue;
+          if (proposal.objective && !genuineUserMessages(agent, task, proposal.objective.sourceMessageIds, requesters)) continue;
           const workflow: WorkflowProposalInfo = {status: "proposed", message: "A complete proposal is waiting for an exact operative acceptance record.",
             workspaceRoot: proposal.workspaceRoot, revision: proposal.revision, globalRevision: context.globalRevision ?? null, ...proposal.workflow};
           const candidate: WorkflowAgreementCandidate = {taskId: task.id, projectId: task.projectId, proposalId: proposal.proposalId, compact: true,

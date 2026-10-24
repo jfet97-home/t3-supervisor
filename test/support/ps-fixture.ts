@@ -75,7 +75,9 @@ const modelConfig = {
   }],
 };
 
-export type Turn = { id: string; sequence: number; text: string; creationSource?: "web" | "mobile" | "server"; createdBy?: "user" | "assistant" | "system" };
+// an agent's turn carries T3's native MCP provenance: createdBy agent, creationSource mcp and the sending thread
+export type Turn = { id: string; sequence: number; text: string; creationSource?: "web" | "mobile" | "server" | "mcp"; createdBy?: "user" | "assistant" | "system" | "agent";
+  senderThreadId?: string; scheduledTaskId?: string; createdAt?: string };
 
 export const makeSourceProjection = (threadId: string, projectId: string, turns: Turn[]): Projection => {
   const thread: ThreadInfo = {
@@ -110,10 +112,12 @@ export const makeSourceProjection = (threadId: string, projectId: string, turns:
       role: "user",
       text: turn.text,
       streaming: false,
-      createdAt: baseTime,
-      updatedAt: baseTime,
+      createdAt: turn.createdAt ?? baseTime,
+      updatedAt: turn.createdAt ?? baseTime,
       createdBy: turn.createdBy ?? "user",
       creationSource: turn.creationSource ?? "web",
+      ...(turn.senderThreadId ? { senderThreadId: turn.senderThreadId } : {}),
+      ...(turn.scheduledTaskId ? { scheduledTaskId: turn.scheduledTaskId } : {}),
     });
     nodes.push(
       { id: rootId, threadId, runId, parentNodeId: null, rootNodeId: rootId, kind: "root_turn", status: "completed", providerThreadId: "provider-" + threadId },

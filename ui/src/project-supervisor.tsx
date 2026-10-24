@@ -46,6 +46,8 @@ export type Draft = {
   monitoringBaseline: MonitoringDraft;
   teamSettingsValue: TeamSettingsDraft;
   teamSettingsBaseline: TeamSettingsDraft;
+  agentThreadsValue: boolean;
+  agentThreadsBaseline: boolean;
   expectedGeneration: number;
 };
 export type WorkflowProgressPanelState = {key: string; pages: WorkflowProgressSnapshot[]; loading: boolean; error: string | null};
@@ -71,6 +73,7 @@ const readMonitoringDraft = (snapshot: ProjectSupervisorInfo) => monitoringDraft
 const readTeamSettings = (snapshot: ProjectSupervisorInfo): SupervisorTeamSettingsInfo => ({...(snapshot.settings.teamSettings ?? defaultSupervisorTeamSettings)});
 const teamSettingsDraft = (settings: SupervisorTeamSettingsInfo): TeamSettingsDraft => ({maxHelpersPerRoot: String(settings.maxHelpersPerRoot)});
 const readTeamSettingsDraft = (snapshot: ProjectSupervisorInfo) => teamSettingsDraft(readTeamSettings(snapshot));
+const readAgentThreads = (snapshot: ProjectSupervisorInfo) => snapshot.settings.superviseAgentCreatedThreads === true;
 const formatMonitoringTime = (value: number | null) => value === null ? "Not scheduled" : new Date(value).toLocaleString();
 const reviewOutcomeLabels = {progress_updated: "Progress updated", no_change: "No change", needs_attention: "Needs attention",
   insufficient_evidence: "Insufficient evidence"} as const;
@@ -822,6 +825,7 @@ export function ProjectSupervisorView({
   selection,
   monitoring,
   teamSettings,
+  agentThreads = false,
   threadId,
   connected,
   saving,
@@ -838,6 +842,7 @@ export function ProjectSupervisorView({
   onSelectionChange,
   onMonitoringChange,
   onTeamSettingsChange,
+  onAgentThreadsChange = () => {},
   onDiscard,
   onRetry,
   onSubmit,
@@ -856,6 +861,7 @@ export function ProjectSupervisorView({
   selection: SupervisorModelSelection;
   monitoring: MonitoringDraft;
   teamSettings: TeamSettingsDraft;
+  agentThreads?: boolean;
   threadId?: string;
   connected: boolean;
   saving: boolean;
@@ -872,6 +878,7 @@ export function ProjectSupervisorView({
   onSelectionChange: (selection: SupervisorModelSelection) => void;
   onMonitoringChange: (monitoring: MonitoringDraft) => void;
   onTeamSettingsChange: (settings: TeamSettingsDraft) => void;
+  onAgentThreadsChange?: (enabled: boolean) => void;
   onDiscard: () => void;
   onRetry: () => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
@@ -1022,6 +1029,13 @@ export function ProjectSupervisorView({
         <span id="supervisor-team-max-helpers-help" className="small muted">Enter a whole number from 0 to 20. The default is 5; 0 disables new recruitment.</span>
         <span id="supervisor-team-max-helpers-error" className="small" aria-live="polite">{teamSettingsError}</span>
       </fieldset>
+      <fieldset disabled={fieldsDisabled} className="stack">
+        <legend>Agent-created conversations</legend>
+        <label className="toggle" htmlFor="supervisor-agent-created-threads"><input id="supervisor-agent-created-threads" name="superviseAgentCreatedThreads" type="checkbox"
+          checked={agentThreads} onChange={event => onAgentThreadsChange(event.target.checked)} />
+          <span>Supervise conversations created by agents<small>Off by default. When on, requests written afterwards by the agent that launched an ordinary conversation in this project are interpreted and negotiated like a person’s task, and remain attributed to that agent. Earlier requests, other agents, Supervisor conversations, helpers and delegated child tasks are never supervised this way. Start, Stop and definition approval still need a person.</small></span>
+        </label>
+      </fieldset>
       <div className="save-bar">{dirty && <span>Unsaved Supervisor settings</span>}<button className="primary" type="submit" disabled={!canSave || saving || blocked}>{saving ? "Saving…" : "Save Supervisor settings"}</button>
       {dirty && <button type="button" disabled={saving || blocked} onClick={onDiscard}>Discard draft</button>}</div>
     </form>
@@ -1072,7 +1086,8 @@ const canonicalDraft = (projectId: string, snapshot: ProjectSupervisorInfo): Dra
   const teamSettings = readTeamSettingsDraft(snapshot);
   return {projectId, modelValue: canonical, modelBaseline: copySelection(canonical), monitoringValue: copyMonitoringDraft(monitoring),
     monitoringBaseline: copyMonitoringDraft(monitoring), teamSettingsValue: copyTeamSettingsDraft(teamSettings),
-    teamSettingsBaseline: copyTeamSettingsDraft(teamSettings), expectedGeneration: snapshot.settings.generation};
+    teamSettingsBaseline: copyTeamSettingsDraft(teamSettings), agentThreadsValue: readAgentThreads(snapshot), agentThreadsBaseline: readAgentThreads(snapshot),
+    expectedGeneration: snapshot.settings.generation};
 };
 
 /**
@@ -1084,18 +1099,22 @@ export const mergeLoadedDraft = (prior: Draft | null, projectId: string, snapsho
   const modelWasDirty = Boolean(prior && selectionKey(prior.modelValue) !== selectionKey(prior.modelBaseline));
   const monitoringWasDirty = Boolean(prior && !sameMonitoring(prior.monitoringValue, prior.monitoringBaseline));
   const teamSettingsWereDirty = Boolean(prior && !sameTeamSettings(prior.teamSettingsValue, prior.teamSettingsBaseline));
+  const agentThreadsWereDirty = Boolean(prior && prior.agentThreadsValue !== prior.agentThreadsBaseline);
   const modelBaseline = copySelection(snapshot.settings.modelSelection);
   const modelValue = modelWasDirty ? copySelection(prior!.modelValue) : copySelection(modelBaseline);
   const monitoringBaseline = readMonitoringDraft(snapshot);
   const monitoringValue = monitoringWasDirty ? copyMonitoringDraft(prior!.monitoringValue) : copyMonitoringDraft(monitoringBaseline);
   const teamSettingsBaseline = readTeamSettingsDraft(snapshot);
   const teamSettingsValue = teamSettingsWereDirty ? copyTeamSettingsDraft(prior!.teamSettingsValue) : copyTeamSettingsDraft(teamSettingsBaseline);
+  const agentThreadsBaseline = readAgentThreads(snapshot);
+  const agentThreadsValue = agentThreadsWereDirty ? prior!.agentThreadsValue : agentThreadsBaseline;
   return {
     draft: {projectId, modelValue, modelBaseline, monitoringValue, monitoringBaseline, teamSettingsValue, teamSettingsBaseline,
-      expectedGeneration: snapshot.settings.generation},
+      agentThreadsValue, agentThreadsBaseline, expectedGeneration: snapshot.settings.generation},
     keptDirty: (modelWasDirty && selectionKey(modelValue) !== selectionKey(modelBaseline)) ||
       (monitoringWasDirty && !sameMonitoring(monitoringValue, monitoringBaseline)) ||
-      (teamSettingsWereDirty && !sameTeamSettings(teamSettingsValue, teamSettingsBaseline)),
+      (teamSettingsWereDirty && !sameTeamSettings(teamSettingsValue, teamSettingsBaseline)) ||
+      (agentThreadsWereDirty && agentThreadsValue !== agentThreadsBaseline),
   };
 };
 
@@ -1120,14 +1139,15 @@ export const settleSave = ({view, draft}: SettingsState, scope: string, input: P
     return {
       draft: draft ? {...draft, modelValue: copySelection(input.modelSelection), modelBaseline: copySelection(input.modelSelection),
         monitoringValue: monitoringDraft(input.monitoring ?? defaultMonitoringSettings), monitoringBaseline: monitoringDraft(input.monitoring ?? defaultMonitoringSettings),
-        teamSettingsValue: teamSettingsDraft(input.teamSettings ?? defaultSupervisorTeamSettings), teamSettingsBaseline: teamSettingsDraft(input.teamSettings ?? defaultSupervisorTeamSettings)} : draft,
+        teamSettingsValue: teamSettingsDraft(input.teamSettings ?? defaultSupervisorTeamSettings), teamSettingsBaseline: teamSettingsDraft(input.teamSettings ?? defaultSupervisorTeamSettings),
+        agentThreadsValue: input.superviseAgentCreatedThreads ?? draft.agentThreadsBaseline, agentThreadsBaseline: input.superviseAgentCreatedThreads ?? draft.agentThreadsBaseline} : draft,
       view: withMessage({...view, blocked: true}, scope, `${result.message} Refresh Supervisor status before making another change.`, false),
     };
   }
   if (result.status === "uncertain") return {draft, view: withMessage({...view, blocked: true}, scope, result.message, true)};
   if (result.snapshot) return {
     draft: draft ? {...draft, modelBaseline: copySelection(result.snapshot.settings.modelSelection), monitoringBaseline: readMonitoringDraft(result.snapshot),
-      teamSettingsBaseline: readTeamSettingsDraft(result.snapshot), expectedGeneration: result.snapshot.settings.generation} : draft,
+      teamSettingsBaseline: readTeamSettingsDraft(result.snapshot), agentThreadsBaseline: readAgentThreads(result.snapshot), expectedGeneration: result.snapshot.settings.generation} : draft,
     view: withMessage({...view, snapshot: result.snapshot, blocked: false}, scope, result.message, result.status === "invalid"),
   };
   return {draft, view: withMessage({...view, blocked: result.status === "conflict"}, scope,
@@ -1383,7 +1403,8 @@ export function ProjectSupervisorPanel({projectId, threadId, section = "all", at
   const modelDirty = Boolean(activeDraft && selectionKey(activeDraft.modelValue) !== selectionKey(activeDraft.modelBaseline));
   const monitoringDirty = Boolean(activeDraft && !sameMonitoring(activeDraft.monitoringValue, activeDraft.monitoringBaseline));
   const teamSettingsDirty = Boolean(activeDraft && !sameTeamSettings(activeDraft.teamSettingsValue, activeDraft.teamSettingsBaseline));
-  const dirty = modelDirty || monitoringDirty || teamSettingsDirty;
+  const agentThreadsDirty = Boolean(activeDraft && activeDraft.agentThreadsValue !== activeDraft.agentThreadsBaseline);
+  const dirty = modelDirty || monitoringDirty || teamSettingsDirty || agentThreadsDirty;
 
   // no read while saving, and no automatic read over a dirty draft of the shown snapshot: only an explicit refresh moves
   // the draft's expected generation; each scope revision is read once
@@ -1471,10 +1492,11 @@ export function ProjectSupervisorPanel({projectId, threadId, section = "all", at
   const updateSelection = (selection: SupervisorModelSelection) => editDraft(current => ({...current, modelValue: copySelection(selection)}));
   const updateMonitoring = (monitoring: MonitoringDraft) => editDraft(current => ({...current, monitoringValue: copyMonitoringDraft(monitoring)}));
   const updateTeamSettings = (settings: TeamSettingsDraft) => editDraft(current => ({...current, teamSettingsValue: copyTeamSettingsDraft(settings)}));
+  const updateAgentThreads = (enabled: boolean) => editDraft(current => ({...current, agentThreadsValue: enabled}));
   const discardDraft = () => {
     if (saving || blocked) return;
     editDraft(current => ({...current, modelValue: copySelection(current.modelBaseline), monitoringValue: copyMonitoringDraft(current.monitoringBaseline),
-      teamSettingsValue: copyTeamSettingsDraft(current.teamSettingsBaseline)}));
+      teamSettingsValue: copyTeamSettingsDraft(current.teamSettingsBaseline), agentThreadsValue: current.agentThreadsBaseline}));
   };
 
   const save = (event: FormEvent<HTMLFormElement>) => {
@@ -1487,6 +1509,7 @@ export function ProjectSupervisorPanel({projectId, threadId, section = "all", at
       modelSelection: copySelection(activeDraft.modelValue),
       monitoring: copyMonitoringSettings(validMonitoring),
       teamSettings: {...validTeamSettings},
+      superviseAgentCreatedThreads: activeDraft.agentThreadsValue,
     }});
   };
 
@@ -1528,6 +1551,7 @@ export function ProjectSupervisorPanel({projectId, threadId, section = "all", at
       selection={activeDraft.modelValue}
       monitoring={activeDraft.monitoringValue}
       teamSettings={activeDraft.teamSettingsValue}
+      agentThreads={activeDraft.agentThreadsValue}
       {...(threadId === undefined ? {} : {threadId})}
       connected={connected}
       saving={saving}
@@ -1544,6 +1568,7 @@ export function ProjectSupervisorPanel({projectId, threadId, section = "all", at
       onSelectionChange={updateSelection}
       onMonitoringChange={updateMonitoring}
       onTeamSettingsChange={updateTeamSettings}
+      onAgentThreadsChange={updateAgentThreads}
       onDiscard={discardDraft}
       onRetry={retryNativeAccess}
       chatSupervisionBusy={view.chat?.scope === scope}

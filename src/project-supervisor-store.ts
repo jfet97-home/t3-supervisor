@@ -19,7 +19,9 @@ import type { TaskInterpretationFields } from "./interpretation-evidence.js";
 // the model of a project without saved settings (D-28, Andrea 2026-10-23): GPT-6.1 Sol LOW; saved settings and existing bindings keep theirs
 export const defaultSupervisorModel: SupervisorModelSelection = {instanceId: "codex", model: "gpt-6.1-sol", options: [{id: "reasoningEffort", value: "low"}]};
 export const SUPERVISOR_ROOT_THREAD_PREFIX = "supervisor-root:";
-export type ProjectModelSettings = {projectId: string; generation: number; modelMutationGeneration: number; modelSelection: SupervisorModelSelection; pending: boolean; monitoring: SupervisorMonitoringSettings; teamSettings?: {maxHelpersPerRoot: number}; applyAttempts?: number; applicationMessage?: string | null};
+// superviseAgentCreatedThreads: whether the launching agent's requests in an ordinary agent-created main are supervised, off unless
+// saved; agentCreatedThreadsEnabledAt: when it was last turned on, so only agent requests written afterwards count
+export type ProjectModelSettings = {projectId: string; generation: number; modelMutationGeneration: number; modelSelection: SupervisorModelSelection; pending: boolean; monitoring: SupervisorMonitoringSettings; teamSettings?: {maxHelpersPerRoot: number}; superviseAgentCreatedThreads: boolean; agentCreatedThreadsEnabledAt: number | null; applyAttempts?: number; applicationMessage?: string | null};
 export type SupervisorStopNotice = {messageId: string; commandId: string; stoppedAt: number; enabledAt: number | null;
   state: "ready" | "uncertain" | "accepted" | "sent" | "blocked" | "unconfirmed" | "superseded";
   text: string; visibilityMisses?: number; nextObserveAt?: number;
@@ -48,12 +50,12 @@ export type TaskRecord = TaskInterpretationInfo & TaskInterpretationFields & {id
 export class SupervisorOwnership extends Context.Service<SupervisorOwnership, Set<string>>()("t3-supervisor/SupervisorOwnership") {
   static readonly layer: Layer.Layer<SupervisorOwnership> = Layer.sync(SupervisorOwnership, () => new Set<string>());
 }
+/** A Supervisor root or helper thread ID, by the root prefix or the permanent ownership set. */
+export const isSupervisorThreadId = (owned: ReadonlySet<string>, id: unknown): boolean => typeof id === "string" &&
+  (id.startsWith(SUPERVISOR_ROOT_THREAD_PREFIX) || owned.has(id));
 /** A Supervisor root or helper thread, or one descending from it, by the root prefix or the permanent ownership set. */
-export const isSupervisorThread = (owned: ReadonlySet<string>, thread: {id: string; lineage: {parentThreadId: string | null; rootThreadId?: unknown}}): boolean => {
-  const supervisorId = (id: unknown): boolean => typeof id === "string" &&
-    (id.startsWith(SUPERVISOR_ROOT_THREAD_PREFIX) || owned.has(id));
-  return supervisorId(thread.id) || supervisorId(thread.lineage.rootThreadId) || supervisorId(thread.lineage.parentThreadId);
-};
+export const isSupervisorThread = (owned: ReadonlySet<string>, thread: {id: string; lineage: {parentThreadId: string | null; rootThreadId?: unknown}}): boolean =>
+  isSupervisorThreadId(owned, thread.id) || isSupervisorThreadId(owned, thread.lineage.rootThreadId) || isSupervisorThreadId(owned, thread.lineage.parentThreadId);
 
 const normalizeMonitoringSettings = (value: SupervisorMonitoringSettings | undefined): SupervisorMonitoringSettings => value
   ? {intervalMinutes: value.intervalMinutes, activityThreshold: value.activityThreshold}
@@ -130,7 +132,7 @@ export interface ProjectSupervisorStoreShape {
   readonly enabled: (projectId: string) => StoreEffect<boolean>;
   readonly saveControl: (projectId: string | null, expectedGeneration: number, enabled: boolean, baseline?: SupervisorBaseline) => StoreEffect<SupervisionControlInfo>;
   readonly settings: (projectId: string) => StoreEffect<ProjectModelSettings>;
-  readonly saveSettings: (projectId: string, expected: number, selection: SupervisorModelSelection, monitoring?: SupervisorMonitoringSettings, teamSettings?: {maxHelpersPerRoot: number}) => StoreEffect<ProjectModelSettings>;
+  readonly saveSettings: (projectId: string, expected: number, selection: SupervisorModelSelection, monitoring?: SupervisorMonitoringSettings, teamSettings?: {maxHelpersPerRoot: number}, superviseAgentCreatedThreads?: boolean) => StoreEffect<ProjectModelSettings>;
   readonly modelState: (binding: BindingRecord) => StoreEffect<ProjectModelSettings>;
   readonly observeModel: (binding: BindingRecord, selection: SupervisorModelSelection, appliedGeneration?: number, message?: string | null) => StoreEffect<void>;
   readonly modelAttempt: (binding: BindingRecord, reset?: boolean) => StoreEffect<void>;
@@ -242,10 +244,16 @@ const makeProjectSupervisorStore = Effect.gen(function* () {
 
   const settingsOf = Effect.fnUntraced(function* (projectId: string) {
     const [row] = yield* sql`SELECT document FROM supervisor_project_settings WHERE project_id=${projectId}`;
-    const stored = row === undefined ? null : yield* documentRow<Omit<ProjectModelSettings, "monitoring" | "modelMutationGeneration"> & {monitoring?: SupervisorMonitoringSettings; modelMutationGeneration?: number}, ProjectSupervisorStoreError>(
+    const stored = row === undefined ? null : yield* documentRow<Omit<ProjectModelSettings, "monitoring" | "modelMutationGeneration" | "superviseAgentCreatedThreads" | "agentCreatedThreadsEnabledAt"> &
+      {monitoring?: SupervisorMonitoringSettings; modelMutationGeneration?: number; superviseAgentCreatedThreads?: unknown; agentCreatedThreadsEnabledAt?: unknown}, ProjectSupervisorStoreError>(
       row, isStoredSettings, rowInvalid("project_settings"));
-    return stored ? {...stored, modelMutationGeneration: stored.modelMutationGeneration ?? stored.generation, monitoring: effectiveMonitoringSettings(stored.monitoring), teamSettings: stored.teamSettings ?? {maxHelpersPerRoot: 5}} : {
+    // only an explicitly saved true with its enable time turns agent-created conversations on; a document without them reads as off
+    const agentCreatedThreadsEnabledAt = stored?.superviseAgentCreatedThreads === true && typeof stored.agentCreatedThreadsEnabledAt === "number" &&
+      Number.isFinite(stored.agentCreatedThreadsEnabledAt) ? stored.agentCreatedThreadsEnabledAt : null;
+    return stored ? {...stored, modelMutationGeneration: stored.modelMutationGeneration ?? stored.generation, monitoring: effectiveMonitoringSettings(stored.monitoring), teamSettings: stored.teamSettings ?? {maxHelpersPerRoot: 5},
+      superviseAgentCreatedThreads: agentCreatedThreadsEnabledAt !== null, agentCreatedThreadsEnabledAt} : {
       projectId, generation: 0, modelMutationGeneration: 0, modelSelection: defaultSupervisorModel, pending: false, monitoring: {...defaultMonitoringSettings}, teamSettings: {maxHelpersPerRoot: 5},
+      superviseAgentCreatedThreads: false, agentCreatedThreadsEnabledAt: null,
     } satisfies ProjectModelSettings;
   });
   const modelStateOf = (binding: BindingRecord) => binding.modelState ? Effect.succeed(binding.modelState) :
@@ -508,8 +516,9 @@ const makeProjectSupervisorStore = Effect.gen(function* () {
     return yield* controlOf(projectId);
   }));
   const settings = (projectId: string) => run(settingsOf(projectId));
-  // the settings generation CAS with range checks: monitoring 1..2 minutes and 3..100 activities, helpers 0..20
-  const saveSettings = (projectId: string, expected: number, selection: SupervisorModelSelection, monitoring?: SupervisorMonitoringSettings, teamSettings?: {maxHelpersPerRoot: number}) => write(Effect.gen(function* () {
+  // the settings generation CAS with range checks: monitoring 1..2 minutes and 3..100 activities, helpers 0..20; an omitted
+  // field keeps its saved value
+  const saveSettings = (projectId: string, expected: number, selection: SupervisorModelSelection, monitoring?: SupervisorMonitoringSettings, teamSettings?: {maxHelpersPerRoot: number}, superviseAgentCreatedThreads?: boolean) => write(Effect.gen(function* () {
     const old = yield* settingsOf(projectId);
     if (old.generation !== expected) return yield* refuse("project_settings_conflict");
     const nextMonitoring = normalizeMonitoringSettings(monitoring ?? old.monitoring);
@@ -518,6 +527,9 @@ const makeProjectSupervisorStore = Effect.gen(function* () {
     if (!Number.isSafeInteger(nextTeamSettings.maxHelpersPerRoot) || nextTeamSettings.maxHelpersPerRoot < 0 || nextTeamSettings.maxHelpersPerRoot > 20)
       return yield* refuse("invalid_team_settings");
     const modelChanged = !sameModel(old.modelSelection, selection);
+    const agentCreatedThreads = superviseAgentCreatedThreads ?? old.superviseAgentCreatedThreads;
+    // turning agent-created conversations on supervises only agent requests written afterwards, never the backlog
+    const agentCreatedThreadsEnabledAt = !agentCreatedThreads ? null : old.agentCreatedThreadsEnabledAt ?? (yield* Clock.currentTimeMillis);
     const next: ProjectModelSettings = {
       ...old,
       projectId,
@@ -526,6 +538,8 @@ const makeProjectSupervisorStore = Effect.gen(function* () {
       modelSelection: selection,
       monitoring: nextMonitoring,
       teamSettings: nextTeamSettings,
+      superviseAgentCreatedThreads: agentCreatedThreads,
+      agentCreatedThreadsEnabledAt,
       pending: false,
       ...(modelChanged ? {applyAttempts: 0, applicationMessage: null} : {}),
     };

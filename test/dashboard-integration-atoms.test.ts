@@ -345,7 +345,7 @@ it("D6 the guard's confirmed discard of a project change resets the project's ke
   const edited = () => ({ ...editor.freshDraft(), editing: true, config: { workflows: [], steps: [] } });
   const draft = { projectId: "project", modelValue: { instanceId: "i", model: "m", options: [] }, modelBaseline: { instanceId: "i", model: "n", options: [] },
     monitoringValue: { intervalMinutes: "5", activityThreshold: "10" }, monitoringBaseline: { intervalMinutes: "5", activityThreshold: "10" },
-    teamSettingsValue: { maxHelpersPerRoot: "2" }, teamSettingsBaseline: { maxHelpersPerRoot: "2" }, expectedGeneration: 3 };
+    teamSettingsValue: { maxHelpersPerRoot: "2" }, teamSettingsBaseline: { maxHelpersPerRoot: "2" }, agentThreadsValue: false, agentThreadsBaseline: false, expectedGeneration: 3 };
   const stops = [settingsDraft, setupChoice, configuration].map((atom) => registry.mount(atom as Atom.Atom<unknown>));
 
   // a conversation change in the same project discards only the configuration draft

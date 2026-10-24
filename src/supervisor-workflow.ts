@@ -410,6 +410,8 @@ export type WorkflowRequestOptions = {
   submission?: InterpretationRequestPins;
   /** Earlier unresolved genuine requests in the same main conversation, oldest first. */
   earlierMessages?: ReadonlyArray<{messageId: string; text: string}>;
+  /** The launching agent conversation that wrote an agent-created main's request; absent for a human request. */
+  requester?: {kind: "agent"; threadId: string};
 };
 const maxEarlierMessageChars = 6_000;
 /** The newest earlier unresolved requests within a fixed budget, oldest first. */
@@ -461,10 +463,16 @@ export const prepareWorkflowRequest = (threadId: string, messageId: string, text
     context = {...context, status: "unavailable", complete: false, requirementsKnown: false, promptComplete: false,
       issues: [...context.issues, issue(".t3-supervisor", "definition_binding_mismatch", "Definitions are not bound to this operative thread and workspace; requirements remain unknown.")]};
   }
+  // an agent request names the agent that wrote it beside its identity; a human request's envelope is unchanged
+  const attributed = <A extends {threadId: string; messageId: string}>(data: A) => {
+    if (!options.requester) return data;
+    const {threadId: sourceThreadId, messageId: sourceMessageId, ...rest} = data;
+    return {threadId: sourceThreadId, messageId: sourceMessageId, requestedBy: {kind: "launching_agent", threadId: options.requester.threadId}, ...rest};
+  };
   if (options.reader) {
     const readerOptions = {...options, reader: options.reader};
     const reader = readerPrompt(context, threadId, messageId, text, readerOptions);
-    const rendered = {reader, requestText: `${readerInterpretationRequest}\n${submission}UNTRUSTED_WORKFLOW_ENVELOPE\n${JSON.stringify(reader.requestData)}\nEND_UNTRUSTED_WORKFLOW_ENVELOPE`};
+    const rendered = {reader, requestText: `${readerInterpretationRequest}\n${submission}UNTRUSTED_WORKFLOW_ENVELOPE\n${JSON.stringify(attributed(reader.requestData))}\nEND_UNTRUSTED_WORKFLOW_ENVELOPE`};
     if (rendered.requestText.length <= maxPromptLength) {
       context = {...context, promptComplete: context.promptComplete && rendered.reader.promptComplete};
       const workflow = baseWorkflow(context, "pending", context.status === "invalid" || !context.complete
@@ -479,14 +487,14 @@ export const prepareWorkflowRequest = (threadId: string, messageId: string, text
   const workflow = baseWorkflow(context, "pending", context.status === "invalid" || !context.complete
     ? "Definitions need repair or a complete read. The Supervisor will still negotiate a finite provisional plan and keep unresolved commitments visible."
     : "Waiting for a source-bound semantic plan for this main task.");
-  let requestText = `${workflowInstruction}\n${submission}UNTRUSTED_WORKFLOW_ENVELOPE\n${JSON.stringify(bounded.requestData)}\nEND_UNTRUSTED_WORKFLOW_ENVELOPE`;
+  let requestText = `${workflowInstruction}\n${submission}UNTRUSTED_WORKFLOW_ENVELOPE\n${JSON.stringify(attributed(bounded.requestData))}\nEND_UNTRUSTED_WORKFLOW_ENVELOPE`;
   if (requestText.length > maxPromptLength) {
     context = {...context, promptComplete: false};
     const reduced = promptData({...context, promptComplete: false}, threadId, messageId, text, {
       taskText: redact(text).slice(0, 12_000), steps: [], workflows: [], sources: [], workflowTemplates: [],
       issues: [...context.issues.slice(0, maxPromptIssues - 1), issue(".t3-supervisor", "supervisor_context_limit", "The task and definition excerpts were reduced to fit the bounded Supervisor request; exact configured requirements remain listed as unresolved.")],
     });
-    requestText = `${workflowInstruction}\n${submission}UNTRUSTED_WORKFLOW_ENVELOPE\n${JSON.stringify(reduced)}\nEND_UNTRUSTED_WORKFLOW_ENVELOPE`;
+    requestText = `${workflowInstruction}\n${submission}UNTRUSTED_WORKFLOW_ENVELOPE\n${JSON.stringify(attributed(reduced))}\nEND_UNTRUSTED_WORKFLOW_ENVELOPE`;
   }
   const preparedWorkflow = context.promptComplete ? workflow : baseWorkflow(context, "pending", "The source-bound plan is provisional because its bounded request omitted task or definition context.");
   return {requestText, context, workflow: context.promptComplete ? workflow : preparedWorkflow};

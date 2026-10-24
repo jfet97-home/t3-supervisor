@@ -6,7 +6,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { defaultMonitoringSettings, defaultSupervisorTeamSettings, ProjectSupervisorSave, ProjectSupervisorSnapshot, type DefinitionReviewInfo, type ProjectSupervisorInfo, type ProjectSupervisorRetryInput, type ProjectSupervisorSaveInput, type ProjectSupervisorTeamInfo, type SupervisorModelSelection, type WorkflowAgreementInfo, type WorkflowPlanGroupInfo, type WorkflowProposalInfo } from "../src/project-supervisor-contract.js";
 import type { WorkflowProgressSnapshot } from "../src/workflow-progress.js";
 import { SessionAccess } from "../ui/src/access.js";
-import { confirmChatSupervisionChange, ProjectSupervisorView, WorkflowProgressPanel, shouldOfferNativeRetry } from "../ui/src/project-supervisor.js";
+import { confirmChatSupervisionChange, mergeLoadedDraft, ProjectSupervisorView, WorkflowProgressPanel, shouldOfferNativeRetry } from "../ui/src/project-supervisor.js";
 import { loadProjectSupervisor, loadWorkflowProgress, ProjectSupervisorRequestError, refreshWorkflowProgressPages, retryProjectSupervisor, saveProjectSupervisor } from "../ui/src/project-supervisor-api.js";
 import { keepFetch, locationLayer, pageLayer, rejects } from "./support/g6-page.js";
 
@@ -304,6 +304,28 @@ it("invalid team settings expose an associated accessible error", () => {
   }));
   assert.match(html, /aria-describedby="supervisor-team-max-helpers-help supervisor-team-max-helpers-error"/);
   assert.match(html, /Enter maximum helpers per root from 0 to 20/);
+});
+
+it("Project settings offers agent-created supervision as an unchecked checkbox that a reload never overwrites", () => {
+  const render = (agentThreads: boolean) => renderToStaticMarkup(createElement(ProjectSupervisorView, {
+    ...viewDefaults, section: "settings", agentThreads, onAgentThreadsChange: () => {},
+    snapshot, selection, monitoring, connected: true, saving: false, fieldsBusy: false, blocked: false, dirty: false, canSave: false, shouldOfferRetry: false,
+    retryButtonLabel: "Retry native access", canRetry: false, onSelectionChange: () => {}, onMonitoringChange: () => {},
+    onDiscard: () => {}, onRetry: () => {}, onSubmit: event => event.preventDefault(),
+  }));
+  const off = render(false);
+  assert.match(off, /<legend>Agent-created conversations<\/legend>/);
+  assert.match(off, /<input id="supervisor-agent-created-threads" type="checkbox" name="superviseAgentCreatedThreads"\/>/);
+  assert.match(off, /Start, Stop and definition approval still need a person/);
+  assert.match(render(true), /name="superviseAgentCreatedThreads" checked=""\/>/);
+
+  assert.equal(mergeLoadedDraft(null, "project", snapshot).draft.agentThreadsValue, false, "a snapshot without the field reads as off");
+  const enabled = {...snapshot, settings: {...snapshot.settings, superviseAgentCreatedThreads: true}};
+  const loaded = mergeLoadedDraft(null, "project", enabled).draft;
+  assert.deepEqual([loaded.agentThreadsValue, loaded.agentThreadsBaseline], [true, true]);
+  const merged = mergeLoadedDraft({...loaded, agentThreadsValue: false}, "project", {...enabled, settings: {...enabled.settings, generation: 8}});
+  assert.equal(merged.draft.agentThreadsValue, false, "an unsaved change survives a reload");
+  assert.equal(merged.keptDirty, true);
 });
 
 it("invalid monitoring drafts expose associated accessible errors", () => {

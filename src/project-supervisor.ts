@@ -7,9 +7,10 @@ import { mainConversation, resolveSupervisorScope, supervisorScopeKey } from "./
 import { fingerprint } from "./guidance-store.js";
 import { GuidanceDb } from "./db.js";
 import { guidanceSql, guidanceTransaction, type SupervisionStoreError } from "./guidance-sql.js";
-import { nativeUserMessageVisible, timestampMs } from "./domain.js";
+import { timestampMs } from "./domain.js";
 import { ThreadPolicyStore } from "./thread-policy.js";
-import { ProjectSupervisorStore, type ProjectSupervisorStoreError, type BindingRecord, type TaskRecord, type SupervisorBaseline, type SupervisionFolderPresence } from "./project-supervisor-store.js";
+import { isSupervisorThread, ProjectSupervisorStore, type ProjectSupervisorStoreError, type BindingRecord, type TaskRecord, type SupervisorBaseline, type SupervisionFolderPresence } from "./project-supervisor-store.js";
+import { taskRequester, type TaskRequesterPolicy } from "./task-requester.js";
 import { modelSelection, NativeOperateRpc, NativeRpc, NativeShell, sameModel, supervisorModels, validModelSelection, SupervisorRpcError } from "./supervisor-native.js";
 import type { ProjectSupervisorChatSupervisionInput, ProjectSupervisorInfo, ProjectSupervisorSaveInput, ProjectSupervisorSaveOutcome, ProjectSupervisorRetryInput, SupervisorModelSelection } from "./project-supervisor-contract.js";
 import { prepareWorkflowRequest } from "./supervisor-workflow.js";
@@ -118,15 +119,16 @@ const sameDefinitionRead = (left: ProjectDefinitionSnapshot | null | undefined, 
       globalRevision: right.globalRevision ?? null, revision: right.revision, status: right.status, steps: right.steps, workflows: right.workflows,
       config: right.config, projectConfig: right.projectConfig, definitionFiles: right.definitionFiles, complete: right.complete, sources: right.sources, issues: right.issues}));
 
-// the first genuine human request after a run ordinal; after an explicit Enable only one written after it (`writtenAfter`) counts
-export const taskSource = (projection: Projection, afterOrdinal: number, writtenAfter: number | null = null): {run: RunInfo; message: MessageInfo} | null => {
+// the first genuine request of a permitted requester after a run ordinal; after an explicit Enable only one written after it
+// (`writtenAfter`) counts
+export const taskSource = (projection: Projection, afterOrdinal: number, writtenAfter: number | null, policy: TaskRequesterPolicy):
+  {run: RunInfo; message: MessageInfo; requester: NonNullable<ReturnType<typeof taskRequester>>} | null => {
   for (const run of [...projection.runs].sort((a,b) => a.ordinal - b.ordinal)) {
     if (run.ordinal <= afterOrdinal || !run.rootNodeId || run.threadId !== projection.thread.id || typeof run.userMessageId !== "string") continue;
-    const message = projection.messages.find(m => m.id === run.userMessageId && m.threadId === projection.thread.id && m.runId === run.id &&
-      m.role === "user" && m.createdBy === "user" && m.streaming === false && !m.id.startsWith("supervisor-notice:") && (m.creationSource === "web" || m.creationSource === "mobile") &&
-      !m.senderThreadId && !m.scheduledTaskId && !m.source);
-    if (writtenAfter !== null && !((timestampMs(message?.createdAt) ?? 0) > writtenAfter)) continue;
-    if (message && message.text.trim() && nativeUserMessageVisible(projection, run, message)) return {run, message};
+    const message = projection.messages.find(m => m.id === run.userMessageId && m.threadId === projection.thread.id && m.runId === run.id);
+    if (!message || writtenAfter !== null && !((timestampMs(message.createdAt) ?? 0) > writtenAfter)) continue;
+    const requester = taskRequester(projection, run, message, policy);
+    if (requester && message.text.trim()) return {run, message, requester};
   }
   return null;
 };
@@ -334,7 +336,7 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
     }));
   });
   // the source, boundary and Start checks every interpretation section reads (shared with the intake commit)
-  const {sourceFloor, pinnedStart, beforeBoundary, currentSource} = interpretationChecks(store, scope);
+  const {requesterPolicy, sourceFloor, pinnedStart, beforeBoundary, currentSource} = interpretationChecks(store, scope);
   const workflowLocator = (projectId: string, mainThreadId: string) => Effect.map(store.binding(projectId, mainThreadId), (binding): ProjectSupervisorWorkflowLocator | null =>
     binding?.state === "ready" ? {supervisorThreadId: binding.threadId, bindingGeneration: binding.generation} : null);
   const controlOf = (projectId: string) => effectiveControl(store, scope, projectId);
@@ -1011,7 +1013,7 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
       stoppedBy: stop?.route ?? null, stoppedAt: stop?.stoppedAt ?? null,
       stoppedCallerThreadId: stop?.callerThreadId ?? null, stoppedUserMessageId: stop?.userMessageId ?? null,
       effectiveEnabled: yield* scope.scopeEnabled(projectId, mainThreadId), activation: (yield* scope.isNoProject(projectId)) ? (yield* store.start(mainThreadId))?.status ?? "not_started" : "automatic"} : null;
-    return {projectId, mainThreadId, ...((yield* scope.isNoProject(projectId)) ? {noProjectMode: (yield* store.noProjectControl()).mode} : {}), chatSupervision, team: binding && teamData ? supervisorTeamView(teamData, binding, catalog.threads, now()) : null, modelApplication: application ? {pending: application.pending, attempts: application.applyAttempts ?? 0, message: application.applicationMessage ?? null} : null, settings: {generation: current.generation, modelSelection: current.modelSelection, pending: false, monitoring: current.monitoring, teamSettings: current.teamSettings ?? {maxHelpersPerRoot: 5}}, monitoringStatus: yield* conversation.status(projectId, binding?.threadId ?? null), binding: binding ? {...binding, settlementState: binding.settlement?.state ?? null, keptActive: Boolean(binding.manualKeepActive)} : null, modelSelection: selection, models: advertised, available, message,
+    return {projectId, mainThreadId, ...((yield* scope.isNoProject(projectId)) ? {noProjectMode: (yield* store.noProjectControl()).mode} : {}), chatSupervision, team: binding && teamData ? supervisorTeamView(teamData, binding, catalog.threads, now()) : null, modelApplication: application ? {pending: application.pending, attempts: application.applyAttempts ?? 0, message: application.applicationMessage ?? null} : null, settings: {generation: current.generation, modelSelection: current.modelSelection, pending: false, monitoring: current.monitoring, teamSettings: current.teamSettings ?? {maxHelpersPerRoot: 5}, superviseAgentCreatedThreads: current.superviseAgentCreatedThreads}, monitoringStatus: yield* conversation.status(projectId, binding?.threadId ?? null), binding: binding ? {...binding, settlementState: binding.settlement?.state ?? null, keptActive: Boolean(binding.manualKeepActive)} : null, modelSelection: selection, models: advertised, available, message,
       tasks: (binding ? yield* store.tasksFor(binding) : []).slice(-200).reverse().map(({id,sourceHash,threadId,projectId,sourceRunId,sourceMessageId,status,objective,reason,updatedAt,workflow,workflowProposalId,agreement,definitionReview,workflowProtocolDiagnostic}) => ({id,sourceHash,threadId,projectId,sourceRunId,sourceMessageId,status,objective,reason,updatedAt,workflow: workflow ?? null,
         ...(workflowProposalId ? {workflowProposalId} : {}), agreement: agreement ?? null, workflowProtocolDiagnostic: workflowProtocolDiagnostic ?? null,
         ...(definitionReview ? {definitionReview} : {})}))};
@@ -1022,7 +1024,7 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
       yield* project(input.projectId);
       if (input.mainThreadId) yield* snapshot(input.projectId, input.mainThreadId);
       // the settings save inside the caller's section and transaction; null when it committed
-      const commit = Effect.map(attempt(store.saveSettings(input.projectId, input.expectedGeneration, input.modelSelection, input.monitoring, input.teamSettings)), (saved): ProjectSupervisorSaveOutcome | null => {
+      const commit = Effect.map(attempt(store.saveSettings(input.projectId, input.expectedGeneration, input.modelSelection, input.monitoring, input.teamSettings, input.superviseAgentCreatedThreads)), (saved): ProjectSupervisorSaveOutcome | null => {
         if (saved.ok) return null;
         const cause = saved.cause;
         if (cause instanceof Error && cause.message === "invalid_team_settings") return {status: "invalid", message: "Choose a whole-number helper limit from 0 to 20.", snapshot: null};return cause instanceof Error && cause.message === "invalid_monitoring_settings" ? {status: "invalid", message: "Use an interval of 1–2 minutes and an activity threshold of 3–100, both whole numbers.", snapshot: null} : {status: "conflict", message: "Project Supervisor settings changed. Refresh before saving again.", snapshot: null};
@@ -1415,12 +1417,15 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
         }
         const preparing = current;
         const message = source.messages.find(item => item.id === preparing.sourceMessageId)!;
-        // the earlier unresolved requests stay context; only genuine visible user messages of this main are carried
+        const sourceRun = source.runs.find(item => item.id === preparing.sourceRunId);
+        const requesters = yield* requesterPolicy(preparing.projectId);
+        // an agent request is introduced to the Supervisor as the launching agent's, never as the human's
+        const requester = sourceRun ? taskRequester(source, sourceRun, message, requesters) : null;
+        // the earlier unresolved requests stay context; only genuine visible requests of this main's permitted requesters are carried
         const earlierMessages = (preparing.contextMessageIds ?? []).flatMap(id => {
-          const earlier = source.messages.find(item => item.id === id && item.threadId === preparing.threadId && item.role === "user" && item.createdBy === "user" &&
-            !item.streaming && (item.creationSource === "web" || item.creationSource === "mobile") && !item.senderThreadId && !item.scheduledTaskId && !item.source);
+          const earlier = source.messages.find(item => item.id === id && item.threadId === preparing.threadId);
           const run = earlier?.runId ? source.runs.find(item => item.id === earlier.runId) : undefined;
-          return earlier && run && nativeUserMessageVisible(source, run, earlier) ? [{messageId: earlier.id, text: earlier.text}] : [];
+          return earlier && run && taskRequester(source, run, earlier, requesters) ? [{messageId: earlier.id, text: earlier.text}] : [];
         });
         const reader = yield* scope.workflowEditingEnabled(preparing.projectId, preparing.threadId, "status");
         // the root's first message carries its concise standing role once, so no separate initialization turn is needed
@@ -1430,6 +1435,7 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
         // the request quotes its attempt: the attempt key pins the binding generation, the task, its source revision and this exact text
         const build = (attemptId: string) => {
           const request = prepareWorkflowRequest(preparing.threadId, preparing.sourceMessageId, message.text, loadedDefinitions, {earlierMessages,
+            ...(requester?.kind === "agent" ? {requester: {kind: "agent" as const, threadId: requester.threadId}} : {}),
             ...(reader ? {reader: {supervisorThreadId: owner.threadId, bindingGeneration: owner.generation}} : {}),
             submission: {supervisorThreadId: owner.threadId, bindingGeneration: owner.generation, taskId: preparing.id, attemptId,
               sourcePin: interpretationSourcePin(preparing), startVerdict}});
@@ -1555,8 +1561,12 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
       return;
     }
     // an explicit Enable supervises the chat's next request: a request written while supervision was stopped is not interpreted
-    const task = taskSource(main, Math.max(baseline, previous?.sourceOrdinal ?? 0), yield* store.chatEnabledAt(thread.id));
-    if (!task) {
+    const task = taskSource(main, Math.max(baseline, previous?.sourceOrdinal ?? 0), yield* store.chatEnabledAt(thread.id), yield* requesterPolicy(registered.id));
+    // an agent request needs its launching conversation active in T3 and outside every Supervisor's lineage, so no Supervisor or
+    // helper, nor anything they delegated, can open supervised work
+    const requester = task?.requester;
+    const launcher = requester?.kind === "agent" ? catalog.threads.find(item => item.id === requester.threadId) : undefined;
+    if (!task || requester?.kind === "agent" && (!launcher || isSupervisorThread(scope.owned, launcher))) {
       if (!active(main) && typeof thread.latestRunId === "string") yield* examine(thread.latestRunId);
       return;
     }
@@ -1570,6 +1580,8 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
     // the scope and identity rechecks and the new task run as one admission section
     yield* admitted(() => Effect.gen(function* () {
       if (!(yield* projectEnabled(registered.id, thread.id))) return;
+      // an agent request stays a task source only while the project still supervises agent-created conversations
+      if (!taskRequester(main, task.run, task.message, yield* requesterPolicy(registered.id))) return;
       // a task another discovery wrote for this chat since this one read it is never replaced: queued or in-flight work keeps its identity
       if (((yield* store.task(thread.id))?.id ?? null) !== (previous?.id ?? null)) return;
       // an earlier unresolved request carries forward only from the current supervision epoch: above the activation

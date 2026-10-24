@@ -5,14 +5,15 @@ import { Context, Deferred, Effect, Layer, Schema } from "effect";
 import { TestClock } from "effect/testing";
 import { effectiveIndex, makeDefinitionFixture, projectIndex, stepSource } from "./project-definitions-fixture.js";
 import { defaultSupervisorModel } from "../src/project-supervisor-store.js";
-import { ProjectSupervisorSnapshot } from "../src/project-supervisor-contract.js";
+import { ProjectSupervisorSave, ProjectSupervisorSnapshot } from "../src/project-supervisor-contract.js";
 import { SUPERVISOR_SETTLE_QUIET_MS } from "../src/supervisor-lifecycle.js";
 import { makeT3Client, T3Client, T3TransportError } from "../src/t3.js";
 import { taskFields } from "./support/interpretation-submit.js";
+import { projectRequesterPolicy, taskRequester } from "../src/task-requester.js";
 import {
   activationSequence, addPendingHelperCheckin, baseTime, completeSupervisorRequest, day, emptySupervisorProjection, interruptHungPass,
   makeFixture, makeSourceProjection, markRootMissing, missingDefinitions, noProjectFixture, registerReadyHelper, reserveReadyBinding,
-  retryInput, startIntake, workflowResult, workflowSnapshot, type Turn,
+  retryInput, startIntake, workflowResult, workflowSnapshot, type PsFixture, type Turn,
 } from "./support/ps-fixture.js";
 
 it.effect("scopeSnapshot returns current binding coordinates and verified descendant lineage across project mirrors", () => Effect.gen(function* () {
@@ -222,6 +223,147 @@ it.effect("a web-originated message with non-user authorship is not treated as a
   assert.equal(yield* fixture.store.task("source-thread"), null);
   assert.equal(((yield* fixture.store.bindings()).find(binding => binding.projectId === "project-a") ?? null), null);
   assert.equal(fixture.operations.filter((call) => call.tag === "orchestration.launchThread").length, 0);
+}));
+
+// an ordinary main launched through T3's MCP server: its shell carries creationSource mcp and an independent root lineage
+const addAgentMainTurn = (fixture: PsFixture, threadId: string, projectId: string, turn: Turn) => {
+  fixture.addTurn(threadId, projectId, turn);
+  const main = fixture.projections.get(threadId)!;
+  main.thread = {...main.thread, creationSource: "mcp", lineage: {parentThreadId: null, relationshipToParent: null, rootThreadId: threadId}};
+};
+const agentTurn = (id: string, sequence: number, text: string, at: number, senderThreadId = "coordinator"): Turn =>
+  ({id, sequence, text, createdBy: "agent", creationSource: "mcp", senderThreadId, createdAt: new Date(at).toISOString()});
+const enableAgentCreated = (supervisor: Effect.Success<ReturnType<PsFixture["makeSupervisor"]>>, projectId: string, enabled: boolean) => Effect.gen(function* () {
+  const current = (yield* supervisor.snapshot(projectId, null)).settings;
+  return yield* supervisor.save({projectId, expectedGeneration: current.generation, modelSelection: current.modelSelection, superviseAgentCreatedThreads: enabled});
+});
+
+it.effect("agent-created supervision is off per project by default, persists through restart and keeps its enable time", () => Effect.gen(function* () {
+  const fixture = yield* makeFixture([]);
+  const supervisor = yield* fixture.makeSupervisor();
+  for (const projectId of ["project-a", "project-b"]) {
+    assert.equal((yield* supervisor.snapshot(projectId, null)).settings.superviseAgentCreatedThreads, false);
+    assert.equal((yield* fixture.store.settings(projectId)).agentCreatedThreadsEnabledAt, null);
+  }
+  const saved = yield* enableAgentCreated(supervisor, "project-a", true);
+  assert.equal(saved.status, "saved");
+  // the dashboard API carries the field through the contract in both directions
+  const decoded = Schema.decodeUnknownSync(ProjectSupervisorSnapshot)(JSON.parse(JSON.stringify(saved.snapshot)));
+  assert.equal(decoded.settings.superviseAgentCreatedThreads, true);
+  assert.equal(Schema.decodeUnknownSync(ProjectSupervisorSave)({projectId: "project-a", expectedGeneration: 1, modelSelection: defaultSupervisorModel,
+    superviseAgentCreatedThreads: true}).superviseAgentCreatedThreads, true);
+  const enabledAt = (yield* fixture.store.settings("project-a")).agentCreatedThreadsEnabledAt;
+  assert.equal(enabledAt, fixture.now());
+  assert.equal((yield* supervisor.snapshot("project-b", null)).settings.superviseAgentCreatedThreads, false, "another project is unchanged");
+
+  yield* TestClock.adjust("1 minute");
+  yield* fixture.restart;
+  const restarted = yield* fixture.makeSupervisor();
+  assert.equal((yield* restarted.snapshot("project-a", null)).settings.superviseAgentCreatedThreads, true);
+  // a save that omits the field, such as a model or helper-limit change, keeps it and its original enable time
+  const current = yield* fixture.store.settings("project-a");
+  yield* fixture.store.saveSettings("project-a", current.generation, current.modelSelection, current.monitoring, {maxHelpersPerRoot: 2});
+  assert.equal((yield* fixture.store.settings("project-a")).agentCreatedThreadsEnabledAt, enabledAt);
+  assert.equal((yield* enableAgentCreated(restarted, "project-a", true)).status, "saved");
+  assert.equal((yield* fixture.store.settings("project-a")).agentCreatedThreadsEnabledAt, enabledAt, "saving it on again is not a new enable");
+  assert.equal((yield* enableAgentCreated(restarted, "project-a", false)).status, "saved");
+  assert.equal((yield* restarted.snapshot("project-a", null)).settings.superviseAgentCreatedThreads, false);
+  assert.equal((yield* fixture.store.settings("project-a")).agentCreatedThreadsEnabledAt, null);
+  assert.equal((yield* enableAgentCreated(restarted, "project-a", true)).status, "saved");
+  assert.equal((yield* fixture.store.settings("project-a")).agentCreatedThreadsEnabledAt, fixture.now(), "turning it on again moves the boundary");
+}));
+
+it.effect("an agent-launched main is silent while off and, once enabled, its launching agent's new request is interpreted", () => Effect.gen(function* () {
+  const fixture = yield* makeFixture([{threadId: "coordinator", projectId: "project-b", turns: []}]);
+  const supervisor = yield* fixture.makeSupervisor();
+  yield* supervisor.runOnce;
+  addAgentMainTurn(fixture, "early-main", "project-a", agentTurn("early-task", 11, "Implement the invoice export", fixture.now()));
+  yield* supervisor.runOnce;
+  assert.equal(yield* fixture.store.task("early-main"), null, "off by default: an agent's request is not a task");
+  assert.equal(fixture.operations.length, 0, "nothing is launched or sent while off");
+
+  yield* TestClock.adjust("1 minute");
+  assert.equal((yield* enableAgentCreated(supervisor, "project-a", true)).status, "saved");
+  yield* supervisor.runOnce;
+  assert.equal(yield* fixture.store.task("early-main"), null, "an agent request written before the setting was turned on is not backlog");
+  assert.equal(fixture.operations.length, 0);
+
+  yield* TestClock.adjust("1 second");
+  addAgentMainTurn(fixture, "agent-main", "project-a", agentTurn("agent-task", 12, "Implement the CSV export with tests", fixture.now()));
+  yield* supervisor.runOnce;
+  const task = yield* fixture.store.task("agent-main");
+  assert.equal(task?.sourceMessageId, "agent-task");
+  assert.equal(task?.status, "waiting");
+  const binding = (yield* fixture.store.bindings()).find(value => value.mainThreadId === "agent-main");
+  assert.ok(binding);
+  const sent = fixture.operations.filter(call => call.payload.type === "message.dispatch" && call.payload.threadId === binding.threadId);
+  assert.equal(sent.length, 1);
+  const text = String(sent[0]!.payload.text);
+  assert.match(text, /"requestedBy":\{"kind":"launching_agent","threadId":"coordinator"\}/u, "the request stays attributed to the launching agent");
+  assert.match(text, /Implement the CSV export with tests/u);
+  assert.equal(sent[0]!.payload.createdBy, "system", "the service's own request is not relabelled");
+
+  assert.equal((yield* supervisor.submit(task!, taskFields(task!, "Implement the CSV export", "The launching agent asks for a repository change."))).status, "submitted");
+  completeSupervisorRequest(fixture.projections.get(binding.threadId)!, task!.messageId, "Submitted the interpretation.");
+  yield* supervisor.runOnce;
+  assert.equal((yield* fixture.store.task("agent-main"))?.status, "inferred", "the source stays current through finalization");
+  assert.equal((yield* fixture.store.task("agent-main"))?.objective, "Implement the CSV export");
+  assert.equal(yield* fixture.store.task("early-main"), null);
+}));
+
+it.effect("agent-created supervision fences Supervisor, delegated, scheduled, service, foreign and unlaunched sources", () => Effect.gen(function* () {
+  const fixture = yield* makeFixture([{threadId: "coordinator", projectId: "project-b", turns: []}, {threadId: "other-agent", projectId: "project-b", turns: []},
+    // a human-created main whose opening predates activation
+    {threadId: "human-main", projectId: "project-a", turns: [{id: "human-opening", sequence: 9, text: "Look at the logs"}]}]);
+  const supervisor = yield* fixture.makeSupervisor();
+  yield* supervisor.runOnce;
+  assert.equal((yield* enableAgentCreated(supervisor, "project-a", true)).status, "saved");
+  // a coordinator conversation that a Supervisor root delegated, and the root's own conversation
+  const delegate = makeSourceProjection("supervisor-delegate", "project-b", []);
+  delegate.thread.lineage = {parentThreadId: "supervisor-root:x", relationshipToParent: "subagent", rootThreadId: "supervisor-root:x"};
+  fixture.projections.set(delegate.thread.id, delegate);
+  fixture.projections.set("supervisor-root:x", makeSourceProjection("supervisor-root:x", "project-b", []));
+  yield* TestClock.adjust("1 second");
+  const at = fixture.now();
+  addAgentMainTurn(fixture, "from-supervisor", "project-a", agentTurn("supervisor-request", 11, "Implement the export", at, "supervisor-root:x"));
+  addAgentMainTurn(fixture, "from-delegate", "project-a", agentTurn("delegate-request", 11, "Implement the export", at, "supervisor-delegate"));
+  addAgentMainTurn(fixture, "scheduled", "project-a", {...agentTurn("scheduled-request", 11, "Implement the export", at), scheduledTaskId: "nightly"});
+  addAgentMainTurn(fixture, "service", "project-a", {...agentTurn("service-request", 11, "Implement the export", at), creationSource: "server"});
+  addAgentMainTurn(fixture, "vanished-launcher", "project-a", agentTurn("vanished-request", 11, "Implement the export", at, "archived-coordinator"));
+  // a later request from an agent other than the one that launched the main (whose own opening came before the enable)
+  addAgentMainTurn(fixture, "foreign", "project-a", agentTurn("foreign-opening", 11, "Earlier opening", at - 120_000));
+  addAgentMainTurn(fixture, "foreign", "project-a", agentTurn("foreign-request", 12, "Implement the export", at, "other-agent"));
+  // a delegated child task of an ordinary main, and an agent writing into the human-created main
+  fixture.addTurn("child", "project-a", agentTurn("child-request", 11, "Implement the export", at, "parent-main"));
+  const child = fixture.projections.get("child")!;
+  child.thread = {...child.thread, creationSource: "mcp", lineage: {parentThreadId: "parent-main", relationshipToParent: "subagent", rootThreadId: "parent-main"}};
+  fixture.projections.set("parent-main", makeSourceProjection("parent-main", "project-a", []));
+  fixture.addTurn("human-main", "project-a", agentTurn("relayed-request", 12, "Implement the export", at));
+  // an agent's opening in a conversation whose native shell is not marked as created through T3's MCP server
+  fixture.addTurn("unmarked", "project-a", agentTurn("unmarked-request", 11, "Implement the export", at));
+  // the positive control: the launching agent's request in its own ordinary main
+  addAgentMainTurn(fixture, "launched", "project-a", agentTurn("launched-request", 11, "Implement the export", at));
+  for (let pass = 0; pass < 3; pass += 1) yield* supervisor.runOnce;
+
+  for (const threadId of ["from-supervisor", "from-delegate", "scheduled", "service", "vanished-launcher", "foreign", "child", "human-main", "unmarked"])
+    assert.equal(yield* fixture.store.task(threadId), null, threadId);
+  assert.equal((yield* fixture.store.task("launched"))?.sourceMessageId, "launched-request");
+  assert.deepEqual((yield* fixture.store.bindings()).map(binding => binding.mainThreadId), ["launched"], "only the permitted main gets a Supervisor");
+}));
+
+it.effect("enabling agent-created supervision leaves the human task flow and its envelope unchanged", () => Effect.gen(function* () {
+  const fixture = yield* makeFixture([]);
+  const supervisor = yield* fixture.makeSupervisor();
+  yield* supervisor.runOnce;
+  assert.equal((yield* enableAgentCreated(supervisor, "project-a", true)).status, "saved");
+  fixture.addTurn("human-main", "project-a", {id: "human-task", sequence: 11, text: "Build the invoice export"});
+  yield* supervisor.runOnce;
+  const task = yield* fixture.store.task("human-main");
+  assert.equal(task?.sourceMessageId, "human-task", "a human request written before the enable still counts");
+  assert.equal(task?.status, "waiting");
+  const sent = fixture.operations.filter(call => call.payload.type === "message.dispatch" && call.payload.threadId === task?.supervisorThreadId);
+  assert.equal(sent.length, 1);
+  assert.doesNotMatch(String(sent[0]!.payload.text), /requestedBy/u, "a human request carries no agent attribution");
 }));
 
 it.effect("a missing baseline run anchor fails closed instead of interpreting later projection history", () => Effect.gen(function* () {
@@ -1239,6 +1381,24 @@ it.effect("Start rejects nonhuman, wrong-turn, project and stale sources, and ke
   const id = (yield* f.fixture.store.start("manual"))!.taskId;
   assert.equal((yield* f.supervisor.startSupervision(args, {runId: "run-request-start"})).status, "pending");
   assert.equal((yield* f.fixture.store.start("manual"))!.taskId, id);
+}));
+
+it.effect("Start stays human-only when the project supervises agent-created conversations", () => Effect.gen(function* () {
+  const f = yield* noProjectFixture();
+  const settings = yield* f.fixture.store.settings("project-a");
+  yield* f.fixture.store.saveSettings("project-a", settings.generation, settings.modelSelection, undefined, undefined, true);
+  yield* TestClock.adjust("2 seconds");
+  const main = f.fixture.projections.get("manual")!;
+  main.thread = {...main.thread, creationSource: "mcp", lineage: {parentThreadId: null, relationshipToParent: null, rootThreadId: "manual"}};
+  const request = main.messages[0]!;
+  // the launching agent's request, written after the enable, is a permitted task requester but never Start authority
+  Object.assign(request, {createdBy: "agent", creationSource: "mcp", senderThreadId: "other", createdAt: new Date(f.fixture.now() - 1000).toISOString()});
+  assert.equal(taskRequester(main, main.runs[0]!, request, yield* projectRequesterPolicy(f.fixture.store, "project-a"))?.kind, "agent");
+  const args = {callerThreadId: "manual", userMessageId: "request-start", operationId: "agent-start"};
+  assert.equal((yield* f.supervisor.startSupervision(args, {runId: "run-request-start"})).status, "denied");
+  assert.equal(yield* f.fixture.store.start("manual"), null, "no permission is reserved for an agent request");
+  Object.assign(request, {createdBy: "user", creationSource: "web", senderThreadId: undefined});
+  assert.equal((yield* f.supervisor.startSupervision({...args, operationId: "human-start"}, {runId: "run-request-start"})).status, "pending");
 }));
 
 it.effect("Retry reaches a started No Project chat and still reconciles Stop notice/settlement in ordinary projects", () => Effect.gen(function* () {

@@ -8,7 +8,7 @@ Projects has Conversations, Definitions and Project settings. Open a conversatio
 - Plan & agreement shows proposals, acceptance, requirements and definition-change review.
 - Supervision shows the bound Supervisor, team, assignments, monitoring details and explicit access recovery. Stop/Enable supervision is scoped to the selected chat and also available in Overview.
 - Definitions shows read validity, effective requirements, reusable steps/workflows, collapsible raw sources and the local project.yaml editor.
-- Project settings contains the supervision switch, first setup, model defaults, monitoring defaults and helper limit. It works without a selected conversation.
+- Project settings contains the supervision switch, first setup, model defaults, monitoring defaults, helper limit and the off-by-default **Supervise conversations created by agents** checkbox. It works without a selected conversation. That checkbox lets the agent that launched an ordinary conversation through T3's MCP server have its later requests there interpreted and negotiated, still attributed to that agent; Supervisor conversations, helpers and delegated child tasks are never included, and Start, Stop and definition approval remain human-only.
 
 Instance Settings contains the master switch, global definitions, exclusions and
 connection information. Advanced setup help is collapsed. Guide explains the file

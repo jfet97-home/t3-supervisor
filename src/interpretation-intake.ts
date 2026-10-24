@@ -1,6 +1,6 @@
 import { Effect, Exit, Schema } from "effect";
 import type { GuidanceDb } from "./db.js";
-import { nativeUserMessageVisible, timestampMs } from "./domain.js";
+import { timestampMs } from "./domain.js";
 import { GuidanceStoreError, guidanceSql, type SupervisionStoreError } from "./guidance-sql.js";
 import { fingerprint } from "./guidance-store.js";
 import { interpretationPlanDigest, type InterpretationSubmissionEvidence } from "./interpretation-evidence.js";
@@ -18,6 +18,7 @@ import {
 import { interpretationLimits } from "./supervisor-workflow.js";
 import { isSupervisorThread, type BindingRecord, type ProjectSupervisorStore, type SupervisionStartRecord, type TaskRecord } from "./project-supervisor-store.js";
 import type { GateGuard, SupervisionScope } from "./supervision-gate.js";
+import { projectRequesterPolicy, taskRequester, type TaskRequesterPolicy } from "./task-requester.js";
 import type { Projection, ThreadInfo } from "./types.js";
 import { canonicalJson, isRecord, workflowRequestHash, workflowToolInputMaxBytes } from "./workflow-write-evidence.js";
 import type { WorkflowOwner } from "./workflow-state-contract.js";
@@ -117,6 +118,8 @@ const unavailableThread = (thread: ThreadInfo) => Boolean(thread.archivedAt || t
 // the source, boundary and Start checks of an interpretation over the supervision store and the scope predicates: the dispatch,
 // the intake commit and the finalization read them inside their admission sections (moved from the project supervisor)
 export const interpretationChecks = (store: ProjectSupervisorStore["Service"], scope: SupervisionScope) => {
+  // the requesters whose messages may source a task of the project: its human, and with the project setting a launching agent
+  const requesterPolicy = (projectId: string): Effect.Effect<TaskRequesterPolicy, SupervisionStoreError> => projectRequesterPolicy(store, projectId);
   // the activation floor of a main: its activation boundary, raised in No Project mode to its mode boundary anchor
   const sourceFloor = (threadId: string, main: Projection): Effect.Effect<number | null, SupervisionStoreError> => Effect.gen(function* () {
     const base = yield* store.baselineOrdinal(threadId, main);
@@ -140,17 +143,17 @@ export const interpretationChecks = (store: ProjectSupervisorStore["Service"], s
     return floor === null || job.sourceOrdinal <= floor ||
       enabledAt !== null && !((timestampMs(main.messages.find(item => item.id === job.sourceMessageId)?.createdAt) ?? 0) > enabledAt);
   });
-  // the task's pinned source is still the genuine visible human message of its main, and the main is still bound to its root
+  // the task's pinned source is still a genuine visible request of a permitted requester in its main, and the main is still bound
+  // to its root; turning the agent-created setting off makes an agent-sourced task no longer current
   const currentSource = (job: TaskRecord, main: Projection): Effect.Effect<boolean, SupervisionStoreError> => Effect.gen(function* () {
     const run = main.runs.find(item => item.id === job.sourceRunId && item.ordinal === job.sourceOrdinal);
     const message = main.messages.find(item => item.id === job.sourceMessageId && item.runId === job.sourceRunId);
     return main.thread.id === job.threadId && main.thread.projectId === job.projectId && !unavailableThread(main.thread) &&
       !isSupervisorThread(scope.owned, main.thread) && (!(yield* scope.supervisionStopped(job.threadId)) || (yield* scope.validPendingStartFor(job.threadId))) &&
-      Boolean(message && run && nativeUserMessageVisible(main, run, message) && message.role === "user" && message.streaming === false && message.createdBy === "user" &&
-        (message.creationSource === "web" || message.creationSource === "mobile") && !message.senderThreadId && !message.scheduledTaskId && !message.source &&
-        fingerprint(message.text) === job.sourceHash) && (yield* store.binding(job.projectId, job.threadId))?.threadId === job.supervisorThreadId;
+      Boolean(message && run && taskRequester(main, run, message, yield* requesterPolicy(job.projectId)) && fingerprint(message.text) === job.sourceHash) &&
+      (yield* store.binding(job.projectId, job.threadId))?.threadId === job.supervisorThreadId;
   });
-  return {sourceFloor, pinnedStart, beforeBoundary, currentSource};
+  return {requesterPolicy, sourceFloor, pinnedStart, beforeBoundary, currentSource};
 };
 export type InterpretationChecks = ReturnType<typeof interpretationChecks>;
 

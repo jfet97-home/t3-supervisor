@@ -350,7 +350,8 @@ export const ProjectSupervisorSnapshot = Schema.Struct({
   projectId: Schema.String,
   mainThreadId: Schema.NullOr(Schema.String),
   modelApplication: Schema.NullOr(Schema.Struct({pending: Schema.Boolean, attempts: Schema.Number, message: Schema.NullOr(Schema.String)})),
-  settings: Schema.Struct({generation: Schema.Number, modelSelection: ModelSelection, pending: Schema.Boolean, monitoring: Schema.optionalKey(MonitoringSettings), teamSettings: Schema.optionalKey(SupervisorTeamSettings)}),
+  settings: Schema.Struct({generation: Schema.Number, modelSelection: ModelSelection, pending: Schema.Boolean, monitoring: Schema.optionalKey(MonitoringSettings), teamSettings: Schema.optionalKey(SupervisorTeamSettings),
+    superviseAgentCreatedThreads: Schema.optionalKey(Schema.Boolean)}),
   binding: Schema.NullOr(ProjectSupervisorBinding),
   modelSelection: Schema.NullOr(ModelSelection),
   models: Schema.Array(SupervisorModel),
@@ -383,6 +384,8 @@ export const ProjectSupervisorSave = Schema.Struct({
   modelSelection: ModelSelection,
   monitoring: Schema.optionalKey(MonitoringSettings),
   teamSettings: Schema.optionalKey(SupervisorTeamSettings),
+  /** Whether ordinary conversations launched by an agent are eligible for supervision of the launching agent's requests; absent keeps the saved value. */
+  superviseAgentCreatedThreads: Schema.optionalKey(Schema.Boolean),
 });
 export type ProjectSupervisorSaveInput = typeof ProjectSupervisorSave.Type;
 export const ProjectSupervisorRetry = Schema.Struct({
