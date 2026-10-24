@@ -64,6 +64,19 @@ npm run build
 
 `npm test` runs the [Vitest](https://vitest.dev) suites; Effect code is tested with `@effect/vitest`.
 
+GitHub CI runs lint, type checking and build once, the runner harness once, and
+the complete main suite across four native Vitest shards on separate runners.
+Each shard uses at most two workers and keeps the same isolation, leak gate,
+per-test bounds and 20-minute watchdog. The `check` status requires every job
+to pass, including every shard; failed, cancelled or skipped jobs fail the gate.
+The existing npm download cache is reused; test results are never cached.
+
+While editing, run focused files through the watchdog, for example
+`npm test -- test/config.test.ts`. Leave the final complete main and harness
+suites to GitHub CI. To reproduce one CI shard locally, use
+`npm test -- --shard=1/4 --maxWorkers=2`. Native sharding assigns complete files
+deterministically, so all four shard indices are required for full coverage.
+
 Read [AGENTS.md](AGENTS.md) and the local knowledge base before changing the project.
 
 ## Node security runtime
