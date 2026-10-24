@@ -653,6 +653,7 @@ const endpointGolden = [
   ["saveProjectSupervisor", "POST", "/api/guidance/project-supervisor"],
   ["retryProjectSupervisor", "POST", "/api/guidance/project-supervisor/retry"],
   ["chatSupervision", "POST", "/api/guidance/project-supervisor/chat-supervision"],
+  ["projectCheckouts", "GET", "/api/guidance/project-checkouts"],
   ["projectConfiguration", "GET", "/api/guidance/project-configuration"],
   ["saveProjectConfiguration", "POST", "/api/guidance/project-configuration"],
   ["threadPolicy", "POST", "/api/guidance/thread-policy"],

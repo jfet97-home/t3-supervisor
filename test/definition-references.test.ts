@@ -131,8 +131,10 @@ it.effect("reference lists survive model context, canonical plans and strict rec
 
 it.effect("read-only references escape text and appear on reusable, workflow and local definition views", () => Effect.gen(function* () {
   const {definitions} = yield* fixture();
-  const html = renderToStaticMarkup(createElement(DefinitionsContent, {definitions}));
+  const html = renderToStaticMarkup(createElement(DefinitionsContent, {definitions, selectedDefinition: "workflow:delivery"}));
   for (const path of [...paths, "docs/delivery.md", "src/local.ts"]) assert(html.includes(path));
+  const reusable = renderToStaticMarkup(createElement(DefinitionsContent, {definitions, selectedDefinition: "step:review"}));
+  for (const path of paths) assert(reusable.includes(path));
   assert.match(html, /Shown read-only; file contents are not loaded or verified/u);
   const escaped = renderToStaticMarkup(createElement(DefinitionReferences, {references: ["docs/<script>alert(1)</script>.md"]}));
   assert(!escaped.includes("<script>"));
@@ -270,7 +272,7 @@ it.effect("shared and inline skill references flow through canonical plans and f
   }
   assert(f.calls.every(call => call.path.startsWith(".t3-supervisor")), "targets and host skill roots are never probed");
   assert.deepEqual(f.writes, []);
-  const html = renderToStaticMarkup(createElement(DefinitionsContent, {definitions}));
+  const html = renderToStaticMarkup(createElement(DefinitionsContent, {definitions, selectedDefinition: `workflow:${shared.id}`}));
   for (const label of ["References", "Skills", ".claude/skills/project-testing/SKILL.md", "effect-v4-development", "plugin:review"]) assert(html.includes(label));
   const firstRevision = definitions.revision;
   f.addFile(f.threadRoot!, ".t3-supervisor/steps/review.md", step(mixedReferences, ["different"]));

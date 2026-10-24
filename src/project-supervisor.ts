@@ -4,7 +4,7 @@ import { preserveOccurrenceIds, deriveConversationEngagement, requesterSources, 
 import { Cause, Clock, Context, Data, Deferred, Effect, Exit, FiberMap, HashMap, Layer, Option, Ref, Schedule, Schema } from "effect";
 import { resolve } from "node:path";
 import { assessmentForTask, workflowAssessment } from "./workflow-assessment.js";
-import { buildDashboardOverview, type DashboardOverviewInfo } from "./dashboard-overview.js";
+import { buildDashboardOverview, type DashboardOverviewInfo, type OverviewPage } from "./dashboard-overview.js";
 import { readTeamViewData, supervisorTeamView } from "./supervisor-team-view.js";
 import { mainConversation, resolveSupervisorScope, supervisorScopeKey } from "./supervisor-scope.js";
 import { fingerprint } from "./guidance-store.js";
@@ -167,7 +167,7 @@ const effectiveControl = (store: ProjectSupervisorStore["Service"], scope: Super
 type CatalogValue = Effect.Success<ReturnType<Store["Service"]["catalog"]>>;
 
 /** The dashboard overview from retained bindings, tasks and controls; it makes no native call and writes nothing. */
-export const readDashboardOverview = (input: {readonly page: {offset: number; limit: number}; readonly catalog: CatalogValue; readonly available: boolean; readonly observedAt: number}):
+export const readDashboardOverview = (input: {readonly page: OverviewPage; readonly catalog: CatalogValue; readonly available: boolean; readonly observedAt: number}):
   Effect.Effect<DashboardOverviewInfo, SupervisionStoreError, GuidanceDb | ProjectSupervisorStore | ThreadPolicyStore | SupervisionScopeService | SupervisorConversation> => Effect.gen(function* () {
   const store = yield* ProjectSupervisorStore;
   const policy = yield* ThreadPolicyStore;
@@ -231,7 +231,7 @@ export interface ProjectSupervisorShape {
   readonly globalDefinitionsControl: Effect.Effect<GlobalDefinitionsControlInfo, ProjectSupervisorStoreError>;
   readonly setupOptions: (projectId: string) => Effect.Effect<SetupOptions, StoreError | ProjectUnavailable | SupervisionStoreError>;
   readonly candidates: (query?: string, purpose?: "start" | "exclude") => Effect.Effect<Candidates, StoreError | SupervisionStoreError>;
-  readonly overview: (page: {offset: number; limit: number}) => Effect.Effect<DashboardOverviewInfo, StoreError | SupervisionStoreError>;
+  readonly overview: (page: OverviewPage) => Effect.Effect<DashboardOverviewInfo, StoreError | SupervisionStoreError>;
   readonly snapshot: (projectId: string, mainThreadId?: string | null) => Effect.Effect<ProjectSupervisorInfo, StoreError | ProjectUnavailable | InvalidMainConversation | SupervisionStoreError>;
   // writes, each committing in an admission section after its last read
   readonly saveNoProjectControl: (input: NoProjectControlInput) => Effect.Effect<SaveOutcome<"saved" | "conflict" | "unavailable", Effect.Success<ReturnType<ProjectSupervisorShape["noProjectControl"]>>>, SupervisionStoreError>;
@@ -964,7 +964,7 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
       })));
     }
   });
-  const overview = (page: {offset: number; limit: number}) => Effect.gen(function* () {
+  const overview = (page: OverviewPage) => Effect.gen(function* () {
     const catalog = yield* source.catalog();
     yield* scope.rememberCatalog(catalog.projects.map(item => item.project), catalog.threads);
     const read = readDashboardOverview({page, catalog, available: store.scopeCompatible && Boolean(operate), observedAt: now()}).pipe(Effect.provideContext(readServices));

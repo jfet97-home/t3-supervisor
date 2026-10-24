@@ -1,3 +1,4 @@
+import { ProjectCheckoutInventory } from "./project-definitions-contract.js";
 import { NoProjectControl, NoProjectControlSave, NoProjectControlResult, SupervisionStart, SupervisionStartStatus, SupervisionCandidates } from "./supervisor-control-contract.js";
 import { ThreadPolicy } from "./thread-policy-contract.js";
 import { ProjectDefinitions, ProjectConfigSaveInput, ProjectConfigSaveResult } from "./project-definitions-contract.js";
@@ -100,7 +101,7 @@ export const SupervisorApi = HttpApi.make("supervisor").add(
     .add(
       HttpApiEndpoint.get("snapshot", "/snapshot", { success: Snapshot }),
       HttpApiEndpoint.get("dashboardOverview", "/dashboard-overview", {
-        query: {offset: Schema.optional(Text), limit: Schema.optional(Text)}, success: DashboardOverview, error: UiError,
+        query: {offset: Schema.optional(Text), limit: Schema.optional(Text), q: Schema.optional(Text), projectId: Schema.optional(Text), filter: Schema.optional(Schema.Literals(["all", "attention", "active", "stopped"])), mainThreadId: Schema.optional(Schema.ArrayEnsure(Text))}, success: DashboardOverview, error: UiError,
       }),
       HttpApiEndpoint.get("noProjectControl", "/no-project-control", {success: NoProjectControl, error: UiError}),
       HttpApiEndpoint.post("saveNoProjectControl", "/no-project-control", {payload: NoProjectControlSave, success: NoProjectControlResult, error: UiError}),
@@ -148,6 +149,7 @@ export const SupervisorApi = HttpApi.make("supervisor").add(
       HttpApiEndpoint.post("chatSupervision", "/project-supervisor/chat-supervision", {
         payload: ProjectSupervisorChatSupervision, success: ProjectSupervisorSaveResult, error: UiError,
       }),
+      HttpApiEndpoint.get("projectCheckouts", "/project-checkouts", {query: {projectId: Schema.String}, success: ProjectCheckoutInventory, error: UiError}),
       HttpApiEndpoint.get("projectConfiguration", "/project-configuration", {
         query: {projectId: Text, threadId: Schema.optional(Text)},
         success: ProjectDefinitions,

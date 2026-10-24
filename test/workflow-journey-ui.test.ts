@@ -201,7 +201,7 @@ it("a planned workflow opens to reveal active descendants without borrowing thei
   for (const status of ["underway", "needs_attention"] as const) {
     const node = {...branch, status: "planned" as const, plan: {...branch.plan, nodes: branch.plan.nodes.map(child => "nodes" in child ? child : {...child, status})}};
     const shown = renderToStaticMarkup(createElement(PlanJourney, {node, mode: "live"}));
-    assert.match(shown, /state-planned"><details class="journey-step" open=""/);
+    assert.match(shown, /state-planned"><details open="" class="disclosure disclosure-entity journey-step"/);
     assert.match(shown, /Review<small>Workflow<\/small><\/span><span class="step-state">Planned/);
     const accepted = renderToStaticMarkup(createElement(PlanJourney, {node, mode: "agreed"}));
     assert.doesNotMatch(accepted, /open=""|aria-current="step"/);

@@ -9,7 +9,7 @@ import type { FreshGitProbe } from "./git-probe.js";
 import { ProjectFileError, type FileFailure, type ProjectCommitter, type ProjectFiles, type ProjectWriter, type ReadFileResult } from "./project-files.js";
 import {catalogEntryId, DefinitionNode, definitionIdPattern, normalizeProjectConfiguration, projectConfigurationError, ProjectConfigurationInfo, workflowDefinitionExpansionLimits,
   type DefinitionCatalogEntry, type DefinitionFileInfo, type DefinitionStepInfo, type DefinitionWorkflowInfo, type EffectiveConfigurationInfo,
-  type ProjectDefinitionSnapshot} from "./project-definitions-contract.js";
+  type ProjectDefinitionSnapshot, type ProjectCheckoutInventoryInfo} from "./project-definitions-contract.js";
 
 const MAX_FILES = 100;
 const MAX_FILE_BYTES = 64 * 1024;
@@ -22,7 +22,7 @@ type DefinitionOrigin = "global" | "project";
 type DefinitionScopeStatus = "ready" | "missing" | "invalid" | "permission_required" | "unavailable";
 export type DefinitionPresence = {status: "present" | "missing" | "unavailable"; message?: string};
 export type GlobalDefinitionPresence = DefinitionPresence & {path: string};
-export type DefinitionCheckoutTarget = {origin: "project"; threadId: string | null; workspaceRoot: string; branch: string | null; isGitRepository: boolean};
+export type DefinitionCheckoutTarget = {origin: "project"; threadId: string | null; workspaceRoot: string; branch: string | null; isGitRepository: boolean; members: Array<{threadId: string; title: string}>};
 export type ProjectDefinitionSetupInput = {origin: "project"; action: "create" | "create_and_commit"; expectedWorkspaceRoot: string; expectedBranch: string | null};
 export type ProjectDefinitionSetupOutcome = {status: "created" | "committed" | "unchanged" | "conflict" | "stale" | "permission_required" | "unavailable" | "uncertain"; workspaceRoot: string | null; branch: string | null; path: string; message: string};
 export type ProjectDefinitionGlobalSetupOutcome = {status: "created" | "unchanged" | "conflict" | "permission_required" | "unavailable" | "uncertain"; workspaceRoot: string; branch: null; path: string; message: string};
@@ -58,7 +58,7 @@ interface DefinitionScopeRead extends MutableScopeSnapshot {
 export class DefinitionSourceFailure extends Data.TaggedError("DefinitionSourceFailure")<{readonly error: unknown}> {}
 // a source exceeded the read bounds; its fixed message becomes the source diagnostic
 export class DefinitionReadLimit extends Schema.TaggedError<DefinitionReadLimit>()("DefinitionReadLimit", {message: Schema.String}) {}
-// checkout choices refuse the project with a fixed reason
+// strict setup choices refuse the project with a fixed reason; browsing reports independently verified targets
 export class DefinitionCheckoutUnavailable extends Schema.TaggedError<DefinitionCheckoutUnavailable>()("DefinitionCheckoutUnavailable", {
   reason: Schema.Literals(["project_unavailable", "workspace_invalid", "checkout_target_limit", "workspace_binding_unavailable"]),
 }) {}
@@ -750,34 +750,60 @@ const makeProjectDefinitions = Effect.fnUntraced(function* (sources: ProjectDefi
   const globalFingerprint: Effect.Effect<string | null> = globalRoot === null ? Effect.succeed(null)
     : Effect.suspend(() => readScope(globalRoot, "global", {value: 0, files: 0})).pipe(Effect.map(scope => fingerprintGlobalScope(scope, globalDefinitionsPath)));
 
-  const checkoutTargets = Effect.fnUntraced(function* (projectId: string) {
+  const readCheckoutTargets = Effect.fnUntraced(function* (projectId: string, partial: boolean) {
+    const issues: Array<{threadId: string | null; message: string}> = [];
     const catalog = yield* readCatalog;
     const project = catalog.projects.find(item => item.project.id === projectId && item.available);
     if (!project) return yield* new DefinitionCheckoutUnavailable({reason: "project_unavailable"});
     const projectRoot = text(project.project.workspaceRoot, 4096) && posix.isAbsolute(project.project.workspaceRoot) && !project.project.workspaceRoot.includes("\0") && !project.project.workspaceRoot.includes("\\")
       ? posix.normalize(project.project.workspaceRoot) : null;
     if (!projectRoot) return yield* new DefinitionCheckoutUnavailable({reason: "workspace_invalid"});
-    if (yield* isScratchProject(projectId, project.project.workspaceRoot)) return [];
+    if (yield* isScratchProject(projectId, project.project.workspaceRoot)) return {targets: [], issues};
     const roots = new Map<string, string | null>([[projectRoot, null]]);
+    const members = new Map<string, Array<{threadId: string; title: string}>>([[projectRoot, []]]);
     const candidates = catalog.threads.filter(thread => thread.projectId === projectId && thread.lineage.parentThreadId === null && !thread.deletedAt && !thread.archivedAt);
-    if (candidates.length > 200) return yield* new DefinitionCheckoutUnavailable({reason: "checkout_target_limit"});
-    for (const candidate of candidates) {
-      const projection = yield* readProjection(candidate.id);
+    if (candidates.length > 200) {
+      if (!partial) return yield* new DefinitionCheckoutUnavailable({reason: "checkout_target_limit"});
+      issues.push({threadId: null, message: "Conversation folders were not enumerated: checkout_target_limit (more than 200 conversations). The project folder remains independently selectable."});
+    }
+    for (const candidate of candidates.length > 200 ? [] : candidates) {
+      const observed = yield* Effect.result(readProjection(candidate.id));
+      if (Result.isFailure(observed)) {
+        if (!partial) return yield* Effect.fail(observed.failure);
+        issues.push({threadId: candidate.id, message: `Working folder unavailable for ${candidate.title}: projection could not be read.`});
+        continue;
+      }
+      const projection = observed.success;
       const thread = projection.projection.thread;
       if (thread.id !== candidate.id || thread.projectId !== projectId || thread.deletedAt || thread.archivedAt) continue;
-      if (thread.worktreePath === undefined) return yield* new DefinitionCheckoutUnavailable({reason: "workspace_binding_unavailable"});
-      if (thread.worktreePath === null) continue;
-      if (!text(thread.worktreePath, 4096) || !posix.isAbsolute(thread.worktreePath) || thread.worktreePath.includes("\0") || thread.worktreePath.includes("\\"))
-        return yield* new DefinitionCheckoutUnavailable({reason: "workspace_invalid"});
+      if (thread.worktreePath === undefined) {
+        if (!partial) return yield* new DefinitionCheckoutUnavailable({reason: "workspace_binding_unavailable"});
+        issues.push({threadId: thread.id, message: `Working folder for ${thread.title} has not been established by T3.`});
+        continue;
+      }
+      if (thread.worktreePath === null) {
+        members.get(projectRoot)!.push({threadId: thread.id, title: thread.title});
+        continue;
+      }
+      if (!text(thread.worktreePath, 4096) || !posix.isAbsolute(thread.worktreePath) || thread.worktreePath.includes("\0") || thread.worktreePath.includes("\\")) {
+        if (!partial) return yield* new DefinitionCheckoutUnavailable({reason: "workspace_invalid"});
+        issues.push({threadId: thread.id, message: `The working folder reported for ${thread.title} is invalid and was not selected.`});
+        continue;
+      }
       const root = posix.normalize(thread.worktreePath);
       if (root !== projectRoot && !roots.has(root)) roots.set(root, thread.id);
+      const shared = members.get(root) ?? [];
+      shared.push({threadId: thread.id, title: thread.title}); members.set(root, shared);
     }
-    const targets: DefinitionCheckoutTarget[] = [];
+    const targets: Array<DefinitionCheckoutTarget & {vcsAvailable: boolean}> = [];
     for (const [workspaceRoot, threadId] of [...roots].sort(([a], [b]) => a.localeCompare(b))) {
-      const vcs = files.vcsInfo ? yield* vcsInfo(workspaceRoot) : {isRepo: false, branch: null};
-      targets.push({origin: "project", threadId, workspaceRoot, branch: vcs.branch, isGitRepository: vcs.isRepo});
+      const git = files.vcsInfo ? yield* Effect.result(vcsInfo(workspaceRoot)) : null;
+      if (git && Result.isFailure(git) && !partial) return yield* Effect.fail(git.failure);
+      const vcs = git && Result.isSuccess(git) ? git.success : {isRepo: false, branch: null};
+      if (partial && (!git || Result.isFailure(git))) issues.push({threadId, message: `Branch information unavailable for ${workspaceRoot}.`});
+      targets.push({origin: "project", threadId, workspaceRoot, vcsAvailable: git !== null && Result.isSuccess(git), branch: vcs.branch, isGitRepository: vcs.isRepo, members: (members.get(workspaceRoot) ?? []).sort((a, b) => a.threadId.localeCompare(b.threadId))});
     }
-    return targets;
+    return {targets, issues};
   });
 
   const targetWorkspace = Effect.fnUntraced(function* (projectId: string, threadId: string | null) {
@@ -1066,7 +1092,8 @@ const makeProjectDefinitions = Effect.fnUntraced(function* (sources: ProjectDefi
     presence: (projectId: string, cancel?: Deferred.Deferred<void>) => presenceForCheckout(projectId, null).pipe(definitionsOperation(cancel)),
     presenceGlobal: (cancel?: Deferred.Deferred<void>) => presenceGlobal.pipe(definitionsOperation(cancel)),
     presenceForCheckout: (projectId: string, threadId: string | null, cancel?: Deferred.Deferred<void>) => presenceForCheckout(projectId, threadId).pipe(definitionsOperation(cancel)),
-    checkoutTargets: (projectId: string, cancel?: Deferred.Deferred<void>) => checkoutTargets(projectId).pipe(definitionsOperation(cancel)),
+    checkoutTargets: (projectId: string, cancel?: Deferred.Deferred<void>) => readCheckoutTargets(projectId, false).pipe(Effect.map(value => value.targets), definitionsOperation(cancel)),
+    checkoutInventory: (projectId: string, cancel?: Deferred.Deferred<void>) => readCheckoutTargets(projectId, true).pipe(Effect.map(({targets, issues}) => ({projectId, available: true, complete: issues.length === 0, reason: null, targets, issues})), definitionsOperation(cancel)),
     currentWorkspace: (projectId: string, threadId: string | null, cancel?: Deferred.Deferred<void>) => currentWorkspace(projectId, threadId).pipe(definitionsOperation(cancel)),
     globalFingerprint: (cancel?: Deferred.Deferred<void>) => globalFingerprint.pipe(definitionsOperation(cancel)),
     initialize: (projectId: string, threadId: string | null, input: ProjectDefinitionSetupInput, cancel?: Deferred.Deferred<void>) =>
@@ -1086,6 +1113,7 @@ export class ProjectDefinitions extends Context.Service<ProjectDefinitions, {
   readonly presenceGlobal: (cancel?: Deferred.Deferred<void>) => Effect.Effect<GlobalDefinitionPresence>;
   readonly presenceForCheckout: (projectId: string, threadId: string | null, cancel?: Deferred.Deferred<void>) => Effect.Effect<DefinitionPresence>;
   readonly checkoutTargets: (projectId: string, cancel?: Deferred.Deferred<void>) => Effect.Effect<DefinitionCheckoutTarget[], DefinitionSourceFailure | DefinitionCheckoutUnavailable>;
+  readonly checkoutInventory: (projectId: string, cancel?: Deferred.Deferred<void>) => Effect.Effect<ProjectCheckoutInventoryInfo, DefinitionSourceFailure | DefinitionCheckoutUnavailable>;
   // the operative checkout comes from the native projection; caller-supplied roots are never accepted
   readonly currentWorkspace: (projectId: string, threadId: string | null, cancel?: Deferred.Deferred<void>) => Effect.Effect<string | null, DefinitionSourceFailure>;
   readonly globalFingerprint: (cancel?: Deferred.Deferred<void>) => Effect.Effect<string | null>;

@@ -1,6 +1,16 @@
 import type { CSSProperties } from "react";
 
 const paths = {
+  back: "M19 12H5 m6-6-6 6 6 6",
+  info: "M12 11v6 M12 7v1 M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0",
+  record: "M6 3h9l4 4v14H6Z M14 3v5h5 M9 12h7 M9 16h7",
+  tree: "M5 3v18 M5 7h14 M5 17h14 M15 4h6v6h-6Z M15 14h6v6h-6Z",
+  folder: "M3 6h7l2 3h9v12H3Z",
+  plus: "M5 12h14 M12 5v14",
+  minus: "M5 12h14",
+  shield: "M12 3 3 7v5c0 5 9 9 9 9s9-4 9-9V7Z m-5 9 3 3 5-6",
+  pause: "M9 5v14 M15 5v14",
+
   home: "m3 10 9-7 9 7v10H3Z M9 20v-7h6v7",
   projects: "M3 4h7v7H3Z M14 4h7v7h-7Z M3 15h7v6H3Z M14 15h7v6h-7Z",
   activity: "M3 12h4l3-8 4 16 3-8h4",

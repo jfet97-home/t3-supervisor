@@ -48,3 +48,26 @@ where the task, its single plan with assessed progress, the agreement and the ev
 live together, and a Supervision view for the Supervisor's health and controls. A pending
 proposal never resets recorded progress. A PNG coordination mark identifies the
 application without competing with work content.
+
+## Operate navigation and disclosure contract
+
+Project entry opens its conversation list. An explicit Back to conversations link and
+project breadcrumb both return to that list, retaining its search, page and scroll;
+a remembered conversation is an optional Continue link. Conversations offer Task,
+Supervision and Connected work as separate views.
+
+Conversation search covers the available project collection before paging. Home search
+covers the full available supervised collection through a typed server query; Activity covers retained events. All three
+show bounded rows and truthful ranges. Home attention and project coverage are independent of its selected result page. Background invalidation preserves the selected page.
+
+Definitions are selected by actual working folder, with shared conversations grouped
+and branch names taken only from native checkout facts. Catalog and detail are separate;
+workflow templates show sequence and parallel structure without execution states.
+Edit index is a deliberate destination for the shared folder's project.yaml. Its draft
+and pending save identity belong to that folder and survive navigation and background reads.
+
+Global supervision, T3 connectivity and the open project's effective state are independent
+visible statuses. Global On never claims that every conversation is supervised. Conversation
+engagement uses the typed current mode and availability, separately from execution and agreement.
+
+Conversation lists read the visible conversation identities within their own project. Home search and page selection never determine their status or objective. Project attention counts cover the available project independently of Home filters.

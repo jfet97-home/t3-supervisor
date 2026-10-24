@@ -82,7 +82,8 @@ const definitionsService = (loader: DefinitionsLoader): ProjectDefinitions["Serv
     load: (projectId, threadId = null) => Effect.orDie(failed(Effect.suspend(() => loader.load(projectId, threadId)))),
     globalFingerprint: () => Effect.succeed(null),
     presence: loader.presence ? (projectId) => Effect.orDie(failed(Effect.suspend(() => loader.presence!(projectId)))) : unused,
-    presenceGlobal: unused, presenceForCheckout: unused, checkoutTargets: unused, currentWorkspace: unused,
+    presenceGlobal: unused, presenceForCheckout: unused, checkoutInventory: (projectId: string) => Effect.succeed({projectId, available: true, complete: true, reason: null, issues: [], targets: []}),
+    checkoutTargets: unused, currentWorkspace: unused,
     initialize: unused, initializeGlobal: unused, readProjectConfig: unused,
   });
 };

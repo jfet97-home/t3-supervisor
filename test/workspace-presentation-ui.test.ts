@@ -11,7 +11,7 @@ import {deriveConversationEngagement, emptyConversation, type ConversationEngage
 const now = 1_800_000_000_000;
 const model = new FixtureModel(() => now);
 const data = model.guidanceSnapshot(now);
-const overview = {data: null, loading: false, error: "The last successful read is kept.", refresh: () => {}, loadMore: () => {}};
+const overview = {data: null, loading: false, error: "The last successful read is kept.", refresh: () => {}, selection: {q: "", projectId: "", filter: "all" as const, page: 1}, setSelection: () => {}};
 
 it("a first-load failure cannot claim that a previous successful read is visible", () => {
   const html = renderToStaticMarkup(createElement(Home, {data, overview, navigate: () => {}}));
@@ -44,7 +44,7 @@ it("unknown activity codes stay in inspection data instead of becoming list pros
 it("typed conversation availability controls Following independently of retained agreement and execution", () => {
   const current = {mode: "following" as const, availability: "current" as const, consideredAt: now};
   assert.equal(conversationLabel(current), "Following the conversation");
-  assert.equal(conversationLabel({...current, mode: "engaged"}), null);
+  assert.equal(conversationLabel({...current, mode: "engaged"}), "Engaged in the task");
   for (const availability of ["catching_up", "stale", "uncertain", "stopped", "unavailable"] as const)
     assert.doesNotMatch(conversationLabel({...current, availability})!, /Following/u);
   assert.doesNotMatch(conversationLabel(current, false)!, /Following/u);
@@ -58,7 +58,7 @@ it("typed conversation availability controls Following independently of retained
   for (const [enabled, available, expected] of [[false, true, "stopped"], [true, false, "unavailable"]] as const)
     assert.equal(deriveConversationEngagement({task, enabled, available}).availability, expected);
   const draft = renderToStaticMarkup(createElement(ConversationUnderstanding, {draft: {...emptyConversation(now).draft, objective: "Discuss the retry race"}}));
-  assert.match(draft, /<details/u);assert.match(draft, /<summary>Understanding and draft duties/u);
+  assert.match(draft, /<details/u);assert.match(draft, /class="disclosure-title">Understanding and draft duties/u);
   assert.doesNotMatch(draft, /role="button"/u);
   const first = model.dashboardOverview({}, now).work[0]!;
   const row = (engagement: ConversationEngagement, fresh: boolean) => renderToStaticMarkup(createElement(WorkTable, {data, navigate: () => {}, fresh, work: [{...first, attention: [], engagement}]}));

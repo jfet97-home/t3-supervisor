@@ -583,3 +583,38 @@ are silent; meaningful existing status text retains its native semantics. This c
 refresh ownership, with no visual, theme or navigation redesign. Refresh buttons use
 `aria-disabled` with guarded activation, so a background read does not drop keyboard
 focus when temporarily unavailable.
+
+### Operate interface correction
+
+The persistent utility header uses one compact global-supervision indicator linking to Settings, quiet T3 connectivity and Sign out at the row end. The project context names effective project supervision separately. Teal indicates enabled state, a red-tinted outline indicates disabled state, and amber indicates an unavailable read. Every state is also named in text in light and dark themes.
+
+Use the 4/8/12/16/24/32 spacing scale: 6px label-to-control, 8px within a compact disclosure,
+16px between fields, 24px between form groups and 32px between major sections. Selects fit
+content up to 36rem; numeric inputs fit 10rem. Mobile navigation wraps whole labels.
+
+Product help uses an info icon and one subtle inset containing both trigger and text.
+Entity details use record, folder or tree icons in the same compact boundary. Native
+summary semantics remain; plus/minus SVG cues replace the native triangle. Focus stays on
+the compact trigger. Current status and primary actions remain visible outside product help.
+
+Bounded catalog rows lead to individual definition details. Template topology uses neutral
+ordered tracks and explicitly named parallel groups, with per-node duty, reference and skill
+disclosures. It carries no execution markers. Connected work has a dedicated conversation
+view with visible relation, assignment and workflow state; Task carries a compact link.
+
+Interaction references: [Carbon pagination](https://www.carbondesignsystem.com/building-blocks/core/components/pagination/guidelines),
+[GOV.UK details](https://design-system.service.gov.uk/components/details/),
+[inset text](https://design-system.service.gov.uk/components/inset-text/) and
+[back links](https://design-system.service.gov.uk/components/back-link/), and the
+[GitHub workflow graph](https://docs.github.com/en/actions/how-tos/monitor-workflows/use-the-visualization-graph).
+The brief explicitly requires both a list-targeted Back link and breadcrumbs.
+
+At narrow widths the status header stays in normal document flow so its wrapping labels do not obscure the work while scrolling. Desktop retains the sticky header. Conversation badges use the same icon-plus-text treatment, and connected rows explicitly name Workflow and Conversation status.
+
+Ordinary reconciliation actions are quiet 32px icon buttons beside read metadata, with explicit accessible names and focus rings. Recovery Retry remains in its error context. Definition/folder refresh remains explicit because filesystem detection and native collection have their own cadence; there is no invented Live badge.
+
+### Current detector disposition (2026-10-24)
+
+The parent’s single detector pass on candidate 8d75d40 reported 41 findings: one pre-existing side-tab warning and 40 advisories. Of those advisories, 29 were already on origin/main (22 color, one radius, six typography); the current UI adds 11 color occurrences, using ten distinct values. The historic report above remains the baseline record.
+
+The added values deliberately extend the inherited status treatment across light and dark surfaces: `#8cbaa9` and `#507d70` support enabled teal; `#7f342e`, `#fbeceb`, `#452d30` and `#b67c79` distinguish disabled text, outline and surface; `#714b16`, `#c3a476` and `#927549` distinguish uncertain or unavailable amber. `#0005` supplies the dark sticky Save bar’s soft shadow; the dialog backdrop remains the existing `#17243c80`. These are palette advisories, not ten new component themes; icon and text carry every status meaning. This records the existing detector classification without rerunning it or changing the token system.
