@@ -1,6 +1,6 @@
 {
   "name": "@jfet97/t3-supervisor",
-  "version": "0.2.0",
+  "version": "0.0.2",
   "description": "Dashboard and background service for supervising T3 projects and conversations",
   "repository": {
     "type": "git",

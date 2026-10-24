@@ -14412,7 +14412,7 @@
     "active Map<Server,AbortController> + closed flag for shutdown (L44-L45, L89-L93)"
    ],
    "behaviorsToPreserve": [
-    "server info {name:'t3-supervisor-workflows', version:'0.1.0'}, capabilities {tools:{}} (L17, L52)",
+    "server info {name:'t3-supervisor-workflows', version:buildInfo.version}, capabilities {tools:{}}",
     "stateless: no session id; enableJsonResponse; max request body 1 MiB (413/400) (L15, L53-L56)",
     "tools order: workflow_read, workflow_write, supervision_start, supervision_stop, then supervision_team, supervision_guide only when team present (L43)",
     "tool result = single text content with JSON; isError for status denied/invalid/unavailable/incompatible/too_large (L20-L28)",
