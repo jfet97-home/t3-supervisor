@@ -1,5 +1,5 @@
 ---
-"t3-supervisor": minor
+"@jfet97/t3-supervisor": minor
 ---
 
 Introduce installable releases with the complete dashboard, CLI version reporting,

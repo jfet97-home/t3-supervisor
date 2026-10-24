@@ -14,6 +14,14 @@ For authorized multi-agent work, use the global `orchestrate-agents` skill for
 ownership, delegation, provider recovery, bounded review and completion evidence.
 Keep the procedure there; the requirements below are specific to this product.
 
+All contributions go through a pull request. Do not push changes directly to
+`main`; the repository requires a PR and the strict `check` status. An explicit
+admin bypass at PR merge is an exceptional human decision, not permission for
+ordinary pushes. `git push --force` does not bypass GitHub's rules.
+
+While editing, run focused local checks. Leave the final complete main and runner
+harness suites to GitHub CI rather than duplicating them locally.
+
 - Define the requested behavior and observable acceptance cases before editing.
   Fix demonstrated failures in the existing path. Remove superseded code and
   instructions instead of layering workarounds, stores, parsers or compatibility.
