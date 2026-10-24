@@ -1123,7 +1123,7 @@ const makeProjectDefinitions = Effect.fnUntraced(function* (sources: ProjectDefi
     presence: (projectId: string, cancel?: Deferred.Deferred<void>) => presenceForCheckout(projectId, null).pipe(definitionsOperation(cancel)),
     presenceGlobal: (cancel?: Deferred.Deferred<void>) => presenceGlobal.pipe(definitionsOperation(cancel)),
     presenceForCheckout: (projectId: string, threadId: string | null, cancel?: Deferred.Deferred<void>) => presenceForCheckout(projectId, threadId).pipe(definitionsOperation(cancel)),
-    checkoutTargets: (projectId: string, cancel?: Deferred.Deferred<void>) => readCheckoutTargets(projectId, false).pipe(Effect.map(value => value.targets), definitionsOperation(cancel)),
+    checkoutTargets: (projectId: string, cancel?: Deferred.Deferred<void>) => readCheckoutTargets(projectId, false).pipe(Effect.map(value => value.targets.map(({presence: _presence, isProjectFolder: _projectFolder, isDefaultBranch: _defaultBranch, ...target}) => target)), definitionsOperation(cancel)),
     checkoutInventory: (projectId: string, cancel?: Deferred.Deferred<void>) => readCheckoutTargets(projectId, true).pipe(Effect.map(({targets, issues, defaultBranch}) => ({projectId, available: true, complete: issues.length === 0, reason: null, defaultBranch, targets, issues})), definitionsOperation(cancel)),
     currentWorkspace: (projectId: string, threadId: string | null, cancel?: Deferred.Deferred<void>) => currentWorkspace(projectId, threadId).pipe(definitionsOperation(cancel)),
     globalFingerprint: (cancel?: Deferred.Deferred<void>) => globalFingerprint.pipe(definitionsOperation(cancel)),
