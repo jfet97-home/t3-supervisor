@@ -52,7 +52,7 @@ it.effect("CT-WWC-07: with a 400 ms budget a pending write polls the projection 
     workflowEditingEnabled: () => Effect.succeed(true)}).pipe(Effect.provideService(GuidanceDb, stores.sql));
   const display = new SupervisionScope({dataDirectory: "", t3Url: "http://unused", t3TokenFile: "", excludedThreadIds: [], healthPort: 0},
     {guidance: stores.guidance, supervisors, policy: stores.policy}, true);
-  yield* display.rememberScratchProjects([]);
+  yield* display.rememberCatalog([], [thread("main-workflows", "project-workflows"), thread(binding.threadId, "project-workflows")]);
   const controller = yield* WorkflowWriteController.make({maxEvidenceWaitMs: 400, withoutTeam: true}).pipe(Effect.provideService(SupervisionGate, gate),
     Effect.provideService(WorkflowNativeAccess, native), Effect.provideService(SupervisionScopeService, display),
     Effect.provide(Context.add(stores.context, WorkflowStateStore, workflows)));

@@ -6,6 +6,7 @@ import type { GuidanceStoreError, SupervisionStoreError } from "./guidance-sql.j
 import { GuidanceStore } from "./guidance-store.js";
 import { isSupervisorThread, ProjectSupervisorStore, type ProjectSupervisorStoreError, type SupervisionStartRecord } from "./project-supervisor-store.js";
 import { mainConversation } from "./supervisor-scope.js";
+import {conversationOriginAllowed, projectRequesterPolicy} from "./task-requester.js";
 import { ThreadPolicyStore, type ThreadPolicyStoreError } from "./thread-policy.js";
 import type { SupervisorSettings, ThreadInfo } from "./types.js";
 
@@ -35,11 +36,12 @@ export interface SupervisionScopeStores {
 export class SupervisionScope implements GateGuard {
   private readonly scratchProjectIds = new Set<string>();
   private catalogClassificationsReady = false;
+  private readonly nativeThreads = new Map<string, ThreadInfo>();
   constructor(readonly config: SupervisorSettings, private readonly stores: SupervisionScopeStores, private readonly operateRpcAvailable: boolean) {}
   /** The permanent root and helper ownership the scope checks treat as Supervisor threads. */
   get owned(): ReadonlySet<string> {return this.stores.supervisors.ownedIds;}
   // the classifications are read first and the memory is replaced at once, so no reader sees a partly applied catalog
-  rememberScratchProjects(projects: readonly {id: string; workspaceRoot: string}[]): Effect.Effect<void, GuidanceStoreError> {
+  rememberCatalog(projects: readonly {id: string; workspaceRoot: string}[], threads: readonly ThreadInfo[]): Effect.Effect<void, GuidanceStoreError> {
     return Effect.flatMap(Effect.forEach(projects, (project) => Effect.map(this.scratchProject(project.id, project.workspaceRoot), (scratch) => [project.id, scratch] as const)),
       (classified) => Effect.sync(() => {
         for (const [id, scratch] of classified) {
@@ -47,6 +49,8 @@ export class SupervisionScope implements GateGuard {
           else this.scratchProjectIds.delete(id);
         }
         this.catalogClassificationsReady = true;
+        this.nativeThreads.clear();
+        for (const thread of threads.slice(0, 10_000)) this.nativeThreads.set(thread.id, thread);
       }));
   }
   scratchProject(projectId: string, workspaceRoot: string): Effect.Effect<boolean, GuidanceStoreError> {
@@ -61,6 +65,10 @@ export class SupervisionScope implements GateGuard {
   scopeEnabled(projectId: string, mainThreadId?: string, purpose: "effect" | "interpretation" | "reconcile" = "effect"): Effect.Effect<boolean, SupervisionStoreError> {
     const store = this.stores.supervisors;
     return Effect.gen({self: this}, function* () {
+      if (mainThreadId && purpose !== "reconcile") {
+        const main = this.nativeThreads.get(mainThreadId);
+        if (!main || main.projectId !== projectId || !conversationOriginAllowed(main, yield* projectRequesterPolicy(store, projectId))) return false;
+      }
       if (!(yield* this.isNoProject(projectId)))
         return (yield* store.enabled(projectId)) && (purpose === "reconcile" || !mainThreadId || !(yield* this.supervisionStopped(mainThreadId)));
       const control = yield* store.noProjectControl();
@@ -85,7 +93,7 @@ export class SupervisionScope implements GateGuard {
   projectEnabled(projectId: string, mainThreadId?: string): Effect.Effect<boolean, SupervisionStoreError> {return this.scopeEnabled(projectId, mainThreadId, "interpretation");}
   workflowEditingEnabled(projectId: string, mainThreadId?: string, purpose: "effect" | "status" | "read" = "effect"): Effect.Effect<boolean, SupervisionStoreError> {
     return this.catalogClassificationsReady && this.operateRpcAvailable && this.stores.supervisors.scopeCompatible
-      ? this.scopeEnabled(projectId, mainThreadId, purpose !== "effect" ? "interpretation" : "effect") : Effect.succeed(false);
+      ? this.scopeEnabled(projectId, mainThreadId, purpose !== "effect" ? "reconcile" : "effect") : Effect.succeed(false);
   }
   validPendingStartFor(threadId: string): Effect.Effect<boolean, ProjectSupervisorStoreError> {
     return Effect.flatMap(this.stores.supervisors.start(threadId), (start) => start ? this.validPendingStart(start) : Effect.succeed(false));
@@ -100,6 +108,7 @@ export class SupervisionScope implements GateGuard {
   eligible(thread: ThreadInfo, threads: readonly ThreadInfo[]): Effect.Effect<boolean, SupervisionStoreError> {
     return Effect.gen({self: this}, function* () {
       if (isSupervisorThread(this.owned, thread) || unavailable(thread) || thread.lineage.relationshipToParent === "subagent" ||
+        !conversationOriginAllowed(thread, thread.projectId === null ? {owned: this.owned, agentRequestsAfter: null} : yield* projectRequesterPolicy(this.stores.supervisors, thread.projectId)) ||
         (yield* this.supervisionStopped(thread.id)) && !(yield* this.validPendingStartFor(thread.id))) return false;
       return mainConversation(thread, threads)?.id === thread.id;
     });

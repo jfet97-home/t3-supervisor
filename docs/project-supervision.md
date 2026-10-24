@@ -42,7 +42,9 @@ Home's Review and enable opens the exact scoped control.
 Disabling stops new service-originated interpretation, introductions, check-ins
 and recovery sends. It preserves chats, bindings, requests and agreements; a
 running native turn may finish. Re-enabling captures a discovery boundary instead
-of replaying all work submitted while disabled. There is no pause-monitoring mode.
+of replaying all work submitted while disabled. A request to pause implementation or
+return to discussion instead keeps supervision enabled and quiet on the same task.
+An explicit Stop Supervisor still uses the durable disabled fence.
 
 First setup selects an exact checkout/branch. Create writes only the new
 `project.yaml` (`workflows: []`, then `steps: []`), `steps/.gitkeep` and `workflows/.gitkeep`. Create +
@@ -72,9 +74,9 @@ count, so enabling it never sweeps up earlier launches; turning it off again mak
 an agent-sourced task no longer current. Other agents, Supervisor roots and helpers,
 anything they delegated, scheduled or service prompts and imported messages never
 become tasks. The interpretation request names the launching conversation
-(`requestedBy`), and the request is never presented as a human's. Human requests in
-the same main are unchanged. The setting only makes these requests eligible for
-interpretation and negotiation: Start, Stop and definition approval still require a
+(`requestedBy`), and the request is never presented as a human's. Human-created conversations are unchanged. While off, the chat origin remains excluded even after genuine human follow-ups.
+While on, the exact launcher and genuine humans can request work in an eligible
+ordinary main. The setting governs conversation eligibility: Start, Stop and definition approval still require a
 genuine human message, and No Project modes and exclusions still apply.
 
 The Supervisor interprets the latest genuine request together with earlier unresolved
@@ -89,11 +91,39 @@ is navigation, not policy. The operative introduction says that
 it needs. The index is not a whitelist of task plans; negotiated local steps
 remain available. A manifest too large for
 one request keeps the reader and shrinks to member counts, then to a prefix of IDs and
-names, stating what it omitted. Interpretation first
-decides whether supervision is needed: a short self-contained communication, lookup
-or status request is recorded as `not_supervised` with its reason, gets no proposal,
-introduction or check-ins, and the next genuine request is interpreted again. This
-semantic decision is temporary; it is unrelated to a human's durable stop.
+names, stating what it omitted.
+
+The existing task document retains a bounded understanding: objective, constraints,
+open questions, findings with actual conversation references and draft high-level
+duties. This quiet draft is separate from the operative proposal. Following sends
+no routine introduction, acceptance chatter or check-ins. A temporary `not_needed`
+assessment does not close the task; later eligible requester messages are interpreted
+on the same task. Operative activity supplies bounded context rather than a model
+turn for each tool event.
+
+Participation requires a source-verified requested outcome and prose limits.
+“Investigate the incident and report the cause; do not fix it” authorizes a research
+workflow. “Let's discuss causes before deciding; read what you need” stays quiet.
+A direct first action request can authorize participation immediately, with no extra
+confirmation. “Yes, implement that” must bind to actual earlier content in this main;
+operative findings can describe the proposed fix but never grant authority. Sources
+retain human or launching-agent provenance. A launching agent cannot lift a human
+pause. Human-only Start, Stop and definition approval remain separate.
+Start rejects an excluded agent-created origin before reserving pending permission;
+turning that opt-in off also rejects an unprepared pending Start. Stop remains available.
+
+The public read model derives `following|engaged` from those persisted facts and
+exposes availability separately. **Following the conversation** appears only for a
+current, enabled, available scope. Catching up, stale, uncertain, stopped or
+unavailable states show their own truthful label. Agreement and execution assessment
+remain independent. Neutral updates retain authorization; explicit pause returns to
+following without deleting the agreement, occurrence IDs or valid progress. Same-scope
+resume preserves acceptance. A changed outcome gets a new scope revision and realigns
+affected commitments. Newer requester messages defer obsolete decisions and writes.
+Agreement acceptance rechecks the requester watermark after its evidence reads.
+An active human turn in the Supervisor takes priority over service wakes; terminal
+human turns, including interrupted or failed ones, release that hold. Quiet or stale
+tasks still reconcile uncertain delivery identities without dispatching fresh work.
 
 The Supervisor receives the task, source identity, readable step/workflow material,
 configuration and diagnostics. Valid definitions support a source-bound proposal.
@@ -122,8 +152,8 @@ Startup is compact. The initialization turn only confirms the service-prepared
 proposal by echoing its exact reference `{taskId, proposalId, digest}`; definitions
 stay available through `workflow_read`. The operative introduction says that `.t3-supervisor/project.yaml` is the
 index and to read the listed full files it needs. It opens with the
-obligation to agree a task-relevant workflow before implementing (evidence gathering
-and bootstrap work may come first; the Supervisor cannot block tools), then an outline
+obligation to agree a workflow for the authorized outcome promptly (earlier work may
+already exist; the Supervisor cannot block tools), then an outline
 and the exact acceptance record. Wakes carry the full standing instructions once per
 version and afterwards a compact core with their version; full instructions, task
 context, definitions and dry-run checks are pulled on demand. Each wake row has one

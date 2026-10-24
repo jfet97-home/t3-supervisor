@@ -11,6 +11,8 @@ import { WorkflowStateStore } from "../../src/workflow-state-store.js";
 import { WorkflowNativeAccess, WorkflowWriteController } from "../../src/workflow-write-controller.js";
 import { workflowToolNames } from "../../src/workflow-write-evidence.js";
 import type { StoreOpen } from "./psx-stores.js";
+export { submissionArguments } from "./interpretation-submit.js";
+import { submissionArguments } from "./interpretation-submit.js";
 
 // copied from the characterization fixtures: the native submission item and the write controller that records it.
 // these helpers do not load the promise facades.
@@ -25,11 +27,6 @@ export const turnItemAnswer = (projections: ReadonlyMap<string, Projection>, tag
   tag === "orchestration.getTurnItem" ? {item: submissionDetail(projections.get(String(payload.threadId)), String(payload.itemId))} : undefined;
 
 /** The arguments a root copies from its request: the attempt's envelope, then its interpretation fields. */
-export const submissionArguments = (task: TaskRecord, fields: Record<string, unknown>): Record<string, unknown> => {
-  assert.ok(task.attempt, "the task has a minted attempt");
-  return {supervisorThreadId: task.supervisorThreadId, bindingGeneration: task.attempt.key.bindingGeneration, taskId: task.id,
-    attemptId: task.attempt.attemptId, sourcePin: task.attempt.key.source, ...fields};
-};
 
 export type SubmissionItemOptions = {
   itemId?: string;

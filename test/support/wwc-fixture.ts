@@ -1,3 +1,4 @@
+import { emptyConversation } from "../../src/supervision-conversation-contract.js";
 import { Clock, Context, Deferred, Effect, Exit, Fiber, Layer } from "effect";
 import type { Duration } from "effect";
 import { FetchHttpClient } from "effect/http";
@@ -200,7 +201,10 @@ export const makeFixture = (mainThread: ThreadInfo = thread("main-workflows", "p
     requestText: "Complete the current project task.", supervisorThreadId, messageId: "source-message-current", dispatchedAt: null,
     replayCount: 0, supervisorRunId: "source-run-current", sourceOrdinal: 1, definitionContext, definitionSnapshot,
   };
-  yield* stores.supervisors.saveTask(task).pipe(Effect.orDie);
+  const source = {messageId: task.sourceMessageId, runId: task.sourceRunId, ordinal: task.sourceOrdinal, hash: task.sourceHash, requester: "human" as const};
+  const conversation = {...emptyConversation(updatedAt), considered: source, observed: source,
+    authorization: {scopeRevision: task.sourceHash, outcome: task.objective!, limits: [], scopeSources: [source], state: "authorized" as const, stateSource: source, attemptId: "fixture-source"}};
+  yield* stores.supervisors.saveTask({...task, conversation}).pipe(Effect.orDie);
   const sourceBinding: WorkflowSourceBindingInfo = {
     workspaceRoot: definitionSnapshot.workspaceRoot, revision: definitionSnapshot.revision, globalRevision: null, definitionsStatus: "ready",
     definitionsComplete: true, requirementsKnown: true, taskId: task.id, proposalId: "proposal-current", sourceHash: taskSourceHash,
@@ -208,7 +212,13 @@ export const makeFixture = (mainThread: ThreadInfo = thread("main-workflows", "p
   const definitionReader: DefinitionReader = {current: definitionSnapshot, calls: 0};
   const threads = [mainThread, thread(supervisorThreadId, projectId)];
   const projection = makeProjection(supervisorThreadId, projectId);
-  const projections = new Map([[supervisorThreadId, projection]]);
+  const mainProjection = makeProjection(mainThreadId, projectId);
+  mainProjection.runs.push({id: task.sourceRunId, threadId: mainThreadId, ordinal: 1, status: "completed", requestedAt: "2026-10-01T11:00:00Z",
+    startedAt: "2026-10-01T11:00:00Z", completedAt: "2026-10-01T11:01:00Z", userMessageId: task.sourceMessageId, rootNodeId: "request-root"});
+  mainProjection.messages.push({id: task.sourceMessageId, threadId: mainThreadId, runId: task.sourceRunId, nodeId: "request-root", role: "user",
+    streaming: false, text: task.requestText, createdBy: "user", creationSource: "web", createdAt: "2026-10-01T11:00:00Z", updatedAt: "2026-10-01T11:00:00Z"});
+  mainProjection.nodes = [{id: "request-root", rootNodeId: "request-root", kind: "root_turn", threadId: mainThreadId, runId: task.sourceRunId, status: "completed"}];
+  const projections = new Map([[supervisorThreadId, projection], [mainThreadId, mainProjection]]);
   const details = new Map<string, unknown>();
   const projectionCalls: string[] = [];
   const detailCalls: string[] = [];
@@ -412,7 +422,7 @@ export const replaceCurrentProposal = (fixture: WwcFixture, proposalId: string, 
     const task = yield* fixture.supervisors.task(fixture.mainThreadId);
     if (!task) return yield* Effect.die(new Error("test_current_task_missing"));
     const sourceHash = options.sourceHash ?? task.sourceHash;
-    yield* fixture.supervisors.saveTask({...task, sourceHash, workflowProposalId: proposalId, workflow: proposal,
+    yield* fixture.supervisors.saveTask({...task, sourceHash, ...(task.conversation?.authorization ? {conversation: {...task.conversation, authorization: {...task.conversation.authorization, scopeRevision: sourceHash}}} : {}), workflowProposalId: proposalId, workflow: proposal,
       definitionContext: proposalContextFromDefinitions(definitions), definitionSnapshot: definitions,
       ...(options.definitionReview ? {definitionReview: options.definitionReview} : {})});
     fixture.proposal = proposal;

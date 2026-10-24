@@ -132,6 +132,20 @@ export const nativeUserMessageVisible = (projection: Projection, run: RunInfo, m
     root.runId === run.id && (root.parentNodeId === null || root.parentNodeId === undefined) && root.status !== "rolled_back";
 };
 
+/** Native human provenance, independent of whether this chat is eligible for task supervision. */
+export const genuineHumanMessage = (projection: Projection, messageId: string): MessageInfo | null => {
+  const message = projection.messages.find(item => item.id === messageId && item.threadId === projection.thread.id);
+  const run = message?.runId ? projection.runs.find(item => item.id === message.runId && item.threadId === projection.thread.id) : undefined;
+  return message && run && message.role === "user" && message.createdBy === "user" && !message.streaming &&
+    (message.creationSource === "web" || message.creationSource === "mobile") && !message.senderThreadId && !message.scheduledTaskId && !message.source &&
+    !message.id.startsWith("supervisor-notice:") && nativeUserMessageVisible(projection, run, message) ? message : null;
+};
+
+export const hasUnansweredHuman = (projection: Projection): boolean => {
+  return projection.messages.some(message => genuineHumanMessage(projection, message.id) &&
+    projection.runs.some(run => run.id === message.runId && ["preparing", "queued", "starting", "running", "waiting"].includes(run.status)));
+};
+
 const runIsBusy = (projection: Projection, run: RunInfo, shell?: Record<string, unknown>): boolean => {
   const nodes = nodeIndex(projection);
   const latestRun = projection.runs.reduce<RunInfo | undefined>(

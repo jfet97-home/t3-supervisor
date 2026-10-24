@@ -1,5 +1,6 @@
 import { Cause, Clock, Context, Data, Deferred, Effect, Layer, Option } from "effect";
-import { nativeUserMessageVisible, timestampMs } from "./domain.js";
+import { genuineHumanMessage as genuineUserMessage, timestampMs } from "./domain.js";
+export {genuineHumanMessage as genuineUserMessage} from "./domain.js";
 import { GuidanceDb } from "./db.js";
 import { guidanceTransaction, type SupervisionStoreError } from "./guidance-sql.js";
 import { fingerprint } from "./guidance-store.js";
@@ -13,10 +14,11 @@ import { introductionOutcomeUnknown, SupervisorConversationStore } from "./super
 import type { SupervisionControlInfo } from "./supervisor-control-contract.js";
 import { NativeOperateRpc } from "./supervisor-native.js";
 import { mainConversation } from "./supervisor-scope.js";
+import { agentCreatedOrigin, conversationOriginAllowed, launchingAgent, projectRequesterPolicy } from "./task-requester.js";
 import { T3Client, type T3TransportError } from "./t3.js";
 import type { ThreadPolicySettings } from "./thread-policy-contract.js";
 import { ThreadPolicyStore, type ThreadPolicyStoreError } from "./thread-policy.js";
-import type { MessageInfo, Projection, ThreadInfo } from "./types.js";
+import type { Projection, ThreadInfo } from "./types.js";
 import type { SupervisionStartInput, SupervisionStartResult, SupervisionStopInput, SupervisionStopResult } from "./workflow-write-controller.js";
 
 // an exact whole-token mention of a chat ID; a prefix of a longer ID never names that chat
@@ -24,13 +26,6 @@ const namesThread = (text: string, threadId: string): boolean =>
   new RegExp(`(?<![A-Za-z0-9:_%.-])${threadId.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}(?![A-Za-z0-9:_%-]|\\.[A-Za-z0-9:_%-])`, "u").test(text);
 
 /** The human's own message in this projection's thread: a visible, finished web or mobile message of a native user run. */
-export const genuineUserMessage = (projection: Projection, messageId: string): MessageInfo | null => {
-  const message = projection.messages.find(item => item.id === messageId && item.threadId === projection.thread.id);
-  const run = message?.runId ? projection.runs.find(item => item.id === message.runId && item.threadId === projection.thread.id) : undefined;
-  return message && run && message.role === "user" && message.createdBy === "user" && !message.streaming &&
-    (message.creationSource === "web" || message.creationSource === "mobile") && !message.senderThreadId && !message.scheduledTaskId && !message.source &&
-    !message.id.startsWith("supervisor-notice:") && nativeUserMessageVisible(projection, run, message) ? message : null;
-};
 
 // a thread-policy save that did not commit, with the reason the settings editor shows
 export class ThreadPolicySaveFailed extends Data.TaggedError("ThreadPolicySaveFailed")<{readonly message: string}> {}
@@ -161,11 +156,13 @@ const makeSupervisionControl = Effect.gen(function* () {
     const catalog = yield* source.catalog();
     // the scope, mode and earlier Start reads before the evidence read are one snapshot
     const checked = yield* transaction(Effect.gen(function* (): Effect.fn.Return<{done: SupervisionStartResult} | {thread: ThreadInfo & {projectId: string}; mode: Effect.Success<ReturnType<typeof store.noProjectControl>>; master: SupervisionControlInfo; requestHash: string; previous: SupervisionStartRecord | null}, SupervisionStoreError> {
-      yield* scope.rememberScratchProjects(catalog.projects.map(item => item.project));
+      yield* scope.rememberCatalog(catalog.projects.map(item => item.project), catalog.threads);
       const thread = catalog.threads.find(item => item.id === threadId);
       if (!thread?.projectId || !scope.mainShape(thread) || mainConversation(thread, catalog.threads)?.id !== threadId ||
         !catalog.projects.some(item => item.available && item.project.id === thread.projectId) || !(yield* scope.isNoProject(thread.projectId)))
         return {done: {status: "denied", reason: "own_ordinary_no_project_chat_required"}};
+      if (!conversationOriginAllowed(thread, yield* projectRequesterPolicy(store, thread.projectId)))
+        return {done: {status: "denied", reason: "conversation_origin_excluded"}};
       const mode = yield* store.noProjectControl();const master = yield* store.control(null);
       if (!operateRpcAvailable || !store.scopeCompatible || !master.enabled || mode.mode === "off") return {done: {status: "denied", reason: "master_or_no_project_mode_off"}};
       const requestHash = fingerprint({threadId, operationId, route, userMessageId});
@@ -186,8 +183,12 @@ const makeSupervisionControl = Effect.gen(function* () {
     return yield* gate.admit(() => Effect.gen(function* () {
       const decision = yield* transaction(Effect.gen(function* (): Effect.fn.Return<SupervisionStartResult | {activate: SupervisionStartRecord}, SupervisionStoreError> {
         if (main.thread.projectId !== thread.projectId || !scope.mainShape(main.thread)) return {status: "denied", reason: "scope_changed"};
+        const policy = yield* projectRequesterPolicy(store, projectId);
+        if (!conversationOriginAllowed(main.thread, policy)) return {status: "denied", reason: "conversation_origin_excluded"};
+        if (agentCreatedOrigin(main.thread) && !launchingAgent(main, policy.owned)) return {status: "denied", reason: "conversation_origin_unverified"};
         let message = userMessageId ? genuineUserMessage(main, userMessageId) : null;
-        const latestHuman = [...main.messages].filter(item => genuineUserMessage(main, item.id)).sort((a,b) => (timestampMs(b.createdAt) ?? 0) - (timestampMs(a.createdAt) ?? 0)).at(0);
+        const latestHuman = main.messages.filter(item => genuineUserMessage(main, item.id))
+          .sort((a,b) => (main.runs.find(run => run.id === a.runId)?.ordinal ?? -1) - (main.runs.find(run => run.id === b.runId)?.ordinal ?? -1)).at(-1);
         if (route === "agent" && (!message || message.runId !== runId || latestHuman?.id !== message.id)) return {status: "denied", reason: "start_call_not_in_genuine_human_turn"};
         if (route === "ui") message = latestHuman && main.runs.some(run => run.id === latestHuman.runId && ["preparing", "queued", "starting", "running", "waiting"].includes(run.status)) ? latestHuman : null;
         if (message && message.text.length > 24_000) return {status: "denied", reason: "start_source_too_large"};
@@ -290,8 +291,20 @@ const makeSupervisionControl = Effect.gen(function* () {
         if (enabledAt !== null && !(Date.parse(message.createdAt) > enabledAt)) return {status: "denied", reason: "superseded_by_later_enable"};
         // when the caller acts in the chat the human wrote in, its verified native call must answer that message, not a later unrelated turn
         const verifiedRunId = typeof evidence === "object" && evidence !== null && typeof (evidence as {runId?: unknown}).runId === "string" ? (evidence as {runId: string}).runId : null;
-        if (verifiedRunId !== null && candidate.threadId === input.callerThreadId && verifiedRunId !== message.runId)
-          return {status: "denied", reason: "stop_call_not_in_human_turn"};
+        if (verifiedRunId !== null && candidate.threadId === input.callerThreadId) {
+          const callRun = caller.runs.find(run => run.id === verifiedRunId);
+          const sourceRun = caller.runs.find(run => run.id === message.runId);
+          if (!callRun || !sourceRun || sourceRun.ordinal > callRun.ordinal)
+            return {status: "denied", reason: "stop_source_after_call"};
+          // root human messages address the Supervisor. Later service/agent turns may honor the latest one, without borrowing
+          // an older instruction after a newer human message. Main-task dialogue does not revoke a Stop; Enable/Start does.
+          if (candidate.route === "direct" || candidate.route === "chat") {
+            const latest = caller.messages.filter(item => genuineUserMessage(caller, item.id) &&
+              (caller.runs.find(run => run.id === item.runId)?.ordinal ?? Infinity) <= callRun.ordinal)
+              .sort((a, b) => (caller.runs.find(run => run.id === a.runId)?.ordinal ?? -1) - (caller.runs.find(run => run.id === b.runId)?.ordinal ?? -1)).at(-1);
+            if (latest?.id !== message.id) return {status: "denied", reason: "stop_source_superseded"};
+          }
+        }
         const route = candidate.route;
         const instructedAt = Number.isFinite(Date.parse(message.createdAt)) ? Date.parse(message.createdAt) : startedAt;
         const recorded = yield* store.chatStop(target.id);

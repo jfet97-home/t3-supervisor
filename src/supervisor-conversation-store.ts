@@ -63,6 +63,8 @@ export type ConversationRequest = {
   reviewOutcome?: ReviewOutcomeRecord;
 };
 export type WorkflowIntroduction = {
+  proposalId?: string;
+  earlier?: Array<{messageId: string; textHash: string}>;
   taskId: string;
   projectId: string;
   threadId: string;
@@ -198,6 +200,8 @@ const isStoredRejectedAttempt = Schema.is(StoredRejectedAttempt);
 // as the same value
 const RejectedAttemptDocument = Schema.declare((value: unknown): value is RejectedAttempt => isStoredRejectedAttempt(value));
 const WorkflowIntroductionDocument = Schema.Struct({
+  proposalId: Schema.optionalKey(Schema.String),
+  earlier: Schema.optionalKey(Schema.mutable(Schema.Array(Schema.Struct({messageId: Schema.String, textHash: Schema.String})).check(Schema.isMaxLength(100)))),
   taskId: Schema.String,
   projectId: Schema.String,
   threadId: Schema.String,

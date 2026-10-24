@@ -151,7 +151,7 @@ it.live("CT-ISUB-06: a source edit, a new genuine request, a binding change and 
     assert.equal(f.operativeSends().length, 0);
   }
   {
-    // a new genuine request in the main after the commit does not replace the in-flight attempt, which finalizes on its own source
+    // A newer requester may pause or widen scope: keep the original receipt, defer its decision, then coalesce on the same task.
     const f = yield* startInterpretationFixture();
     const task = yield* dispatched(f);
     assert.equal((yield* f.submitFields(task, planFields(task))).value.status, "submitted");
@@ -160,8 +160,14 @@ it.live("CT-ISUB-06: a source edit, a new genuine request, a binding change and 
     assert.equal((yield* f.task()).id, task.id);
     f.endRun(task, "completed");
     yield* f.runOnce();
-    assert.equal((yield* f.task()).status, "inferred");
+    assert.equal((yield* f.task()).status, "queued");
     assert.equal((yield* f.task()).sourceMessageId, task.sourceMessageId);
+    assert.equal((yield* f.task()).attempt?.attemptId, task.attempt?.attemptId);
+    assert.equal((yield* f.task()).conversation?.authorization, null);
+    assert.equal(f.operativeSends().length, 0);
+    yield* f.runOnce();
+    assert.equal((yield* f.task()).id, task.id);
+    assert.equal((yield* f.task()).sourceMessageId, "request-2");
   }
   {
     // the binding generation changed before the commit: the asserted generation no longer verifies

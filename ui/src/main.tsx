@@ -23,6 +23,7 @@ import {
   sessionHttpClient,
 } from "./api.js";
 import { admit, admittedMutation, authEpoch, authEpochAtom, draftFamily, environmentAtom, scopeKey, snapshotAtom, uiRuntime, type MutationKey } from "./atoms.js";
+import { themeAtom, ThemeSelector } from "./theme.js";
 import "./style.css";
 import { directoryRoute, homeRoute, RouteLink, useNavigation, type Route } from "./navigation.js";
 import { Home, useOverview } from "./overview.js";
@@ -360,7 +361,7 @@ function Settings({data, active, onDirtyChange}: {data: GuidanceSnapshot; active
   const [definitionsActivity, setDefinitionsActivity] = useState(idleControlActivity);
   const [noProjectActivity, setNoProjectActivity] = useState(idleControlActivity);
   useEffect(() => onDirtyChange(noProjectActivity.busy || noProjectActivity.dirty || noProjectActivity.uncertain || chatDirty || masterActivity.busy || masterActivity.uncertain || definitionsActivity.busy || definitionsActivity.uncertain), [noProjectActivity, chatDirty, masterActivity, definitionsActivity, onDirtyChange]);
-  return <section className="stack settings-workspace"><div className="page-heading"><h1>Instance settings</h1><p className="muted">Controls shared across this Supervisor installation. Project defaults live with each project.</p><p className="connection-summary"><span className={`dot ${data.connected ? "online" : ""}`}/>{data.connected ? "T3 connected" : "T3 disconnected"}</p></div><section className="settings-group stack"><h2>Where supervision runs</h2><SupervisionControlPanel active={active} onStateChange={setMasterActivity} onChanged={() => setControlRevision(value => value + 1)} /><NoProjectPanel active={active} onStateChange={setNoProjectActivity}/><GlobalDefinitionsControlPanel active={active} refreshKey={controlRevision} onStateChange={setDefinitionsActivity}/></section><section className="settings-group stack"><h2>Exceptions for individual chats</h2><ChatSettings data={data} onDirtyChange={setChatDirty}/></section>
+  return <section className="stack settings-workspace"><div className="page-heading"><h1>Instance settings</h1><p className="muted">Controls shared across this Supervisor installation. Project defaults live with each project.</p><p className="connection-summary"><span className={`dot ${data.connected ? "online" : ""}`}/>{data.connected ? "T3 connected" : "T3 disconnected"}</p></div><ThemeSelector/><section className="settings-group stack"><h2>Where supervision runs</h2><SupervisionControlPanel active={active} onStateChange={setMasterActivity} onChanged={() => setControlRevision(value => value + 1)} /><NoProjectPanel active={active} onStateChange={setNoProjectActivity}/><GlobalDefinitionsControlPanel active={active} refreshKey={controlRevision} onStateChange={setDefinitionsActivity}/></section><section className="settings-group stack"><h2>Exceptions for individual chats</h2><ChatSettings data={data} onDirtyChange={setChatDirty}/></section>
     <div className="panel stack"><h2>T3 connection</h2><p>{data.connected ? "Connected" : "Disconnected"} · Build: {data.serverVersion ?? "Unavailable"}</p><p>{data.coverage}</p>
       <details><summary>Advanced connection and editing details</summary><div className="stack"><h3>Project configuration editing</h3><p>Configure a dedicated credential with filesystem:read and filesystem:write at T3_PROJECT_WRITE_TOKEN_FILE through deployment setup. The editor writes only .t3-supervisor/project.yaml in the selected working directory. Step and workflow definitions are read-only in the dashboard.</p>
       <p>Native dialogue can record plan proposals and agreement; those records do not prove step execution.</p></div></details>
@@ -441,6 +442,7 @@ function Dashboard({onSignedOut}: {onSignedOut: () => void}) {
 }
 
 function App() {
+  useAtomMount(themeAtom);
   const access = useAtomValue(accessAtom);
   const {opened} = useAtomValue(dashboardOpened);
   const {busy, error: signInError} = useAtomValue(signInState);

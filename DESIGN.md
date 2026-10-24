@@ -499,6 +499,14 @@ Project pages use a restrained bottom boundary and teal current-item underline (
 
 ### Attention and notices
 
+The Task status includes the server's typed conversation mode and availability.
+“Following the conversation” uses existing quiet text only for current eligible
+supervision; updating, stale, uncertain, stopped and unavailable states have explicit
+text. Engaged mode composes the existing agreement and execution treatment. The
+native “Understanding and draft duties” disclosure keeps the evolving draft separate
+from acceptance and evidence. Background updates preserve focus; meaningful status
+changes use a polite live region, while interstitial catching-up updates remain silent.
+
 Attention rows keep title, reason and context together in an amber-bordered list. Hover uses a warmer surface; dark mode supplies its own border and hover colors. Quiet states use a teal-tinted inset and explanatory label. Informational and draft notices use blue-tinted backgrounds and boundaries. These treatments describe actual records or uncertainty.
 
 ### Task meaning and outcome
@@ -529,7 +537,7 @@ One “Evidence and history” disclosure follows the plan. It holds every Super
 
 Home keeps one supervision/plan status per work row, alongside separate native activity, objective, a concise reason or assessment and update time. Titles, objectives and summaries clamp to two lines; full context remains available in the conversation. Attention rows prioritize an actual reason, and an empty successful work list offers Choose a project. A stopped conversation appears once, in its work row, which opens its Supervision view with the stop record and Enable action.
 
-Activity uses human-readable event titles in chronological day groups. Inspect opens retained detail in the existing native dialog; history is not an unresolved-alert total. Instance settings groups where supervision runs and individual chat exceptions, exposes connection detail progressively, and separates disable actions from quiet reloads. Conversation Supervision leads with a health explanation and discloses monitoring/model details. Project settings first states which conversations are supervised (the project switch and the agent-created conversations checkbox), then the defaults for new Supervisors; per-control reloads stay quiet and exist to reconcile their own uncertain outcomes. Sign-in has one h1; the boot state keeps the shell with static skeleton bars and offers Retry only after a failed read.
+Activity uses human-readable event titles in chronological day groups. Inspect opens retained detail in the existing native dialog; history is not an unresolved-alert total. Instance settings begins with an Appearance control offering System, Light and Dark. The choice is saved in this browser, shared across its tabs and applied before the application paints; System follows device appearance without a saved override. If storage is blocked, the current page still changes and explains that it cannot save the choice. The native select keeps the existing palette, focus and narrow-screen reflow. Instance settings groups where supervision runs and individual chat exceptions, exposes connection detail progressively, and separates disable actions from quiet reloads. Conversation Supervision leads with a health explanation and discloses monitoring/model details. Project settings first states which conversations are supervised (the project switch and the agent-created conversations checkbox), then the defaults for new Supervisors; per-control reloads stay quiet and exist to reconcile their own uncertain outcomes. Sign-in has one h1; the boot state keeps the shell with static skeleton bars and offers Retry only after a failed read.
 
 Definitions asks for an explicit checkout choice (Project root or a main conversation's checkout, without task states); once chosen, a compact Checkout control shows the path and changes it; it never exceeds the available width, and on narrow screens its label stacks above a full-width select. Definitions uses compact, separated rows: name, origin, required/fixed flags, path, summary and a Full definition disclosure. Global entries remain read-only, and missing/invalid entries retain their identity and required flags. Guide serves operators first and authors second: a one-sentence introduction, then contents in two groups (a numbered “Follow supervised work” walkthrough and the “Write steps and workflows” reference topics; side by side on desktop, stacked on mobile). The walkthrough names the shipping labels in order: Home, Task and its outcome, proposal, acceptance and refinement, step evidence and history, Supervision, then Definitions and settings. Contents buttons focus the selected heading and scroll it into view.
 

@@ -172,10 +172,10 @@ it.effect("bounded unavailable preparation reads still dispatch a provisional wo
   const dispatched = yield* fixture.task();
   const request = fixture.dispatches()[0]?.payload.text;
   assert.equal(dispatched?.status, "waiting");
-  assert.equal(dispatched?.workflow?.status, "pending");
-  assert.equal(dispatched?.workflow?.definitionsStatus, "unavailable");
-  assert.equal(dispatched?.workflow?.definitionsComplete, false);
-  assert.equal(dispatched?.workflow?.requirementsKnown, false);
+  assert.equal(dispatched?.workflow ?? null, null, "preparation is not an operative proposal");
+  assert.equal(dispatched?.definitionContext?.status, "unavailable");
+  assert.equal(dispatched?.definitionContext?.complete, false);
+  assert.equal(dispatched?.definitionContext?.requirementsKnown, false);
   assert.equal(dispatched?.definitionContext?.revision, null);
   assert.match(String(request), /UNTRUSTED_WORKFLOW_ENVELOPE/u);
   assert.doesNotMatch(String(request), /"requirementsKnown"/u, "unknown definition details stay in the source-bound reader");
@@ -240,7 +240,7 @@ it.effect("three transient completion read failures stale only the proposal and 
     if (attempt < 3) {
       assert.equal(current?.status, "waiting");
       assert.equal(current?.objective, null);
-      assert.equal(current?.workflow?.status, "pending");
+      assert.equal(current?.workflow ?? null, null, "pending interpretation stays separate from the plan");
     }
   }
 
@@ -271,17 +271,15 @@ it.effect("interrupted and definitively rejected requests clear pending workflow
   yield* interruptedSupervisor.cycle;
   const interrupted = yield* interruptedFixture.task();
   assert.equal(interrupted?.status, "unavailable");
-  assert.equal(interrupted?.workflow?.status, "unavailable");
-  assert.equal(interrupted?.workflow?.plan, null);
+  assert.equal(interrupted?.workflow ?? null, null);
 
   const rejectedFixture = yield* makeWorkflowFixture();
   rejectedFixture.setDispatchFailure("rejected");
   yield* (yield* rejectedFixture.makeSupervisor()).cycle;
   const rejected = yield* rejectedFixture.task();
   assert.equal(rejected?.status, "unavailable");
-  assert.equal(rejected?.workflow?.status, "unavailable");
-  assert.equal(rejected?.workflow?.plan, null);
-  assert.match(rejected?.workflow?.message ?? "", /definitively rejected/u);
+  assert.equal(rejected?.workflow ?? null, null);
+  assert.match(rejected?.reason ?? "", /definitively rejected/u);
 }), { timeout: 60_000 });
 
 it.effect("unknown dispatch retry reuses the persisted request and definition context", () => Effect.gen(function* () {
@@ -330,7 +328,7 @@ it.effect("persisted objective-only records are not backfilled or replayed", () 
   assert.ok(native);
   addSupervisorRequest(native, {threadId: binding.threadId, messageId: legacyTask.messageId, text: legacyText});
   assert.equal(legacyTask.status, "waiting");
-  assert.equal(legacyTask.definitionContext, undefined);
+  assert.equal(legacyTask.definitionContext, null);
   assert.equal(legacyTask.workflow, undefined);
 
   const definitionsEnabledSupervisor = yield* fixture.makeSupervisor();
@@ -386,7 +384,8 @@ it.effect("a semantic not-needed decision is persisted without negotiation and t
     reason: "A short self-contained message with no workflow obligations.", sourceMessageIds: [sourceMessageId], supervision: "not_needed", workflow: null});
   yield* supervisor.cycle;
   const decided = (yield* fixture.task())!;
-  assert.equal(decided.status, "not_supervised");
+  assert.equal(decided.status, "inferred");
+  assert.equal(decided.supervision, "not_needed");
   assert.equal(decided.objective, "Thank the colleague and ask for the missing document");
   assert.equal(decided.workflow?.plan ?? null, null);
   yield* supervisor.cycle;
@@ -396,7 +395,7 @@ it.effect("a semantic not-needed decision is persisted without negotiation and t
   yield* supervisor.cycle;
   const next = (yield* fixture.task())!;
   assert.equal(next.sourceMessageId, "substantive-message");
-  assert.equal(next.contextMessageIds, undefined, "an answered not-needed request is complete and never carried into the next task as unresolved");
+  assert.deepEqual(next.contextMessageIds, [sourceMessageId], "the same conversation remains observable after a temporary triviality verdict");
   assert.equal(fixture.dispatches().length, 2, "a later genuine request is interpreted again in the same Supervisor conversation");
   assert.equal(fixture.dispatches().at(-1)?.payload.threadId, (yield* fixture.binding())!.threadId);
 }));
@@ -411,7 +410,7 @@ it.effect("after an explicit Enable only a request written after it is interpret
   yield* submitAndComplete(fixture, supervisor, first, {objective: "Thank the colleague and ask for the missing document",
     reason: "A short self-contained message with no workflow obligations.", sourceMessageIds: [sourceMessageId], supervision: "not_needed", workflow: null});
   yield* supervisor.cycle;
-  assert.equal((yield* fixture.task())!.status, "not_supervised");
+  assert.equal((yield* fixture.task())!.status, "inferred");
   // a request the human wrote while supervision was stopped, then an explicit Enable
   appendSourceMessage(source, "stopped-period-request", 2, "Now implement the export retry policy in the service.");
   const written = Date.parse(source.messages.at(-1)!.createdAt);
@@ -534,6 +533,7 @@ it.effect("the interpretation request carries the concise standing role once, pe
   assert.ok(task.roleVersion, "the root's first message carries the standing role");
   const occurrences = (part: string) => text.split(part).length - 1;
   assert.equal(occurrences("Never restate a human request"), 1);
+  assert.equal(occurrences("Thread tools: load this environment"), 1, "the standing role carries the local routing rule once");
   assert.equal(occurrences(`Standing instructions version ${task.roleVersion}.`), 1);
   assert.match(text, /Only local t3-code t3_thread_read\/t3_thread_send/u);
   assert.match(text, /MCPX mcpx_call_tool may invoke them/u);
@@ -550,7 +550,7 @@ it.effect("the interpretation request carries the concise standing role once, pe
   assert.match(submission, /supervision_interpretation_submit/u);
   assert.ok(submission.length < 1000, `submission block ${submission.length} characters`);
   // the standing role it carries once per instructions version includes the monitoring review duty and outcome rules (about 0.9 KB)
-  assert.ok(text.length - submission.length < 5500, `interpretation request ${text.length - submission.length} characters without the submission block`);
+  assert.ok(text.length - submission.length < 7200, `interpretation request ${text.length - submission.length} characters without the submission block`);
   yield* submitAndComplete(fixture, supervisor, task, workflowFields(sourceMessageId));
   yield* supervisor.cycle;
   assert.equal((yield* fixture.binding())!.deliveredRoleVersion, task.roleVersion, "the completed interpretation delivered the standing role");
@@ -636,7 +636,10 @@ it.effect("after an Enable the chat's next request is interpreted afresh by the 
   appendSourceMessage(source, "follow-up-message", 2, "Please also keep the old export working.");
   yield* supervisor.cycle;
   assert.equal((yield* fixture.task())!.id, first.id);
-  assert.equal(interpretations(), before);
+  assert.equal(interpretations(), before + 1, "a later genuine requester message is interpreted on the same task");
+  const followup = (yield* fixture.task())!;
+  yield* submitAndComplete(fixture, supervisor, followup, workflowFields(followup.sourceMessageId));
+  yield* supervisor.cycle;
   // after the human stops and enables supervision again, the next request gets a fresh interpretation in the same Supervisor
   const enabledAt = Date.now();
   yield* supervisor.store.recordChatEnable(sourceThreadId, enabledAt);
@@ -647,7 +650,7 @@ it.effect("after an Enable the chat's next request is interpreted afresh by the 
   assert.notEqual(fresh.id, first.id);
   assert.equal(fresh.sourceMessageId, "after-enable-greeting");
   assert.equal(fresh.supervisorThreadId, first.supervisorThreadId);
-  assert.equal(interpretations(), before + 1);
+  assert.equal(interpretations(), before + 2);
   assert.match(String(fixture.dispatches().at(-1)?.payload.text), /Hi, just checking in\./u);
 }));
 
@@ -706,5 +709,5 @@ it.effect("the proposal is introduced in the same cycle its interpretation compl
   yield* supervisor.cycle;
   assert.equal((yield* fixture.task())!.status, "inferred");
   const introduction = fixture.dispatches().find(call => call.payload.threadId === sourceThreadId);
-  assert.equal(introduction?.payload.messageId, `supervisor-notice:workflow:${task.id}`, "the introduction goes out in the completion cycle");
+  assert.equal(introduction?.payload.messageId, `supervisor-notice:workflow:${task.id}:${task.sourceHash.slice(0, 20)}`, "the introduction goes out in the completion cycle");
 }));

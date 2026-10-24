@@ -1,3 +1,4 @@
+import { ConversationStatus, ConversationUnderstanding } from "./conversation-status.js";
 import {alignmentLabel, PlanChanges, PlanJourney, planSteps, StepContributions, TaskAlignment, TaskOutcome} from "./workflow-journey.js";
 import {acceptedAgreement, journeyRecord, pendingProposal, planChanges, recordsByStep, stepNotes} from "./task-record.js";
 import {StopNotice} from "./stop-notice.js";
@@ -517,9 +518,9 @@ function ConnectedWork({threads, mainThreadId, workflows, coverage, task, comple
  * The canonical task workspace: the task and its current state, one journey, one agreement context and one place for
  * evidence and history. Statuses come only from the live workflow bound to this task.
  */
-export function TaskWorkspace({snapshot, task, threadId, progress, connected, attention, stopped, readAt, refreshing, onRefresh, onLoadMore, supervisionLink}: {
+export function TaskWorkspace({snapshot, task, threadId, progress, connected, attention, stopped, readAt, refreshing, onRefresh, onLoadMore, supervisionLink, currentRead = true}: {
   snapshot: ProjectSupervisorInfo; task: TaskInterpretationInfo | undefined; threadId: string; progress: WorkflowProgressPanelState | undefined; connected: boolean;
-  attention: readonly string[]; stopped: boolean; readAt: number | null; refreshing: boolean; onRefresh: () => void; onLoadMore: () => void; supervisionLink?: React.ReactNode;
+  attention: readonly string[]; stopped: boolean; readAt: number | null; refreshing: boolean; onRefresh: () => void; onLoadMore: () => void; supervisionLink?: React.ReactNode; currentRead?: boolean;
 }) {
   const view = progressView(progress?.pages ?? []);
   const mainWorkflow = view.workflowByThreadId.get(threadId);
@@ -538,12 +539,13 @@ export function TaskWorkspace({snapshot, task, threadId, progress, connected, at
   const mainThread = view.threadById.get(threadId);
   const assessmentState = currentAssessment ? `Assessed ${formatProgressTime(currentAssessment.updatedAt)}` : progress?.error ? "Assessment unavailable"
     : progress?.loading ? "Reading assessment…" : !view.complete ? "Assessment coverage incomplete" : mainWorkflow ? "Retained workflow; not linked to this task" : "No current workflow record";
-  const fallback = task?.status === "not_supervised" ? "Supervision not needed" : record.kind === "agreed" ? "Plan accepted · work not yet assessed"
+  const fallback = task?.engagement?.mode === "following" ? "Task scope remains open" : task?.status === "not_supervised" ? "Supervision not needed" : record.kind === "agreed" ? "Plan accepted · work not yet assessed"
     : task?.agreement?.status === "stale" ? "Plan needs acceptance again" : task?.workflow ? "Agreeing a plan"
     : task?.status === "waiting" || task?.status === "queued" || task?.status === "dispatching" ? "Reading the request"
     : progress?.loading ? "Reading assessment…" : "No assessment recorded";
   return <div className="task-workspace stack">
     <section className="task-band" aria-label="Task">
+      <ConversationStatus engagement={task?.engagement} fresh={connected && snapshot.available && currentRead}/>
       <p className="task-objective">{task?.objective ?? (snapshot.available ? "No task objective has been recorded for this conversation." : "The task could not be read.")}</p>
       {task?.reason && task.status !== "inferred" && <p className="muted">{task.reason}</p>}
       <TaskOutcome {...(currentAssessment && current ? {currentStep: current} : {})} assessment={currentAssessment} fallback={fallback} stopped={stopped}/>
@@ -553,6 +555,7 @@ export function TaskWorkspace({snapshot, task, threadId, progress, connected, at
         <span className="task-refresh">{readAt !== null && <span>Read {new Date(readAt).toLocaleTimeString()}</span>}<button type="button" className="quiet-button" disabled={!connected || refreshing} onClick={onRefresh}>{refreshing ? "Refreshing…" : "Refresh"}</button></span>
       </div>
     </section>
+    <ConversationUnderstanding draft={task?.conversation?.draft}/>
     {(attention.length > 0 || task?.definitionReview || task?.workflowProtocolDiagnostic) && <section className="notice stack attention-band" aria-labelledby="task-attention-title">
       <h2 id="task-attention-title">Needs attention</h2>
       {attention.length === 1 ? <p>{attention[0]}</p> : attention.length > 1 && <ul>{attention.map(reason => <li key={reason}>{reason}</li>)}</ul>}
@@ -567,7 +570,7 @@ export function TaskWorkspace({snapshot, task, threadId, progress, connected, at
       <section className="workflow-plan-surface" aria-labelledby="journey-title">
         <div className="journey-head">
           <h2 id="journey-title">{record.kind === "live" ? "Workflow" : record.kind === "agreed" ? "Accepted plan" : record.kind === "proposed" ? "Proposed plan" : "Plan"}</h2>
-          <span className="small muted">{record.kind === "live" ? `${steps.filter(step => step.status === "completed").length} of ${steps.length} steps assessed complete` : record.kind === "agreed" ? "Not yet assessed" : record.kind === "proposed" ? "Awaiting acceptance" : ""}</span>
+          <span className="small muted">{record.kind === "live" && !currentAssessment ? "Earlier scope assessments retained" : record.kind === "live" ? `${steps.filter(step => step.status === "completed").length} of ${steps.length} steps assessed complete` : record.kind === "agreed" ? "Not yet assessed" : record.kind === "proposed" ? "Awaiting acceptance" : ""}</span>
         </div>
         {record.kind === "none"
           ? <p className="muted">{task?.workflow ? "No plan structure is available for this proposal." : task ? "No workflow proposal was recorded for this task." : snapshot.available ? "No task interpretation or plan has been recorded for this conversation." : "Task and plan state could not be read. Their absence has not been established."}</p>
@@ -617,6 +620,7 @@ export function ProjectSupervisorView({
   section = "all",
   readAt = null,
   refreshing = false,
+  currentRead = true,
   onRefresh = () => {},
   supervisionLink,
   attentionEnabled = true,
@@ -657,6 +661,7 @@ export function ProjectSupervisorView({
   section?: ConversationSection;
   readAt?: number | null;
   refreshing?: boolean;
+  currentRead?: boolean;
   onRefresh?: () => void;
   supervisionLink?: React.ReactNode;
   snapshot: ProjectSupervisorInfo;
@@ -710,7 +715,7 @@ export function ProjectSupervisorView({
 
   return <div className="stack">
     {!snapshot.available && <p className="panel" role="alert">Supervisor state is unavailable. {snapshot.message}</p>}
-    {(section === "all" || section === "task") && threadId && <TaskWorkspace snapshot={snapshot} task={selectedTask} threadId={threadId} progress={workflowProgress} connected={connected}
+    {(section === "all" || section === "task") && threadId && <TaskWorkspace currentRead={currentRead} snapshot={snapshot} task={selectedTask} threadId={threadId} progress={workflowProgress} connected={connected}
       attention={attention} stopped={Boolean(snapshot.chatSupervision?.stopped)} readAt={readAt} refreshing={refreshing} onRefresh={onRefresh}
       onLoadMore={onWorkflowProgressLoadMore ?? (() => {})} {...(supervisionLink ? {supervisionLink} : {})}/>}
     {section === "supervision" && <Freshness readAt={readAt} refreshing={refreshing} connected={connected} onRefresh={onRefresh}/>}
@@ -762,7 +767,7 @@ export function ProjectSupervisorView({
         <p className="muted">{snapshot.noProjectMode ? noProjectEligibility[snapshot.noProjectMode] : "People’s requests in this project’s main conversations are supervised while the project switch above is on."}</p>
         <label className="toggle" htmlFor="supervisor-agent-created-threads"><input id="supervisor-agent-created-threads" name="superviseAgentCreatedThreads" type="checkbox"
           checked={agentThreads} onChange={event => onAgentThreadsChange(event.target.checked)} />
-          <span>Supervise conversations created by agents<small>Off by default. When on, requests written afterwards by the agent that launched an ordinary conversation {snapshot.noProjectMode ? "outside a project" : "in this project"} are interpreted and negotiated like a person’s task, and remain attributed to that agent. Earlier requests, other agents, Supervisor conversations, helpers and delegated child tasks are never supervised this way. Start, Stop and definition approval still need a person.{snapshot.noProjectMode && " The No Project mode still decides which chats are supervised."}</small></span>
+          <span>Supervise conversations created by agents<small>Off by default: agent-created conversations stay excluded even after later human messages. When on, genuine human requests and requests written afterwards by the agent that launched an ordinary conversation {snapshot.noProjectMode ? "outside a project" : "in this project"} are interpreted and negotiated like a person’s task, and remain attributed to that agent. Earlier requests, other agents, Supervisor conversations, helpers and delegated child tasks are never supervised this way. Start, Stop and definition approval still need a person.{snapshot.noProjectMode && " The No Project mode still decides which chats are supervised."}</small></span>
         </label>
       </fieldset>
       <h3 className="form-section-title">Defaults for new Supervisors</h3>
@@ -1330,6 +1335,7 @@ export function ProjectSupervisorPanel({projectId, threadId, section = "all", at
       section={section}
       attentionEnabled={attentionEnabled}
       snapshot={activeSnapshot}
+      currentRead={!loadError}
       selection={activeDraft.modelValue}
       monitoring={activeDraft.monitoringValue}
       teamSettings={activeDraft.teamSettingsValue}

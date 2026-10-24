@@ -1,4 +1,7 @@
+import { conversationAuthorityCurrent, conversationMayContact, taskScopeRevision } from "./supervision-conversation.js";
+import { conversationOriginAllowed, projectRequesterPolicy } from "./task-requester.js";
 import { Cause, Clock, Context, Data, Deferred, Effect, Exit, Layer, Option, Schema } from "effect";
+import { ConversationDecision } from "./supervision-conversation-contract.js";
 import {supportingReferencesJsonSchema, supportingSkillsJsonSchema, definitionGuidanceProblem, describeDefinitionReferenceProblem, validDefinitionGuidance} from "./definition-references.js";
 import type { SqlError } from "effect/sql";
 import { GuidanceDb } from "./db.js";
@@ -748,6 +751,7 @@ export const supervisionInterpretationSubmitToolDefinition = {
       objective: {anyOf: [interpretationText(interpretationLimits.maxObjectiveLength), {type: "null"}]},
       reason: interpretationText(interpretationLimits.maxReasonLength),
       sourceMessageIds: {type: "array", maxItems: interpretationLimits.maxSourceMessageIds, items: idSchema()},
+      conversation: Schema.toJsonSchemaDocument(ConversationDecision).schema,
       supervision: {enum: ["needed", "not_needed"]},
       workflow: {anyOf: [{type: "object", additionalProperties: false, required: ["requirements", "plan"], properties: {
         requirements: {type: "array", maxItems: interpretationLimits.maxRequirementAssessments, items: {type: "object", additionalProperties: false,
@@ -1212,6 +1216,9 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
     validation?: WorkflowApplyValidationContext,
     validatedEvidence?: WorkflowStateEvidenceInput[],
   ): Effect.Effect<WorkflowWriteResult> => commit(guard, now, owner, payload, evidence, requestHash, () => Effect.gen(function* (): Effect.fn.Return<WorkflowWriteResult, SupervisionStoreError> {
+    const main = nativeScope.byId.get(owner.mainThreadId);
+    if (!main || !conversationOriginAllowed(main, yield* projectRequesterPolicy(supervisors, owner.projectId)))
+      return {status: "denied", operationId: operationIdOf(payload), reason: "conversation_origin_excluded"};
     // root-only (checked at entry): the outcome of the root's own pending check-in, which no team assignment governs
     if (payload.action === "record_review") return yield* recordReview(owner, payload, evidence, now);
     if (team) {
@@ -1257,10 +1264,13 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
     const activeTask = yield* supervisors.task(owner.mainThreadId);
     const activeProposalId = activeTask?.workflowProposalId ?? activeTask?.id;
     if (!activeTask || !activeTask.workflow || activeTask.id !== validation.expectedTaskId || activeProposalId !== validation.expectedProposalId ||
-      activeTask.sourceHash !== validation.expectedSourceHash || canonicalJson(activeTask.workflow) !== canonicalJson(validation.originalProposal) ||
+      taskScopeRevision(activeTask) !== validation.expectedSourceHash || canonicalJson(activeTask.workflow) !== canonicalJson(validation.originalProposal) ||
       canonicalJson(activeTask.agreement ?? null) !== canonicalJson(validation.acceptedTaskAgreement) ||
       (activeTask.agreementSourceHash ?? null) !== validation.acceptedTaskAgreementSourceHash || activeTask.status !== "inferred")
       return {status: "invalid", operationId: payload.input.operationId, reason: "current_task_proposal_changed"};
+    if (!conversationMayContact(activeTask)) return {status: "denied", operationId: payload.input.operationId, reason: "conversation_not_engaged"};
+    if (current.threadId === owner.mainThreadId && current.sourceBinding && current.sourceBinding.sourceHash !== validation.expectedSourceHash && payload.input.status === "completed")
+      return {status: "invalid", operationId: payload.input.operationId, reason: "new_scope_starts_planned"};
     const original = validation.originalProposal;
     const sourceBinding: WorkflowSourceBindingInfo = {
       workspaceRoot: original.workspaceRoot!, revision: original.revision!, globalRevision: original.globalRevision ?? null,
@@ -1273,7 +1283,7 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
       operationId: internalOperationId,
       workflowId: payload.input.workflowId,
       expectedRevision: payload.input.expectedRevision,
-      status: payload.input.status ?? current.status,
+      status: payload.input.status ?? (current.threadId === owner.mainThreadId && current.sourceBinding?.sourceHash !== validation.expectedSourceHash ? "planned" : current.status),
       objective: payload.input.objective === undefined ?
         current.objective ?? (current.threadId === owner.mainThreadId ? activeTask.objective : null) : payload.input.objective,
       sourceBinding: effectiveSourceBinding,
@@ -1287,7 +1297,6 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
     const target = {targetThreadId: current.threadId, mainThreadId: owner.mainThreadId};
     const currentBinding = current.sourceBinding;
     const currentPlan = currentBinding?.taskId === validation.expectedTaskId &&
-      currentBinding.sourceHash === validation.expectedSourceHash &&
       currentBinding.workspaceRoot === validation.pinnedContext.workspaceRoot &&
       currentBinding.revision === validation.pinnedContext.revision &&
       currentBinding.globalRevision === (validation.pinnedContext.globalRevision ?? null) &&
@@ -1423,9 +1432,10 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
 
   // the apply pin's checks before its fresh definitions read
   const applyPinTask = (owner: WorkflowOwner) => Effect.map(supervisors.task(owner.mainThreadId), (task): {status: "task"; task: PinnedTask; definitions: ProjectDefinitions["Service"]} |
-    {status: "invalid" | "unavailable"; reason: string} => {
+    {status: "invalid" | "unavailable" | "pending"; reason: string} => {
+    if (task?.conversation && !conversationMayContact(task)) return {status: "pending", reason: "conversation_not_engaged"};
     if (!task || task.threadId !== owner.mainThreadId || task.projectId !== owner.projectId || task.supervisorThreadId !== owner.supervisorThreadId ||
-      task.status !== "inferred" || !task.workflowProposalId && !isId(task.id) || !task.definitionSnapshot || !task.definitionContext || !task.workflow ||
+      !conversationMayContact(task) || !task.workflowProposalId && !isId(task.id) || !task.definitionSnapshot || !task.definitionContext || !task.workflow ||
       task.workflow.status !== "proposed" || task.workflow.definitionsStatus !== "ready" || !task.workflow.definitionsComplete ||
       !task.workflow.requirementsKnown || !task.workflow.plan || !task.workflow.workspaceRoot || !task.workflow.revision || !isText(task.sourceHash, 256) ||
       task.definitionSnapshot.status !== "ready" || !task.definitionSnapshot.complete || !task.definitionSnapshot.revision ||
@@ -1450,7 +1460,7 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
     const expectedProposalId = task.workflowProposalId ?? task.id;
     if (!isId(task.id) || !isId(expectedProposalId)) return {status: "invalid", reason: "current_task_identity_invalid"};
     return {status: "ready", validation: {pinnedContext: proposalContextFromDefinitions(snapshot), originalProposal: task.workflow,
-      expectedTaskId: task.id, expectedProposalId, expectedSourceHash: task.sourceHash,
+      expectedTaskId: task.id, expectedProposalId, expectedSourceHash: taskScopeRevision(task),
       acceptedTaskAgreement: task.agreement ?? null, acceptedTaskAgreementSourceHash: task.agreementSourceHash ?? null}};
   };
 
@@ -1561,7 +1571,7 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
       intake = {owner, attempt, argumentsCanonical: raw.canonical, argumentsHash: raw.hash, decoded: null, startVerdict: recorded.receipt.startVerdict};
     } else {
       const pendingStart = taskPendingStart(task, yield* supervisors.start(binding.mainThreadId));
-      const decoded = yield* decodeInterpretationSubmission(input, {definitionContext: task.definitionContext ?? null, pendingStart}).pipe(
+      const decoded = yield* decodeInterpretationSubmission(input, {definitionContext: task.definitionContext ?? null, pendingStart, requireConversation: Boolean(task.conversation)}).pipe(
         Effect.match({onFailure: interpretationInvalidResult, onSuccess: (value) => value}));
       if ("status" in decoded) return decoded;
       rawArguments = decoded.rawArguments;
@@ -1754,15 +1764,20 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
     if (references.status !== "ready") return {status: references.status, operationId, reason: references.reason,
       ...(references.status === "pending" ? {retryable: true} : {})};
     const pinned = yield* applyPinTask(owner);
-    if (pinned.status !== "task") return {status: pinned.status, operationId, reason: pinned.reason};
+    if (pinned.status !== "task") return {status: pinned.status, operationId, reason: pinned.reason,
+      ...(pinned.status === "pending" ? {retryable: true} : {})};
     const fresh = yield* settled(untilCancelled(pinned.definitions.load(owner.projectId, owner.mainThreadId), cancel));
+    // last native read: a pause, revocation, edit or newer requester message during proof/definition reads defers this write.
+    const main = yield* settled(native.projection(owner.mainThreadId, cancel));
     const interrupted = yield* Deferred.isDone(cancel);
-    // the block after the definitions read: the pin's checks and the commit
-    return yield* admitted((guard, now) => {
+    return yield* admitted((guard, now) => Effect.gen(function* () {
       const pin = applyPinFinish(owner, pinned.task, fresh, interrupted);
-      if (pin.status !== "ready") return Effect.succeed<WorkflowWriteResult>({status: pin.status, operationId, reason: pin.reason});
-      return commitWrite(guard, now, owner, payload, evidence, requestHash, lineage.scope, pin.validation, references.evidence);
-    });
+      if (pin.status !== "ready") return {status: pin.status, operationId, reason: pin.reason} satisfies WorkflowWriteResult;
+      const current = yield* supervisors.task(owner.mainThreadId);
+      if (Option.isNone(main) || !current || !conversationAuthorityCurrent(current, main.value, yield* projectRequesterPolicy(supervisors, owner.projectId)))
+        return {status: "pending", operationId, reason: "conversation_authority_not_current", retryable: true} satisfies WorkflowWriteResult;
+      return yield* commitWrite(guard, now, owner, payload, evidence, requestHash, lineage.scope, pin.validation, references.evidence);
+    }));
   });
 
   return WorkflowWriteController.of({

@@ -5,6 +5,7 @@ import {Clock, Context, Deferred, Effect, Exit, Layer} from "effect";
 import type {GuidanceDb} from "../src/db.js";
 import {guidanceTransaction} from "../src/guidance-sql.js";
 import {fingerprint} from "../src/guidance-store.js";
+import {emptyConversation} from "../src/supervision-conversation-contract.js";
 import {defaultSupervisorModel, type BindingRecord, type ProjectSupervisorStore, type TaskRecord} from "../src/project-supervisor-store.js";
 import {ProjectDefinitions} from "../src/project-definitions.js";
 import {SupervisionScopeService} from "../src/supervision-gate.js";
@@ -399,9 +400,16 @@ const makeControllerFixture = Effect.gen(function* () {
     updatedAt: yield* Clock.currentTimeMillis, workflow: proposal, agreement: null, workflowProposalId: "proposal-current", sourceHash,
     requestText: "Complete the current project task.", supervisorThreadId, messageId: "source-message-current", dispatchedAt: null, replayCount: 0,
     supervisorRunId: "source-run-current", sourceOrdinal: 1, definitionContext, definitionSnapshot: definitions};
-  yield* supervisors.saveTask(task);
+  const source = {messageId: task.sourceMessageId, runId: task.sourceRunId, ordinal: 1, hash: sourceHash, requester: "human" as const};
+  yield* supervisors.saveTask({...task, conversation: {...emptyConversation(task.updatedAt), considered: source, observed: source,
+    authorization: {scopeRevision: sourceHash, outcome: task.objective!, limits: [], scopeSources: [source], state: "authorized", stateSource: source, attemptId: "fixture-source"}}});
   const threads = [thread(mainThreadId, projectId), thread(supervisorThreadId, projectId)];
   const projection: Projection = {thread: thread(supervisorThreadId, projectId), runs: [], messages: [], nodes: [], turnItems: []};
+  const mainProjection: Projection = {thread: threads[0]!, runs: [{id: task.sourceRunId, threadId: mainThreadId, ordinal: 1, status: "completed",
+    rootNodeId: "source-root", userMessageId: task.sourceMessageId, requestedAt: "2026-10-01T10:00:00Z", startedAt: "2026-10-01T10:00:00Z", completedAt: "2026-10-01T10:01:00Z"}],
+    messages: [{id: task.sourceMessageId, threadId: mainThreadId, runId: task.sourceRunId, nodeId: "source-root", role: "user", streaming: false,
+      text: task.requestText, createdBy: "user", creationSource: "web", createdAt: "2026-10-01T10:00:00Z", updatedAt: "2026-10-01T10:00:00Z"}],
+    nodes: [{id: "source-root", rootNodeId: "source-root", kind: "root_turn", threadId: mainThreadId, runId: task.sourceRunId, status: "completed"}], turnItems: []};
   const details = new Map<string, unknown>();
   // listThreads can hold its callers until a given number arrived, so concurrent writes reach their commit together
   const listThreadsGate: ControllerFixture["listThreadsGate"] = {waiting: 0, arrived: 0, open: null};
@@ -415,7 +423,7 @@ const makeControllerFixture = Effect.gen(function* () {
       }
       return threads;
     }),
-    projection: (id) => id === supervisorThreadId ? Effect.succeed(projection) : Effect.die(new Error("unexpected_projection")),
+    projection: (id) => id === supervisorThreadId ? Effect.succeed(projection) : id === mainThreadId ? Effect.succeed(mainProjection) : Effect.die(new Error("unexpected_projection")),
     getTurnItem: ({itemId}) => Effect.succeed({item: details.get(itemId) ?? null}),
   });
   // only the fresh pin read of the definitions is used
@@ -427,7 +435,7 @@ const makeControllerFixture = Effect.gen(function* () {
       Layer.succeed(WorkflowNativeAccess, native), Layer.succeed(ProjectDefinitions, loader))),
   )).pipe(Effect.orDie);
   // the run has read the catalog's classifications, as every supervision cycle does before workflow editing is enabled
-  yield* Context.get(run, SupervisionScopeService).rememberScratchProjects([{id: projectId, workspaceRoot: definitions.workspaceRoot}]).pipe(Effect.orDie);
+  yield* Context.get(run, SupervisionScopeService).rememberCatalog([{id: projectId, workspaceRoot: definitions.workspaceRoot}], yield* native.listThreads()).pipe(Effect.orDie);
   const fixture: ControllerFixture = {sql, supervisors, workflows, controller: Context.get(run, WorkflowWriteController), binding, projectId, mainThreadId,
     supervisorThreadId, projection, details, proposal, sourceBinding: {workspaceRoot: definitions.workspaceRoot, revision: definitions.revision, globalRevision: null,
       definitionsStatus: "ready", definitionsComplete: true, requirementsKnown: true, taskId: "task-current", proposalId: "proposal-current", sourceHash}, listThreadsGate};

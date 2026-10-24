@@ -24125,6 +24125,13 @@
     "kind": "config-or-asset",
     "baselineDisposition": "update"
    },
+   "scripts/cutover-conversation.ts": {
+    "kind": "source",
+    "baselineDisposition": null,
+    "status": "entry",
+    "reason": "One-off stopped-service task JSON cutover; process edge runs one scoped Effect program using the existing SQL/native read clients.",
+    "facadeImports": []
+   },
    "scripts/probe-t3.ts": {
     "kind": "script",
     "baselineDisposition": "update",
@@ -24432,6 +24439,20 @@
     "kind": "source",
     "baselineDisposition": null,
     "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "src/supervision-conversation-contract.ts": {
+    "kind": "source",
+    "baselineDisposition": null,
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "src/supervision-conversation.ts": {
+    "kind": "source",
+    "baselineDisposition": null,
+    "status": "pure",
     "reason": null,
     "facadeImports": []
    },
@@ -24746,6 +24767,20 @@
    "test/config.test.ts": {
     "kind": "test",
     "baselineDisposition": "port-tests",
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/conversation-cutover.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": "Scoped loopback HTTP peer exercises the actual native read client against a disposable SQLite backup.",
+    "facadeImports": []
+   },
+   "test/conversation-prior-work.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
     "status": "effect-test",
     "reason": null,
     "facadeImports": []
@@ -25522,6 +25557,13 @@
     "baselineDisposition": "port-tests",
     "status": "pure-test",
     "reason": null,
+    "facadeImports": []
+   },
+   "test/supervision-conversation.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": "Real native WebSocket transport adapter is scoped to the lifecycle regression.",
     "facadeImports": []
    },
    "test/supervision-gate-transaction.test.ts": {
@@ -26582,6 +26624,13 @@
     "kind": "config-or-asset",
     "baselineDisposition": "preserve"
    },
+   "ui/public/theme-init.js": {
+    "kind": "config-or-asset",
+    "baselineDisposition": null,
+    "status": "adapter",
+    "reason": "synchronous pre-paint browser bootstrap applies a validated saved color scheme before the React/Atom runtime loads; storage failure retains the CSS system default",
+    "facadeImports": []
+   },
    "ui/src/access.ts": {
     "kind": "ui",
     "baselineDisposition": "port",
@@ -26600,6 +26649,13 @@
     "kind": "ui",
     "baselineDisposition": null,
     "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "ui/src/conversation-status.tsx": {
+    "kind": "ui",
+    "baselineDisposition": null,
+    "status": "pure",
     "reason": null,
     "facadeImports": []
    },
@@ -26705,6 +26761,13 @@
     "reason": null,
     "facadeImports": []
    },
+   "ui/src/theme.tsx": {
+    "kind": "ui",
+    "baselineDisposition": null,
+    "status": "adapter",
+    "reason": "synchronous browser storage and color-scheme metadata adapter; preference lives in an Atom and the registry owns its cross-tab storage listener",
+    "facadeImports": []
+   },
    "ui/src/vite-env.d.ts": {
     "kind": "ui",
     "baselineDisposition": "preserve",
@@ -26736,7 +26799,7 @@
    "entry": 15,
    "pure": 25,
    "effect": 120,
-   "adapter": 16,
+   "adapter": 18,
    "effect-test": 139,
    "pure-test": 11,
    "harness": 36,

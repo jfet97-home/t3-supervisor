@@ -1,3 +1,5 @@
+import { taskScopeRevision } from "../../src/supervision-conversation-contract.js";
+import { engagedTask } from "./engaged-task.js";
 import assert from "node:assert/strict";
 import { join } from "node:path";
 import { Effect, type Scope } from "effect";
@@ -369,7 +371,7 @@ export const makeFixture = (clock: FixtureClock, options: FixtureOptions = {}) =
       ordinal: 2,
       status: "running",
       messageId: "operative-active-input",
-      text: "Continue the task",
+      text: "Continue the task", createdBy: "system", creationSource: "server",
       now: clock.now - 20_000,
     });
     operative.thread.activeRunId = "operative-active-run";
@@ -418,7 +420,8 @@ export const makeFixture = (clock: FixtureClock, options: FixtureOptions = {}) =
       },
     }),
   };
-  const task = options.task === false || options.workflow === false ? draftTask : yield* setInterpretationSubmission(supervisor, draftTask, requiredRawPlan());
+  const authorized = engagedTask(draftTask, operative);
+  const task = options.task === false || options.workflow === false ? authorized : yield* setInterpretationSubmission(supervisor, authorized, requiredRawPlan());
   if (options.task !== false) yield* projectStore.saveTask(task);
   yield* projectStore.baseline({snapshotSequence: 1, threads: []});
 
@@ -435,7 +438,7 @@ export const makeFixture = (clock: FixtureClock, options: FixtureOptions = {}) =
     const messageId = `${threadId}-task`;
     const messageText = `Implement ${taskId}`;
     const source = appendRun({projection, id: `${threadId}-source-run`, ordinal: 1, status: "completed", messageId, text: messageText, now: clock.now - 120_000});
-    const activeRun = appendRun({projection, id: `${threadId}-active-run`, ordinal: 2, status: "running", messageId: `${threadId}-active-input`, text: "Continue the task", now: clock.now - 20_000});
+    const activeRun = appendRun({projection, id: `${threadId}-active-run`, ordinal: 2, status: "running", messageId: `${threadId}-active-input`, text: "Continue the task", createdBy: "system", creationSource: "server", now: clock.now - 20_000});
     projection.thread.activeRunId = activeRun.id;
     projections.set(threadId, projection);
     projections.set(reserved.threadId, ownSupervisor);
@@ -447,7 +450,7 @@ export const makeFixture = (clock: FixtureClock, options: FixtureOptions = {}) =
       sourceOrdinal: source.ordinal, definitionContext: context, definitionSnapshot: {...definitionSnapshot, threadId},
       messageId: `supervisor-objective:${taskId}`, supervisorThreadId: reserved.threadId,
       workflow: {status: "proposed", message: "A draft is ready.", workspaceRoot, revision, globalRevision: null, ...requiredPlanForContext(context)}};
-    const boundTask = yield* setInterpretationSubmission(ownSupervisor, draftBound, requiredRawPlan());
+    const boundTask = yield* setInterpretationSubmission(ownSupervisor, engagedTask(draftBound, projection), requiredRawPlan());
     yield* projectStore.saveTask(boundTask);
     const boundBinding = (yield* projectStore.binding(projectId, threadId)) as BindingRecord;
     return {binding: boundBinding, supervisor: ownSupervisor, projection, task: boundTask, run: runOf(process, threadId, ownSupervisor, threadList)};
@@ -547,11 +550,11 @@ const isFullRecord = (value: unknown): value is FullWorkflowRecord => typeof val
 const draftRequirements = (workflow: WorkflowPlanValue) => workflow.requirements.map(item => ({kind: item.kind, id: item.id,
   applies: item.state === "not_applicable" ? false : item.state === "unknown" ? "unknown" as const : true, reason: item.reason}));
 /** The compact draft a root publishes for a canonical plan; the service re-derives the identical canonical record. */
-export const compactDraft = (task: TaskRecord, record: FullWorkflowRecord) => ({taskId: record.taskId, taskRevision: task.sourceHash, proposalId: record.proposalId,
+export const compactDraft = (task: TaskRecord, record: FullWorkflowRecord) => ({taskId: record.taskId, taskRevision: taskScopeRevision(task), proposalId: record.proposalId,
   revision: record.revision, draft: {requirements: draftRequirements(record.workflow), plan: record.workflow.plan}});
 /** The operative's compact acceptance of a canonical record: its task, proposal and exact digest. */
 const acceptanceReference = (task: TaskRecord, record: FullWorkflowRecord) => ({taskId: record.taskId, proposalId: record.proposalId,
-  digest: compactProposalDigest({taskId: task.id, taskRevision: task.sourceHash}, {workspaceRoot: record.workspaceRoot!, revision: record.revision, workflow: record.workflow})});
+  digest: compactProposalDigest({taskId: task.id, taskRevision: taskScopeRevision(task)}, {workspaceRoot: record.workspaceRoot!, revision: record.revision, workflow: record.workflow})});
 
 const appendAssistantTurn = (projection: Projection, id: string, text: string, now: number) => {
   const ordinal = projection.runs.reduce((value, run) => Math.max(value, run.ordinal), 0) + 1;

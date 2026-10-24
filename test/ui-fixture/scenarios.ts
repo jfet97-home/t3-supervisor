@@ -276,6 +276,7 @@ export class FixtureModel {
         supervisorThreadId: thread.binding?.threadId ?? `fixture-supervisor-${thread.id.slice("fixture-thread-".length)}`,
         stop: stopped && stop ? {route: stop.stoppedBy, callerThreadId: null, userMessageId: null, stoppedAt: stop.stoppedAt} : null,
         nativeState: journey && journey.task.status !== "waiting" && assessment?.status !== "completed" ? "active" as const : "quiet" as const, supervision, objective: task?.objective ?? null,
+        ...(task?.engagement ? {engagement: task.engagement} : {}),
         reason: task?.reason ?? "Fixture: no task recorded.", taskStatus: task?.status ?? null, planStatus: task?.agreement?.status ?? task?.workflow?.status ?? null,
         assessment: assessment ? {status: assessment.status, summary: assessment.summary, updatedAt: assessment.updatedAt} : null,
         attention, updatedAt: assessment?.updatedAt ?? task?.updatedAt ?? null,
@@ -560,7 +561,7 @@ export class FixtureModel {
 }
 
 export const scenarioNames = [
-  "journey-request", "journey-proposal", "journey-agreed", "journey-working", "journey-attention", "journey-revised", "journey-reagreed", "journey-verified",
+  "journey-request", "journey-following", "journey-catching-up", "journey-paused", "journey-proposal", "journey-agreed", "journey-working", "journey-attention", "journey-revised", "journey-reagreed", "journey-verified",
   "journey-nested", "journey-nested-attention", "journey-completed", "journey-stale", "journey-retained",
   "baseline", "session-expiry-next-call", "signout-other-tab", "mutation-never-answered", "mutation-dropped",
   "save-401", "save-403", "save-409", "save-413", "editor-conflict", "editor-uncertain", "slow-reads", "setup-race", "reload",
@@ -586,6 +587,9 @@ const plan = (arms: Arm[], revokeSessions = false): ScenarioPlan => ({arms, revo
 
 export const scenarioCatalog: Record<ScenarioName, {description: string; plan: (params: ScenarioParams) => ScenarioPlan}> = {
   "journey-request": {description: "reconstructed packing example: the request is being interpreted", plan: () => plan([])},
+  "journey-following": {description: "reconstructed packing example: quiet discussion and draft understanding", plan: () => plan([])},
+  "journey-catching-up": {description: "reconstructed packing example: a newer requester message is being considered", plan: () => plan([])},
+  "journey-paused": {description: "reconstructed packing example: discussion with prior agreement and progress retained", plan: () => plan([])},
   "journey-proposal": {description: "reconstructed packing example: Change workflow proposed", plan: () => plan([])},
   "journey-agreed": {description: "reconstructed packing example: proposal accepted, no assessment yet", plan: () => plan([])},
   "journey-working": {description: "reconstructed packing example: scope and evidence assessed, design underway", plan: () => plan([])},

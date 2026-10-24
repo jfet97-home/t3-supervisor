@@ -1,3 +1,4 @@
+import { taskScopeRevision } from "./supervision-conversation.js";
 import { Buffer } from "node:buffer";
 import { Exit, Schema } from "effect";
 import { definitionGuidanceFields, validDefinitionGuidance, type DefinitionGuidance } from "./definition-references.js";
@@ -361,7 +362,7 @@ export const buildProjectDefinitionReviewRequest = (
     observed: observedSnapshotContext(approved, observed),
     decisionTemplate: changed ? {taskId: task.id, expectedRevision: approved.revision, observedRevision: observed.revision,
       decision: "authorized|revert_requested", userMessageIds: [], reason: ""} : null,
-    proposalTemplate: observed.status === "ready" && observed.complete ? {taskId: task.id, taskRevision: task.sourceHash, proposalId,
+    proposalTemplate: observed.status === "ready" && observed.complete ? {taskId: task.id, taskRevision: taskScopeRevision(task), proposalId,
       revision: observed.revision, draft: {requirements: [], plan: {kind: "sequence", nodes: []}}} : null,
     completionMarker,
   };

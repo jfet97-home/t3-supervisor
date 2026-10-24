@@ -21,6 +21,7 @@ import type { GateGuard, SupervisionScope } from "./supervision-gate.js";
 import { projectRequesterPolicy, taskRequester, type TaskRequesterPolicy } from "./task-requester.js";
 import type { Projection, ThreadInfo } from "./types.js";
 import { canonicalJson, isRecord, workflowRequestHash, workflowToolInputMaxBytes } from "./workflow-write-evidence.js";
+import { requesterSources, resolveConversationDecision } from "./supervision-conversation.js";
 import type { WorkflowOwner } from "./workflow-state-contract.js";
 
 // the typed interpretation intake and its finalization inputs (plan 3.12 items 5 and 7): the receipt an attempt's first verified
@@ -203,6 +204,18 @@ export const commitInterpretationSubmission = (input: {
   if (!(yield* guard.scopeEnabled(owner.projectId, owner.mainThreadId, "interpretation"))) return {status: "denied", code: "supervision_disabled"};
   // the pinned source revision is still the genuine human request, and no Enable or boundary since makes it expire
   if (!(yield* checks.currentSource(task, intake.main)) || (yield* checks.beforeBoundary(task, intake.main))) return {status: "stale", code: "attempt_not_current"};
+  if (decoded.payload.kind === "interpretation" && decoded.payload.conversation) {
+    const policy = yield* checks.requesterPolicy(task.projectId);
+    const rawFloor = yield* checks.sourceFloor(task.threadId, intake.main);
+    const floor = intake.startVerdict ? Math.min(rawFloor ?? task.sourceOrdinal, task.sourceOrdinal - 1) : rawFloor;
+    const enabledAt = intake.startVerdict ? null : yield* store.chatEnabledAt(task.threadId);
+    const watermark = requesterSources(intake.main, policy, floor ?? Infinity, enabledAt).find(source => source.messageId === task.sourceMessageId);
+    const resolved = watermark && floor !== null ? resolveConversationDecision({previous: task.conversation, decision: decoded.payload.conversation,
+      main: intake.main, policy, floor, enabledAt, watermark, attemptId: attempt.attemptId, now: input.now, initialRevision: task.sourceHash}) : null;
+    if (!resolved || !resolved.ok) return resolved && !resolved.ok && resolved.reason === "requester_watermark_changed"
+      ? {status: "stale", code: "attempt_not_current"}
+      : {status: "invalid", code: "arguments_schema", issues: [{code: "invalid_value", path: "/conversation"}]};
+  }
   if (intake.startVerdict) {
     // the narrow interpretation-submission permission: the exact pinned Start, its mode and master generations, no later Stop or Enable
     const start = yield* store.start(owner.mainThreadId);

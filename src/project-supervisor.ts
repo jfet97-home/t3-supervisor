@@ -1,3 +1,6 @@
+import { localThreadToolRules, redact } from "./supervisor-workflow.js";
+import { emptyConversation } from "./supervision-conversation-contract.js";
+import { preserveOccurrenceIds, deriveConversationEngagement, requesterSources, resolveConversationDecision } from "./supervision-conversation.js";
 import { Cause, Clock, Context, Data, Deferred, Effect, Exit, FiberMap, HashMap, Layer, Option, Ref, Schedule, Schema } from "effect";
 import { resolve } from "node:path";
 import { assessmentForTask, workflowAssessment } from "./workflow-assessment.js";
@@ -7,10 +10,10 @@ import { mainConversation, resolveSupervisorScope, supervisorScopeKey } from "./
 import { fingerprint } from "./guidance-store.js";
 import { GuidanceDb } from "./db.js";
 import { guidanceSql, guidanceTransaction, type SupervisionStoreError } from "./guidance-sql.js";
-import { timestampMs } from "./domain.js";
+import { hasUnansweredHuman, nativeUserMessageVisible, timestampMs } from "./domain.js";
 import { ThreadPolicyStore } from "./thread-policy.js";
 import { isSupervisorThread, ProjectSupervisorStore, type ProjectSupervisorStoreError, type BindingRecord, type TaskRecord, type SupervisorBaseline, type SupervisionFolderPresence } from "./project-supervisor-store.js";
-import { taskRequester, type TaskRequesterPolicy } from "./task-requester.js";
+import { conversationOriginAllowed, taskRequester, type TaskRequesterPolicy } from "./task-requester.js";
 import { modelSelection, NativeOperateRpc, NativeRpc, NativeShell, sameModel, supervisorModels, validModelSelection, SupervisorRpcError } from "./supervisor-native.js";
 import type { ProjectSupervisorChatSupervisionInput, ProjectSupervisorInfo, ProjectSupervisorSaveInput, ProjectSupervisorSaveOutcome, ProjectSupervisorRetryInput, SupervisorModelSelection } from "./project-supervisor-contract.js";
 import { prepareWorkflowRequest } from "./supervisor-workflow.js";
@@ -316,7 +319,7 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
   const projectEnabled = (projectId: string, mainThreadId?: string): Effect.Effect<boolean, SupervisionStoreError> => scope.projectEnabled(projectId, mainThreadId);
   const project = (projectId: string) => Effect.gen(function* () {
     const catalog = yield* source.catalog();
-    yield* scope.rememberScratchProjects(catalog.projects.map(item => item.project));
+    yield* scope.rememberCatalog(catalog.projects.map(item => item.project), catalog.threads);
     const found = catalog.projects.find(p => p.project.id === projectId && p.available)?.project;
     if (!found) return yield* new ProjectUnavailable();
     return {project: found, catalog};
@@ -810,7 +813,7 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
   const candidates = (query = "", purpose: "start" | "exclude" = "start"): Effect.Effect<Candidates, StoreError | SupervisionStoreError> => Effect.gen(function* () {
     if (query.length > 512) return {exceptions: [], candidates: [], message: "Search is limited to 512 characters."};
     const catalog = yield* source.catalog();
-    yield* scope.rememberScratchProjects(catalog.projects.map(item => item.project));
+    yield* scope.rememberCatalog(catalog.projects.map(item => item.project), catalog.threads);
     const search = query.trim().replace(/^t3-thread:\/\/v1\//u, "").toLowerCase();
     const relevant = (projectId: string, threadId: string) => Effect.gen(function* () {
       return (yield* store.control(null)).enabled && ((yield* scope.isNoProject(projectId))
@@ -910,8 +913,14 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
     if (launched._tag === "Uncertain") return yield* new SupervisorCreationUncertain();
     return launched.binding;
   });
-  const prepareStarts = Effect.gen(function* () {
+  const prepareStarts = (catalog: CatalogValue) => Effect.gen(function* () {
     for (const start of yield* store.starts()) {
+      const main = catalog.threads.find(thread => thread.id === start.threadId);
+      if (start.status === "pending" && main && (yield* admitted(() => Effect.gen(function* () {
+        if (conversationOriginAllowed(main, yield* requesterPolicy(start.projectId))) return false;
+        yield* control.rejectStart(start, "The conversation origin is excluded by the current project opt-in.");
+        return true;
+      })))) continue;
       if (start.route === "ui" && start.status === "pending") {
         // the dashboard Start activation (or its rejection) as one admission section, acquired before its transaction opens
         const activated = yield* admitted(() => Effect.gen(function* () {
@@ -946,7 +955,7 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
           if (!(yield* guard.scopeEnabled(start.projectId, start.threadId, "interpretation")) || (yield* store.start(start.threadId))?.operationId !== start.operationId) return;
           yield* transaction(Effect.gen(function* () {
             yield* store.saveTask({id: taskId, threadId: start.threadId, projectId: start.projectId, sourceMessageId: message.id, sourceRunId: source.runId,
-              sourceOrdinal: source.ordinal, sourceHash: source.hash, status: "queued", objective: null, reason: "Preparing the explicitly requested supervision.",
+              sourceOrdinal: source.ordinal, sourceHash: source.hash, status: "queued", conversation: emptyConversation(now()), objective: null, reason: "Preparing the explicitly requested supervision.",
               updatedAt: now(), requestText: "", supervisorThreadId: binding.threadId, messageId: `supervisor-objective:${taskId}`,
               supervisorRunId: null, dispatchedAt: null, replayCount: 0});
             yield* store.saveStart({...(yield* store.start(start.threadId))!, taskPrepared: true});
@@ -957,7 +966,7 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
   });
   const overview = (page: {offset: number; limit: number}) => Effect.gen(function* () {
     const catalog = yield* source.catalog();
-    yield* scope.rememberScratchProjects(catalog.projects.map(item => item.project));
+    yield* scope.rememberCatalog(catalog.projects.map(item => item.project), catalog.threads);
     const read = readDashboardOverview({page, catalog, available: store.scopeCompatible && Boolean(operate), observedAt: now()}).pipe(Effect.provideContext(readServices));
     return yield* (workflows ? Effect.provideService(read, WorkflowStateStore, workflows) : read);
   });
@@ -967,7 +976,7 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
       const selected = catalog.threads.find(thread => thread.id === mainThreadId && thread.projectId === projectId);
       // a chat whose supervision is stopped stays inspectable so its state and the Enable supervision control remain visible
       if (!selected || mainConversation(selected, catalog.threads)?.id !== mainThreadId ||
-        !((yield* scope.eligible(selected, catalog.threads)) || (yield* scope.supervisionStopped(mainThreadId)) && scope.mainShape(selected))) return yield* new InvalidMainConversation();
+        !((yield* scope.eligible(selected, catalog.threads)) || ((yield* scope.supervisionStopped(mainThreadId)) || (yield* store.binding(projectId, mainThreadId))) && scope.mainShape(selected))) return yield* new InvalidMainConversation();
     }
     const binding = store.scopeCompatible && mainThreadId ? yield* store.binding(projectId, mainThreadId) : null;
     let selection: SupervisorModelSelection | null = null;let available = Boolean(operate && store.scopeCompatible);let message = binding ? "Supervisor conversation is being prepared." : "The Supervisor conversation will be created automatically for the first new task.";
@@ -1013,8 +1022,9 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
       stoppedBy: stop?.route ?? null, stoppedAt: stop?.stoppedAt ?? null,
       stoppedCallerThreadId: stop?.callerThreadId ?? null, stoppedUserMessageId: stop?.userMessageId ?? null,
       effectiveEnabled: yield* scope.scopeEnabled(projectId, mainThreadId), activation: (yield* scope.isNoProject(projectId)) ? (yield* store.start(mainThreadId))?.status ?? "not_started" : "automatic"} : null;
-    return {projectId, mainThreadId, ...((yield* scope.isNoProject(projectId)) ? {noProjectMode: (yield* store.noProjectControl()).mode} : {}), chatSupervision, team: binding && teamData ? supervisorTeamView(teamData, binding, catalog.threads, now()) : null, modelApplication: application ? {pending: application.pending, attempts: application.applyAttempts ?? 0, message: application.applicationMessage ?? null} : null, settings: {generation: current.generation, modelSelection: current.modelSelection, pending: false, monitoring: current.monitoring, teamSettings: current.teamSettings ?? {maxHelpersPerRoot: 5}, superviseAgentCreatedThreads: current.superviseAgentCreatedThreads}, monitoringStatus: yield* conversation.status(projectId, binding?.threadId ?? null), binding: binding ? {...binding, settlementState: binding.settlement?.state ?? null, keptActive: Boolean(binding.manualKeepActive)} : null, modelSelection: selection, models: advertised, available, message,
-      tasks: (binding ? yield* store.tasksFor(binding) : []).slice(-200).reverse().map(({id,sourceHash,threadId,projectId,sourceRunId,sourceMessageId,status,objective,reason,updatedAt,workflow,workflowProposalId,agreement,definitionReview,workflowProtocolDiagnostic}) => ({id,sourceHash,threadId,projectId,sourceRunId,sourceMessageId,status,objective,reason,updatedAt,workflow: workflow ?? null,
+    const monitoringStatus = yield* conversation.status(projectId, binding?.threadId ?? null);
+    return {projectId, mainThreadId, ...((yield* scope.isNoProject(projectId)) ? {noProjectMode: (yield* store.noProjectControl()).mode} : {}), chatSupervision, team: binding && teamData ? supervisorTeamView(teamData, binding, catalog.threads, now()) : null, modelApplication: application ? {pending: application.pending, attempts: application.applyAttempts ?? 0, message: application.applicationMessage ?? null} : null, settings: {generation: current.generation, modelSelection: current.modelSelection, pending: false, monitoring: current.monitoring, teamSettings: current.teamSettings ?? {maxHelpersPerRoot: 5}, superviseAgentCreatedThreads: current.superviseAgentCreatedThreads}, monitoringStatus, binding: binding ? {...binding, settlementState: binding.settlement?.state ?? null, keptActive: Boolean(binding.manualKeepActive)} : null, modelSelection: selection, models: advertised, available, message,
+      tasks: (binding ? yield* store.tasksFor(binding) : []).slice(-200).reverse().map(({id,sourceHash,threadId,projectId,sourceRunId,sourceMessageId,status,objective,reason,updatedAt,workflow,workflowProposalId,agreement,definitionReview,workflowProtocolDiagnostic,conversation,supervision}) => ({id,sourceHash,threadId,projectId,sourceRunId,sourceMessageId,status,objective,reason,updatedAt, ...(supervision ? {supervision} : {}), ...(conversation ? {conversation} : {}), engagement: deriveConversationEngagement({task: {status, sourceHash, conversation}, enabled: chatSupervision?.effectiveEnabled ?? false, available, monitoringState: monitoringStatus.state, bindingState: binding?.state, stale: !catalog.projects.find(item => item.project.id === projectId)?.available}), workflow: workflow ?? null,
         ...(workflowProposalId ? {workflowProposalId} : {}), agreement: agreement ?? null, workflowProtocolDiagnostic: workflowProtocolDiagnostic ?? null,
         ...(definitionReview ? {definitionReview} : {})}))};
   });
@@ -1082,10 +1092,15 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
   const dispatch = (job: TaskRecord, fresh: {readonly source: Projection} | null) => Effect.gen(function* () {
     if (!operate) return;
     const rpc = operate;
+    const root = yield* attempt(projection(job.supervisorThreadId));
+    if (!root.ok || hasUnansweredHuman(root.value)) return;
     yield* admitSend(gate, {
       identity: job.id,
       inFlight: dispatches,
       prepare: (guard) => transaction(Effect.gen(function* (): Effect.fn.Return<SendPreparation<void>, SupervisionStoreError> {
+        const held = yield* store.task(job.threadId);
+        if (!held || held.id !== job.id || held.messageId !== job.messageId || held.attempt?.attemptId !== job.attempt?.attemptId)
+          return {_tag: "Answer", value: undefined};
         const stopped = (yield* guard.supervisionStopped(job.threadId)) && !(yield* scope.validPendingStartFor(job.threadId));
         if (stopped || !(yield* guard.scopeEnabled(job.projectId, job.threadId, "interpretation"))) {
           if (job.status === "dispatching") yield* store.saveTask({...job, status: "queued", dispatchedAt: null,
@@ -1098,7 +1113,7 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
         if (fresh && (yield* beforeBoundary(job, fresh.source))) {yield* complete(job, "expired", null, enabledAgainReason);return {_tag: "Answer", value: undefined};}
         // the classification writes are plain statements of the in-flight operation; a failed one is its defect, as a thrown write was
         const uncertain = () => store.saveTask({...job, status: "uncertain", reason: "Interpretation dispatch is uncertain; retry native access to reconcile the original request identity.", updatedAt: now()}).pipe(Effect.orDie);
-        return {_tag: "Initiate", initiate: Effect.map(rpc.initiate("orchestration.dispatchCommand", {type: "message.dispatch", createdBy: "system", creationSource: "server", commandId: `supervisor-objective:${job.id}`,
+        return {_tag: "Initiate", initiate: Effect.map(rpc.initiate("orchestration.dispatchCommand", {type: "message.dispatch", createdBy: "system", creationSource: "server", commandId: `supervisor-objective:${job.attempt.attemptId}`,
           threadId: job.supervisorThreadId, messageId: job.messageId, text: job.requestText, attachments: [], dispatchMode: {type: "queue_after_active"}}), (flight) => ({
           result: Effect.gen(function* () {
             const reply = yield* attempt(flight.result);
@@ -1239,6 +1254,7 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
       }
       // the genuine main, read again after the final proof await: the snapshot from before that await is not the source a
       // verified result may apply. the read stays outside the admission section
+      const priorLive = workflows ? yield* workflows.get(job.projectId, job.threadId) : null;
       source = yield* projection(job.threadId);
       // from this read, the result's authority, the boundary recheck, the source check, the Start activation and the result
       // commit as one admission section
@@ -1279,8 +1295,52 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
             if (pendingStart) yield* control.rejectStart(pendingStart, "Start was superseded or could not be committed.");
             yield* complete(finished, "expired", null, "Start was not activated.");return "expired";
           }
-          const status = payload.objective === null ? "needs_context" as const : payload.supervision === "not_needed" ? "not_supervised" as const : "inferred" as const;
-          yield* complete(applied, status, payload.objective, payload.reason);return status;
+          let conversation = retained.conversation;
+          let scopeChanged = false;
+          if (payload.conversation) {
+            const rawFloor = yield* sourceFloor(finished.threadId, settled);
+            const floor = pendingStart ? Math.min(rawFloor ?? finished.sourceOrdinal, finished.sourceOrdinal - 1) : rawFloor;
+            const policy = yield* requesterPolicy(finished.projectId);
+            const enabledAt = pendingStart ? null : yield* store.chatEnabledAt(finished.threadId);
+            const watermark = requesterSources(settled, policy, floor ?? Infinity, enabledAt).find(item => item.messageId === finished.sourceMessageId);
+            const decision = watermark && floor !== null ? resolveConversationDecision({previous: retained.conversation, decision: payload.conversation,
+              main: settled, policy, floor, enabledAt, watermark, attemptId: receipt.attemptId, now: now(), initialRevision: finished.sourceHash}) : null;
+            if (!decision || !decision.ok) {
+              const observed = requesterSources(settled, policy, floor ?? Infinity, enabledAt).at(-1) ?? conversation?.observed ?? null;
+              if (decision && !decision.ok && decision.reason === "requester_watermark_changed") {
+                yield* store.saveTask({...retained, status: "queued", conversation: {...retained.conversation!, observed},
+                  reason: "A newer requester message superseded this decision; the original receipt is retained and the latest context will be considered.", updatedAt: now()});
+                return "queued";
+              }
+              yield* store.saveTask({...retained, status: "unavailable", reason: "Conversation decision could not be applied to the current requester scope; a later request can clarify it.",
+                ...(conversation ? {conversation: {...conversation, observed}} : {}), updatedAt: now()});
+              return "unavailable";
+            }
+            conversation = decision.facts; scopeChanged = decision.scopeChanged;
+          }
+          const engaged = conversation?.authorization?.state === "authorized";
+          const preservePlan = !scopeChanged || !engaged || payload.supervision === "not_needed";
+          const next: TaskRecord = {...applied, ...(payload.supervision ? {supervision: payload.conversation?.intent === "following" && retained.conversation?.authorization
+            ? retained.supervision ?? "needed" : payload.supervision} : {}), ...(conversation ? {conversation} : {}),
+            workflow: preservePlan ? retained.workflow ?? null : applied.workflow?.plan ? {...applied.workflow, plan: preserveOccurrenceIds(applied.workflow.plan,
+              priorLive?.sourceBinding?.taskId === retained.id ? priorLive.plan : retained.workflow?.plan ?? null)} : applied.workflow ?? null,
+            ...(preservePlan && retained.interpretationEvidence ? {interpretationEvidence: retained.interpretationEvidence} : {}),
+            ...(scopeChanged && engaged ? {workflowProposalId: `${finished.id}:scope:${conversation!.authorization!.scopeRevision.slice(0, 20)}`} : {}),
+            objective: engaged ? conversation!.authorization!.outcome : payload.objective};
+          // quiet drafts never become proposals. Same-scope pause/resume keeps the exact proposal and acceptance.
+          if (preservePlan && conversation) next.protocolAnchor = {supervisorThreadId: finished.supervisorThreadId,
+            sourceHash: finished.sourceHash, promptMessageId: finished.messageId,
+            ...(retained.protocolAnchor?.editedAfter === undefined ? {} : {editedAfter: retained.protocolAnchor.editedAfter})};
+
+          if (scopeChanged && engaged && retained.agreement && !retained.agreementSourceHash)
+            next.agreementSourceHash = retained.conversation?.authorization?.scopeRevision ?? retained.sourceHash;
+          if (scopeChanged && engaged) {
+            const introduced = yield* requests.introduction(retained.id);
+            if (introduced?.state === "sent") yield* requests.saveIntroduction({...introduced,
+              proposalId: retained.workflowProposalId ?? retained.agreement?.proposalId ?? retained.id});
+          }
+          const status = conversation?.authorization || next.objective !== null ? "inferred" as const : "needs_context" as const;
+          yield* complete(next, status, next.objective, payload.reason);return status;
         }));
       }));
     }));
@@ -1383,6 +1443,7 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
       return;
     }
     let job: TaskRecord = decided.job;
+    if (job.conversation?.observed && (job.conversation.observed.messageId !== job.sourceMessageId || job.conversation.observed.hash !== job.sourceHash)) return;
     const source = yield* projection(job.threadId);
     if (!(yield* projectEnabled(binding.projectId, binding.mainThreadId))) return;
     const sourced = job;
@@ -1433,13 +1494,22 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
         // a matching pending Start asks for its verdict in the same submission
         const startVerdict = taskPendingStart(preparing, yield* store.start(preparing.threadId));
         // the request quotes its attempt: the attempt key pins the binding generation, the task, its source revision and this exact text
+        const contextFloor = startVerdict ? preparing.sourceOrdinal - 1 : yield* sourceFloor(preparing.threadId, source);
+        const contextEnabledAt = startVerdict ? null : yield* store.chatEnabledAt(preparing.threadId);
         const build = (attemptId: string) => {
-          const request = prepareWorkflowRequest(preparing.threadId, preparing.sourceMessageId, message.text, loadedDefinitions, {earlierMessages,
+          const requesterMessages = requesterSources(source, requesters, contextFloor ?? Infinity, contextEnabledAt).filter(item => item.ordinal <= preparing.sourceOrdinal).slice(-12).map(item => ({...item,
+            text: redact(source.messages.find(message => message.id === item.messageId)?.text ?? "").slice(0, 1600)}));
+          const operativeMessages = source.messages.filter(item => item.role === "assistant" && item.streaming === false &&
+            (source.runs.find(run => run.id === item.runId)?.ordinal ?? Infinity) <= preparing.sourceOrdinal &&
+            (source.runs.find(run => run.id === item.runId)?.ordinal ?? -1) > (contextFloor ?? Infinity)).slice(-6)
+            .map(item => ({messageId: item.id, runId: item.runId, text: redact(item.text).slice(0, 1600)}));
+          const request = prepareWorkflowRequest(preparing.threadId, preparing.sourceMessageId, message.text, loadedDefinitions, {earlierMessages, conversationContext: {facts: preparing.conversation, requesterMessages, operativeMessages},
             ...(requester?.kind === "agent" ? {requester: {kind: "agent" as const, threadId: requester.threadId}} : {}),
             ...(reader ? {reader: {supervisorThreadId: owner.threadId, bindingGeneration: owner.generation}} : {}),
             submission: {supervisorThreadId: owner.threadId, bindingGeneration: owner.generation, taskId: preparing.id, attemptId,
               sourcePin: interpretationSourcePin(preparing), startVerdict}});
-          const requestText = role ? `${role.text}\n${request.requestText}` : request.requestText;
+          const requestText = role ? `${role.text}\n${request.requestText.startsWith(`${localThreadToolRules}\n`)
+            ? request.requestText.slice(localThreadToolRules.length + 1) : request.requestText}` : request.requestText;
           return {request, requestText, key: interpretationAttemptKey({bindingGeneration: owner.generation, task: preparing, requestMessageId: preparing.messageId, requestText})};
         };
         // an identical replay of the request keeps its attempt; a renewal, a source edit or any other request text mints a new one
@@ -1447,7 +1517,7 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
         const retained = replayed ? retainedInterpretationAttempt(preparing.attempt, replayed.key) : null;
         const built = retained && replayed ? replayed : build(interpretationAttemptId(mintedUuid));
         const attempt: InterpretationAttempt = retained ?? {attemptId: interpretationAttemptId(mintedUuid), key: built.key};
-        const next: TaskRecord = {...preparing, requestText: built.requestText, definitionContext: built.request.context, workflow: built.request.workflow,
+        const next: TaskRecord = {...preparing, requestText: built.requestText, definitionContext: built.request.context,
           definitionSnapshot: built.request.context ? loadedDefinitions : null, attempt, ...(role ? {roleVersion: role.roleVersion} : {})};
         yield* store.saveTask(next);
         return next;
@@ -1547,21 +1617,36 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
     const baseline = yield* sourceFloor(thread.id, main);if (baseline === null) return;
     // an explicit Enable or a new activation boundary supervises the chat's next request afresh, even after an agreed task
     const enabledSince = yield* store.chatEnabledAt(thread.id);
+    let expected = previous;
     const prior = previous ? yield* requests.introduction(previous.id) : null;
     // only an attempted introduction whose outcome is unknown holds the task; a never-attempted draft or a fallback whose
     // earlier attempts were definitely rejected is known unsent and does not strand the next request
-    const priorUnresolved = Boolean(prior && introductionOutcomeUnknown(prior));
-    const examine = (latestRunId: string) => Ref.update(examinedNonTasks, (map) => HashMap.set(HashMap.size(map) >= 10_000 ? HashMap.empty() : map, thread.id, latestRunId));
-    if (previous?.status === "inferred" && (priorUnresolved || !(previous.sourceOrdinal <= baseline || enabledSince !== null && previous.dispatchedAt !== null && previous.dispatchedAt <= enabledSince))) {
-      // an unresolved introduction is a mutable hold, so the chat is examined again until its delivery outcome is known
-      if (!priorUnresolved) {
-        if (typeof thread.latestRunId === "string") yield* examine(thread.latestRunId);
-        else yield* Ref.update(examinedNonTasks, (map) => HashMap.size(map) >= 10_000 ? HashMap.empty() : map);
+    let priorUnresolved = Boolean(prior && introductionOutcomeUnknown(prior));
+    if (priorUnresolved && prior) {
+      const visible = main.messages.find(message => message.id === prior.messageId && message.text === prior.text && message.creationSource === "server");
+      const run = main.runs.find(run => run.id === visible?.runId);
+      if (visible && run && nativeUserMessageVisible(main, run, visible)) {
+        yield* admitted(() => requests.saveIntroduction({...prior, state: "sent", error: null}));
+        priorUnresolved = false;
       }
-      return;
     }
-    // an explicit Enable supervises the chat's next request: a request written while supervision was stopped is not interpreted
-    const task = taskSource(main, Math.max(baseline, previous?.sourceOrdinal ?? 0), yield* store.chatEnabledAt(thread.id), yield* requesterPolicy(registered.id));
+    const examine = (latestRunId: string) => Ref.update(examinedNonTasks, (map) => HashMap.set(HashMap.size(map) >= 10_000 ? HashMap.empty() : map, thread.id, latestRunId));
+    const policy = yield* requesterPolicy(registered.id);
+    const latest = requesterSources(main, policy, baseline, enabledSince).at(-1);
+    if (previous?.conversation && latest && fingerprint(previous.conversation.observed) !== fingerprint(latest)) {
+      yield* admitted(() => Effect.gen(function* () {
+        const current = yield* store.task(thread.id);
+        if (current?.id === previous.id && current.conversation && fingerprint(current) === fingerprint(previous)) {
+          expected = {...current, conversation: {...current.conversation, observed: latest}};
+          yield* store.saveTask(expected);
+        }
+      }));
+    }
+    if (priorUnresolved || previous && inFlight(previous.status)) return;
+    const task = latest && (latest.ordinal > Math.max(baseline, previous?.sourceOrdinal ?? 0) || latest.ordinal > baseline &&
+      latest.ordinal === previous?.sourceOrdinal && (latest.hash !== previous.sourceHash || latest.messageId !== previous.sourceMessageId))
+      ? {run: main.runs.find(item => item.id === latest.runId)!, message: main.messages.find(item => item.id === latest.messageId)!,
+        requester: taskRequester(main, main.runs.find(item => item.id === latest.runId)!, main.messages.find(item => item.id === latest.messageId)!, policy)!} : null;
     // an agent request needs its launching conversation active in T3 and outside every Supervisor's lineage, so no Supervisor or
     // helper, nor anything they delegated, can open supervised work
     const requester = task?.requester;
@@ -1576,28 +1661,33 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
     if (!(yield* projectEnabled(registered.id, thread.id)) || freshMain.thread.projectId !== registered.id || !(yield* scope.eligible(freshMain.thread, catalog.threads))) return;
     const binding = yield* locks.withLock(supervisorScopeKey(registered.id, thread.id))(ensureBinding(registered.id, thread.id, thread.title));
     // the task identity, allocated before the recheck and the write
-    const id = yield* ids.uuid;
+    const continues = previous?.conversation && previous.status !== "expired" && previous.sourceOrdinal > baseline &&
+      (enabledSince === null || (timestampMs(main.messages.find(message => message.id === previous.sourceMessageId)?.createdAt) ?? 0) > enabledSince);
+    const id = continues ? previous.id : yield* ids.uuid;
     // the scope and identity rechecks and the new task run as one admission section
     yield* admitted(() => Effect.gen(function* () {
       if (!(yield* projectEnabled(registered.id, thread.id))) return;
       // an agent request stays a task source only while the project still supervises agent-created conversations
       if (!taskRequester(main, task.run, task.message, yield* requesterPolicy(registered.id))) return;
       // a task another discovery wrote for this chat since this one read it is never replaced: queued or in-flight work keeps its identity
-      if (((yield* store.task(thread.id))?.id ?? null) !== (previous?.id ?? null)) return;
+      const currentTask = yield* store.task(thread.id);
+      if (fingerprint(currentTask) !== fingerprint(expected) || currentTask && inFlight(currentTask.status)) return;
       // an earlier unresolved request carries forward only from the current supervision epoch: above the activation
       // boundary and written after the chat's latest Enable
       const enabledAt = yield* store.chatEnabledAt(thread.id);
-      const carried = previous?.status === "needs_context" ? [...(previous.contextMessageIds ?? []), previous.sourceMessageId].filter(messageId => {
+      const carried = continues || previous?.status === "needs_context" ? [...(previous.contextMessageIds ?? []), previous.sourceMessageId].filter(messageId => {
         const message = main.messages.find(item => item.id === messageId);
         const run = message?.runId ? main.runs.find(item => item.id === message.runId) : undefined;
         return Boolean(message && run && run.ordinal > baseline && (enabledAt === null || (timestampMs(message.createdAt) ?? 0) > enabledAt));
       }).slice(-5) : [];
       const oversized = task.message.text.length > 24_000;
-      yield* store.saveTask({id, threadId: thread.id, projectId: registered.id, sourceRunId: task.run.id, sourceMessageId: task.message.id,
-        sourceOrdinal: task.run.ordinal, sourceHash: fingerprint(task.message.text), status: oversized ? "needs_context" : "queued", objective: null,
+      yield* store.saveTask({...(previous?.id === id ? previous : {}), id, threadId: thread.id, projectId: registered.id, sourceRunId: task.run.id, sourceMessageId: task.message.id,
+        sourceOrdinal: task.run.ordinal, sourceHash: fingerprint(task.message.text), status: oversized ? "needs_context" : "queued", objective: previous?.id === id ? previous.objective : null,
+        conversation: {...(previous?.id === id ? previous.conversation ?? emptyConversation(now()) : emptyConversation(now())), observed: latest ?? null},
         reason: oversized ? "The task message exceeds the interpretation limit; provide a shorter task." : "Waiting for the project Supervisor.",
         updatedAt: now(), requestText: "", supervisorThreadId: binding.threadId,
-        messageId: `supervisor-objective:${id}`, supervisorRunId: null, dispatchedAt: null, replayCount: 0,
+        messageId: `supervisor-objective:${id}:${task.run.ordinal}:${fingerprint(task.message.text).slice(0, 20)}`, supervisorRunId: null, dispatchedAt: null, replayCount: 0,
+        definitionContext: null,
         // only an unresolved request carries forward; an answered not-needed request is complete and never merges into the next task
         ...(carried.length ? {contextMessageIds: carried} : {})});
     }));
@@ -1614,8 +1704,8 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
     // so it runs in an admission section
     if (masterEnabled) yield* admitted(() => Effect.flatMap(store.prune(now()), (expired) => requests.pruneAgreementCandidates(expired)));
     const catalog = yield* source.catalog();
-    yield* scope.rememberScratchProjects(catalog.projects.map(item => item.project));
-    if (masterEnabled) yield* prepareStarts;
+    yield* scope.rememberCatalog(catalog.projects.map(item => item.project), catalog.threads);
+    if (masterEnabled) yield* prepareStarts(catalog);
     const threads = yield* Effect.filter(catalog.threads, t => scope.eligible(t, catalog.threads));
     if (masterEnabled) {
       const candidatesNow = yield* Ref.modify(offset, (current) => [[...threads.slice(current), ...threads.slice(0, current)].slice(0, 20), threads.length ? (current + 20) % threads.length : 0] as const);
@@ -1630,9 +1720,9 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
         // an unresolved request or a temporary not-needed decision is reconsidered when the next genuine human request arrives; an
         // interpreted task is reconsidered only when the latest Enable or activation boundary came after it (checked below); queued
         // or in-flight work is never replaced
-        if (previous && !["needs_context", "not_supervised", "unavailable", "expired", "inferred"].includes(previous.status)) continue;
+
         const examined = Option.getOrUndefined(HashMap.get(yield* Ref.get(examinedNonTasks), thread.id));
-        if (typeof thread.latestRunId === "string" && (thread.latestRunId === previous?.sourceRunId ||
+        if (!previous?.conversation && typeof thread.latestRunId === "string" && (thread.latestRunId === previous?.sourceRunId ||
           thread.latestRunId === (yield* store.baseline())?.threads.find(anchor => anchor.id === thread.id)?.latestRunId ||
           thread.latestRunId === examined)) continue;
         // discovery failures are retried without producing model work

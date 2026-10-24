@@ -1,3 +1,4 @@
+import { ConversationEngagement, deriveConversationEngagement } from "./supervision-conversation-contract.js";
 import { Data, Effect, Option, Schema } from "effect";
 import type { BindingRecord, TaskRecord } from "./project-supervisor-store.js";
 import type { TaskInterpretationInfo, SupervisorMonitoringStatus } from "./project-supervisor-contract.js";
@@ -14,6 +15,7 @@ export const DashboardWork = Schema.Struct({
   supervision: Schema.Literals(["enabled", "stopped", "disabled"]),
   objective: Schema.NullOr(Schema.String),
   reason: Schema.String,
+  engagement: Schema.optionalKey(ConversationEngagement),
   taskStatus: Schema.NullOr(Schema.String),
   planStatus: Schema.NullOr(Schema.String),
   assessment: Schema.NullOr(Schema.Struct({status: Schema.String, summary: Schema.String, updatedAt: Schema.Number})),
@@ -118,6 +120,7 @@ export function buildDashboardOverview(input: {
       : main.activityRunStatus || main.latestRunCompletedAt ? "quiet" : "unknown";
     work.push({projectId: project.id, mainThreadId: main.id, title: main.title,
       supervisorThreadId: binding.threadId, nativeState, supervision, stop: supervision === "stopped" ? binding.supervisionStop ?? null : null,
+      engagement: deriveConversationEngagement({task, enabled: supervision === "enabled", available: input.available && project.available, bindingState: binding.state, monitoringState: monitoring.state}),
       objective: task?.objective?.slice(0, 800) ?? null,
       reason: (task?.reason ?? monitoring.message).slice(0, 800), taskStatus: task?.status ?? null,
       planStatus: task?.agreement?.status ?? task?.workflow?.status ?? null, assessment,

@@ -1,3 +1,5 @@
+import { engagedTask } from "./support/engaged-task.js";
+import { makeSourceProjection } from "./support/psx-submission.js";
 import assert from "node:assert/strict";
 import { it } from "@effect/vitest";
 import { Clock, Effect } from "effect";
@@ -88,6 +90,10 @@ const fixture = (at = wallClock) => Effect.gen(function* () {
   const monitor = guidance.monitor;
   const threadList = [makeThread("main"), makeThread("branch", "main", "subagent"), makeThread("leaf", "branch", "subagent"), makeThread("other", "main", "subagent")];
   const projections = new Map<string, Projection>(threadList.map(thread => [thread.id, emptyProjection(thread)]));
+  projections.set("main", makeSourceProjection("main", projectId, [{id: "source-message", sequence: 1, text: "Monitor the operational tree"}]));
+  yield* store.saveTask(engagedTask({id: "team-task", threadId: "main", projectId, sourceRunId: "run-source-message", sourceMessageId: "source-message",
+    sourceHash: fingerprint("Monitor the operational tree"), sourceOrdinal: 1, status: "inferred", objective: "Monitor the operational tree", reason: "Requested",
+    updatedAt: at, requestText: "", supervisorThreadId: binding.threadId, messageId: "team-interpretation", dispatchedAt: null, replayCount: 0, supervisorRunId: null}, projections.get("main")!));
   const runtime = (helperTransport?: HelperTransportShape | HelperTransportUnit,
     projection: ProjectionRead = threadId => Effect.sync(() => projections.get(threadId) ?? emptyProjection(makeThread(threadId)))) =>
     teamRuntimeUnit({stores: guidance, projection, ...(helperTransport ? {transport: helperTransport} : {})});
@@ -257,7 +263,7 @@ it.effect("helper observations run while a root-native check-in remains unresolv
     replayCount: 0, supervisorRunId: null,
     workflow: {status: "proposed", message: "Draft", workspaceRoot: "/workspace", revision: "revision", globalRevision: null, steps: [], workflows: []},
   } as unknown as TaskRecord;
-  yield* f.store.saveTask(task);
+  yield* f.store.saveTask(engagedTask(task, f.projections.get("main")!));
   const pendingRoot = yield* conversation.requests.prepare({projectId, supervisorThreadId: f.binding.threadId, kind: "review", taskId: null,
     text: "Existing root check-in.", batch: null, completionMarker: "root check-in complete"}, time + 3);
   yield* conversation.requests.saveRequest({...pendingRoot, state: "waiting", sentAt: time + 3});
@@ -305,7 +311,7 @@ it.effect("root observes fenced coverage explicitly and does not acknowledge its
     replayCount: 0, supervisorRunId: null,
     workflow: {status: "proposed", message: "Draft", workspaceRoot: "/workspace", revision: "revision", globalRevision: null, steps: [], workflows: []},
   } as unknown as TaskRecord;
-  yield* f.store.saveTask(task);
+  yield* f.store.saveTask(engagedTask(task, f.projections.get("main")!));
   yield* conversation.requests.saveIntroduction({taskId: task.id, projectId, threadId: task.threadId, supervisorThreadId: f.binding.threadId,
     state: "sent", text: "", messageId: "intro-sent", targetRunId: null, error: null});
 
@@ -1337,7 +1343,7 @@ it.effect("a successful helper result creates an event-only root wake and is ack
   let sequence = 0;
   const rpc: RpcHandler = () => Effect.succeed({sequence: ++sequence});
   const conversation = yield* supervisorConversationUnit({stores: f.guidance, rpc, projection: threadId => Effect.sync(() =>
-    threadId === f.binding.threadId ? rootProjection : emptyProjection(makeThread(threadId))),
+    threadId === f.binding.threadId ? rootProjection : f.projections.get(threadId) ?? emptyProjection(makeThread(threadId))),
   eligible: thread => thread.id === "main", enabled: () => true});
   yield* conversation.run(f.binding as BindingRecord, rootProjection, f.threadList);
   const request = yield* conversation.requests.pending(projectId, f.binding.threadId);

@@ -144,7 +144,7 @@ export function TaskAlignment({task, supervisorThreadId}: {task: TaskInterpretat
   const historical = Boolean(task && ["expired", "not_supervised"].includes(task.status));
   const proposal = pending ?? task?.workflow ?? task?.agreement?.workflow;
   const update = Boolean(accepted && pending);
-  const supervisorLine = !proposal ? "No plan recorded yet" : update ? proposal.status === "pending" ? "Preparing an updated plan" : "Proposed an updated plan" : proposalProgress[proposal.status];
+  const supervisorLine = task?.engagement?.mode === "following" ? "Understanding and draft duties retained" : !proposal ? "No plan recorded yet" : update ? proposal.status === "pending" ? "Preparing an updated plan" : "Proposed an updated plan" : proposalProgress[proposal.status];
   // the proposal's own message is shown only while it is the open question; an accepted plan is described by its acceptance
   const proposalMessage = proposal && (pending || !accepted) && !(stale && !pending) ? proposal.message : null;
   const agentLine = historical && task?.agreement ? "Earlier acceptance retained"

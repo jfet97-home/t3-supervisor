@@ -274,7 +274,7 @@ it.live("CT-INT-01: iv a task source change during the definition read records o
   // the source change committed on the definitions read's hook, before the read answers
   const supervisors = f.core.store;
   f.definitionReader.onLoad = once(Effect.flatMap(supervisors.task(f.mainThreadId),
-    (task) => supervisors.saveTask({...task!, sourceHash: fingerprint("changed")})).pipe(Effect.orDie));
+    (task) => supervisors.saveTask({...task!, conversation: {...task!.conversation!, authorization: {...task!.conversation!.authorization!, scopeRevision: fingerprint("changed")}}})).pipe(Effect.orDie));
   const reply = yield* mcpCall(f.endpoint, "workflow_write", args);
   assert.equal(reply.isError, true);
   assert.deepEqual(reply.value, {status: "invalid", operationId: "int-apply-source", reason: "current_task_proposal_changed"});

@@ -119,7 +119,7 @@ it.effect("CT-CONV-02: aborting the introduction POST saves it 'uncertain'; Retr
   assert.equal(sending.state, "sending");
   assert.deepEqual(sending.dispatchMode, {type: "steer_active", targetRunId: "operative-active-run"});
   assert.equal(call.payload.messageId, sending.messageId);
-  assert.equal(call.payload.commandId, `supervisor-workflow:${fixture.task.id}`);
+  assert.equal(call.payload.commandId, `supervisor-workflow:${sending.messageId}`);
 
   yield* within(abortCall(running), 3_000, "aborted run");
   const uncertain = yield* fixture.requests.introduction(fixture.task.id);
@@ -129,7 +129,7 @@ it.effect("CT-CONV-02: aborting the introduction POST saves it 'uncertain'; Retr
   yield* setNow(clock, clock.now + 61_000);
   yield* fixture.run;
   const observed = yield* fixture.requests.introduction(fixture.task.id);
-  assert.deepEqual(observed, {...uncertain, error: "Proposal delivery is uncertain; its message identity is retained. Retry native access rather than sending another proposal."});
+  assert.deepEqual(observed, uncertain, "observation preserves the unknown receipt unchanged");
   yield* fixture.conversation.retry(projectId, fixture.binding.threadId);
   yield* fixture.run;
   const restarted = yield* fixture.reopen;
@@ -223,7 +223,7 @@ const reviewState = (sql: SqlClient.SqlClient, supervisorThreadId: string, reque
 // the root records a review's outcome with workflow_write record_review in the review's own run, through the production controller
 // over this process's services; workflow editing needs the catalog classifications read first, which a supervision cycle does
 const recordOutcome = (fixture: Fixture, root: Projection, request: ConversationRequest) => Effect.gen(function* () {
-  yield* Context.get(fixture.process.context, SupervisionScopeService).rememberScratchProjects([]);
+  yield* Context.get(fixture.process.context, SupervisionScopeService).rememberCatalog([], fixture.threadList);
   const controller = yield* WorkflowWriteController.make({withoutTeam: true, maxEvidenceWaitMs: 0}).pipe(
     Effect.provideService(WorkflowNativeAccess, rootNative(root, () => fixture.threadList)), Effect.provide(fixture.process.context));
   return yield* recordReview(controller, root, request, "no_change");

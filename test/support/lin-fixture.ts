@@ -1,3 +1,5 @@
+import { engagedTask } from "./engaged-task.js";
+import { recordInterpretationSubmission } from "./interpretation-evidence-fixture.js";
 import { NodeFileSystem } from "@effect/platform-node";
 import { Clock, Effect, Redacted, type Scope } from "effect";
 import { fingerprint } from "../../src/guidance-store.js";
@@ -267,7 +269,15 @@ export const seedIntroduction = (f: LinFixture, source: {messageId: string; runI
     reason: "The latest user message describes an actionable task.", updatedAt: now, workflow, agreement: null, requestText: "",
     supervisorThreadId: binding.threadId, messageId: `supervisor-objective:${taskId}`, dispatchedAt: now, replayCount: 0,
     supervisorRunId: "interpretation-run", definitionContext, definitionSnapshot: snapshot};
-  yield* f.core.store.saveTask(task);
+  const root = yield* f.supervisor;
+  const runId = "interpretation-run", rootId = "interpretation-root";
+  const run = {id: runId, threadId: root.thread.id, ordinal: 1, status: "completed", requestedAt: baseTime, startedAt: baseTime, completedAt: baseTime, rootNodeId: rootId, userMessageId: task.messageId, providerThreadId: "interpretation-provider"};
+  root.runs.push(run);
+  (root.nodes as Record<string, unknown>[]).push({id: rootId, kind: "root_turn", threadId: root.thread.id, runId, rootNodeId: rootId, parentNodeId: null, status: "completed", providerThreadId: run.providerThreadId});
+  root.messages.push({id: task.messageId, threadId: root.thread.id, runId, nodeId: rootId, role: "user", text: "Interpret the task.", creationSource: "server", streaming: false, createdAt: baseTime, updatedAt: baseTime});
+  const recorded = yield* recordInterpretationSubmission({supervisor: root, run, task: engagedTask(task, f.main), bindingGeneration: binding.generation, workflow: {requirements: [], plan: {kind: "sequence", nodes: [{kind: "step", definitionId: null, localId: "baseline-review", name: "Baseline review", description: "Review the current task context.", reason: "Review the current task context."}]}}});
+  f.peer.details.set(String(recorded.item.id), recorded.item);
+  yield* f.core.store.saveTask(recorded.task);
   const introduction: WorkflowIntroduction = {taskId, projectId, threadId: mainThreadId, supervisorThreadId: binding.threadId, state: "ready",
     text: "Proposed workflow: Baseline review.", messageId: `supervisor-notice:workflow:${taskId}`, targetRunId: null, error: null};
   yield* f.core.requests.saveIntroduction(introduction);

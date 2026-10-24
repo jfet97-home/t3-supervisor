@@ -77,6 +77,10 @@ Without saved preferences, new roots use Sol 6.1 with low reasoning. Existing ro
 and saved selections keep their models; a model change does not establish a valid plan.
 Settings chat exclusions are per-instance, persistent and independent of Telegram.
 
+The default-off agent-created option excludes the chat origin, including later human
+follow-ups. When enabled, genuine humans and the exact launching agent can request
+work in an eligible ordinary main; agent provenance remains explicit.
+
 Select the actual main to inspect its binding, objective, proposal, agreement,
 current workflow and native descendants. Plans preserve nested structure, stable
 occurrence IDs and provenance. Child contributions may overlap; child completion
@@ -84,12 +88,26 @@ does not complete a parent step automatically. Required inclusion can be recursi
 Matching complete native proposal/acceptance records establish agreement, not actual
 execution. Keep incomplete requirements and source issues visible.
 
-For work that needs supervision, negotiate the applicable workflow promptly before
-continuing substantive implementation. Inspect both conversations and Task for the
+“Following the conversation” means the enabled Supervisor has considered the current
+dialogue and is keeping a quiet understanding and draft duties. Discussion can include
+permitted exploration. A requested research report can itself authorize a workflow;
+implementation and deployment require their actual requested scope. A direct action
+request needs no extra confirmation. Pause/discuss keeps the same task and retained
+agreement; explicit Stop Supervisor disables supervision. Neutral questions retain
+existing authorization. Catching up, stale and unavailable labels do not claim fresh
+following.
+
+On an authorized outcome, negotiate the applicable workflow promptly. Inspect both conversations and Task for the
 actual proposal and acceptance; a ready binding alone does not establish agreement.
 Guidance is asynchronous and T3 provides no pre-first-tool barrier. Trivial exchanges
 should stay quiet. Report repeated introductions, redundant steering or large repeated
 messages as defects rather than accepting them as necessary supervision.
+
+All prior work can count when the Supervisor has adequate actual evidence, including
+implementation, verification, review and documentation. Initial duties start planned,
+then receive a separate evidence-backed assessment. Partial work states the remaining
+obligations instead of restarting the duty. Agreement never proves execution, and a
+scope expansion does not inherit an earlier completed outcome automatically.
 
 For third-party work, the main may send the whole workflow, relevant steps or an
 adapted plan based on the local workflow, with needed sources and clear roles,

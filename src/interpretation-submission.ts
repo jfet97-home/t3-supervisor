@@ -14,6 +14,7 @@ import {
 import type { Projection } from "./types.js";
 import { isRecord, verifyWorkflowToolEvidence, workflowRequestHash, workflowToolInputMaxBytes } from "./workflow-write-evidence.js";
 import { workflowMutationLimits } from "./workflow-state-contract.js";
+import { ConversationDecision } from "./supervision-conversation-contract.js";
 
 // the typed interpretation submission's store-independent parts (plan 3.12 items 1-4 and 6): attempt identity, the exact
 // arguments schema, the strict decode with the raw canonical hash, the native proof verifier and the redacted result codes
@@ -206,6 +207,7 @@ const interpretationFields = {
   objective: Schema.NullOr(Schema.String.check(maxLength(limits.maxObjectiveLength))),
   reason: Reason,
   sourceMessageIds: Schema.Array(ToolId).check(maxLength(limits.maxSourceMessageIds)),
+  conversation: Schema.optionalKey(ConversationDecision),
 };
 const workflowFields = {supervision: Schema.Literals(["needed", "not_needed"]), workflow: Schema.NullOr(InterpretationWorkflowDraft)};
 const startFields = {startRequested: Schema.Boolean};
@@ -227,6 +229,7 @@ export type InterpretationEnvelope = {
   readonly sourcePin: InterpretationSourcePin;
 };
 type DecodedArguments = InterpretationEnvelope & {
+  readonly conversation?: ConversationDecision;
   readonly objective: string | null;
   readonly reason: string;
   readonly sourceMessageIds: ReadonlyArray<string>;
@@ -247,6 +250,7 @@ export const InterpretationPayload = Schema.Union([
     supervision: Schema.optionalKey(Schema.Literals(["needed", "not_needed"])),
     workflow: Schema.optionalKey(WorkflowProposal),
     startRequested: Schema.Boolean,
+    conversation: Schema.optionalKey(ConversationDecision),
   }),
 ]);
 export type InterpretationPayload = typeof InterpretationPayload.Type;
@@ -262,6 +266,7 @@ export type InterpretationSubmission = {
 
 // what the task's state makes the arguments: its definition context (or none) and whether it holds a matching pending Start
 export type InterpretationDecodeContext = {
+  readonly requireConversation?: boolean;
   readonly definitionContext: ProposalContext | null;
   readonly pendingStart: boolean;
   // new plan occurrence IDs; by default seeded by the attempt ID, so an identical replay decodes to the same payload
@@ -313,6 +318,8 @@ const schemaFor = (context: InterpretationDecodeContext) => context.definitionCo
   : context.pendingStart ? interpretationArgumentSchemas.start : interpretationArgumentSchemas.plain;
 
 const semanticPayload = (decoded: DecodedArguments, context: InterpretationDecodeContext): InterpretationPayload | InterpretationArgumentsInvalid => {
+  if (context.requireConversation && !decoded.conversation)
+    return invalid("arguments_schema", [{code: "missing_key", path: "/conversation"}]);
   const sourceId = decoded.sourcePin.messageId;
   if (decoded.workflow && planNodeCount(decoded.workflow.plan) > limits.maxExpandedNodes)
     return invalid("plan_node_limit", [{code: "plan_node_limit", path: "/workflow/plan"}]);
@@ -325,11 +332,14 @@ const semanticPayload = (decoded: DecodedArguments, context: InterpretationDecod
   const startRequested = decoded.startRequested === true;
   const interpretation = interpretationFromFields(decoded, sourceId);
   if (!interpretation.ok) return invalid(interpretation.code, [{code: interpretation.code, path: interpretation.path}]);
-  if (!context.definitionContext) return {kind: "interpretation", ...interpretation.value, startRequested};
+  const conversation = decoded.conversation;
+  const following = conversation && (conversation.intent === "following" || conversation.intent === "pause");
+  if (following && decoded.workflow) return invalid("arguments_schema", [{code: "forbidden", path: "/workflow"}]);
+  if (!context.definitionContext) return {kind: "interpretation", ...interpretation.value, startRequested, ...(conversation ? {conversation} : {})};
   const outcome = workflowInterpretationOutcome(interpretation.value, decoded.supervision, decoded.workflow ?? null, context.definitionContext,
     context.nodeIds ?? seededNodeIds(`t3-supervisor:interpretation:${decoded.attemptId}`));
   if (!outcome.ok) return invalid(outcome.code, [{code: outcome.code, path: outcome.path}]);
-  return {kind: "interpretation", ...outcome.value, startRequested};
+  return {kind: "interpretation", ...outcome.value, startRequested, ...(conversation ? {conversation} : {})};
 };
 
 // decodes one submission: the raw object and its canonical hash first, then the bounds, the exact Schema for the task's state and

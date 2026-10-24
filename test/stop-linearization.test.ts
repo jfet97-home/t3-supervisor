@@ -361,7 +361,7 @@ it.live("CT-LIN-03: a dashboard Enable whose bookkeeping fails keeps a stale ena
   const interpreted = yield* task(failed.f);
   assert.equal(interpreted.sourceMessageId, "stopped-turn");
   assert.equal(interpreted.status, "waiting");
-  assert.deepEqual(dispatches(failed.f).map(payload => payload.commandId), [`supervisor-objective:${interpreted.id}`]);
+  assert.deepEqual(dispatches(failed.f).map(payload => payload.commandId), [`supervisor-objective:${interpreted.attempt!.attemptId}`]);
 }), {timeout: 10_000});
 
 // the independent control owns a separate test scope, so the failed case releases its workers before this setup
@@ -414,7 +414,7 @@ it.live("CT-LIN-06: interpretation: a Stop committed when the frame arrives keep
   const sent = yield* task(f);
   assert.equal(sent.status, "waiting");
   assert.equal(sent.reason, "T3 accepted the interpretation request; waiting for its result.");
-  assert.deepEqual(dispatches(f).map(dispatched), [{type: "message.dispatch", commandId: `supervisor-objective:${sent.id}`, messageId: sent.messageId,
+  assert.deepEqual(dispatches(f).map(dispatched), [{type: "message.dispatch", commandId: `supervisor-objective:${sent.attempt!.attemptId}`, messageId: sent.messageId,
     threadId: binding.threadId, text: sent.requestText}]);
 
   f.peer.onRpc = null;
@@ -430,7 +430,7 @@ it.live("CT-LIN-06: interpretation: a Stop committed when the frame arrives keep
   assert.equal(closed.status, "unavailable");
   assert.equal(closed.reason, "Supervision was stopped for this chat; the interpretation result was not applied.");
   assert.deepEqual(dispatches(f).map(payload => ({type: payload.type, commandId: payload.commandId})), [
-    {type: "message.dispatch", commandId: `supervisor-objective:${sent.id}`},
+    {type: "message.dispatch", commandId: `supervisor-objective:${sent.attempt!.attemptId}`},
     {type: "thread.settle", commandId: (yield* f.binding).settlement!.commandId},
   ], "no replay and no new identity; the stopped Supervisor settles once the outcome is known");
   assert.deepEqual(f.peer.unexpected, []);
@@ -446,7 +446,7 @@ it.live("CT-LIN-06: interpretation: a Stop committed when the frame arrives and 
   const sent = yield* task(f);
   assert.equal(sent.status, "uncertain");
   assert.equal(sent.reason, "Interpretation dispatch is uncertain; retry native access to reconcile the original request identity.");
-  assert.deepEqual(dispatches(f).map(payload => payload.commandId), [`supervisor-objective:${sent.id}`]);
+  assert.deepEqual(dispatches(f).map(payload => payload.commandId), [`supervisor-objective:${sent.attempt!.attemptId}`]);
   f.peer.onRpc = null;
   yield* f.runOnce;
   assert.deepEqual(yield* task(f), sent);
@@ -455,8 +455,10 @@ it.live("CT-LIN-06: interpretation: a Stop committed when the frame arrives and 
 }), {timeout: 10_000});
 
 it.live("CT-LIN-06: root check-in: a Stop committed when the frame arrives keeps the accepted identity; later cycles match its run without resending", () => Effect.gen(function* () {
-  const f = yield* startLinFixture();
+  const f = yield* startLinFixture(newRequest);
   const binding = yield* f.bindSupervisor;
+  const {introduction} = yield* seedIntroduction(f, newSource);
+  yield* f.core.requests.saveIntroduction({...introduction, state: "sent"});
   const prepared = yield* f.core.requests.prepare({projectId, supervisorThreadId: binding.threadId, kind: "review", taskId: null,
     text: "Check in on the current activity.", batch: null, completionMarker: "Supervisor check-in completed"}, yield* Clock.currentTimeMillis);
   const {seen, commit} = stopOnArrival(f);
@@ -480,8 +482,10 @@ it.live("CT-LIN-06: root check-in: a Stop committed when the frame arrives keeps
 }), {timeout: 10_000});
 
 it.live("CT-LIN-06: root check-in: a Stop committed when the frame arrives and a lost reply leave the identity uncertain, never resent", () => Effect.gen(function* () {
-  const f = yield* startLinFixture();
+  const f = yield* startLinFixture(newRequest);
   const binding = yield* f.bindSupervisor;
+  const {introduction} = yield* seedIntroduction(f, newSource);
+  yield* f.core.requests.saveIntroduction({...introduction, state: "sent"});
   const prepared = yield* f.core.requests.prepare({projectId, supervisorThreadId: binding.threadId, kind: "review", taskId: null,
     text: "Check in on the current activity.", batch: null, completionMarker: "Supervisor check-in completed"}, yield* Clock.currentTimeMillis);
   const {seen, commit} = stopOnArrival(f);
@@ -513,7 +517,7 @@ it.live("CT-LIN-06: introduction: a Stop committed when the frame arrives keeps 
   assert.equal(accepted.state, "accepted");
   assert.equal(typeof accepted.acceptedAt, "number");
   assert.deepEqual(accepted.dispatchMode, {type: "queue_after_active"});
-  assert.deepEqual(dispatches(f).map(dispatched), [{type: "message.dispatch", commandId: `supervisor-workflow:${introduction.taskId}`,
+  assert.deepEqual(dispatches(f).map(dispatched), [{type: "message.dispatch", commandId: introduction.commandId ?? `supervisor-workflow:${introduction.messageId}`,
     messageId: introduction.messageId, threadId: mainThreadId, text: introduction.text}]);
   f.peer.onRpc = null;
   yield* f.runOnce;
@@ -523,7 +527,7 @@ it.live("CT-LIN-06: introduction: a Stop committed when the frame arrives keeps 
   const notice = (yield* f.binding).stopNotice!;
   assert.equal(notice.state, "accepted");
   assert.deepEqual(dispatches(f).map(payload => ({type: payload.type, commandId: payload.commandId, threadId: payload.threadId})), [
-    {type: "message.dispatch", commandId: `supervisor-workflow:${introduction.taskId}`, threadId: mainThreadId},
+    {type: "message.dispatch", commandId: introduction.commandId ?? `supervisor-workflow:${introduction.messageId}`, threadId: mainThreadId},
     {type: "message.dispatch", commandId: notice.commandId, threadId: mainThreadId},
     {type: "thread.settle", commandId: (yield* f.binding).settlement!.commandId, threadId: (yield* f.binding).threadId},
   ]);

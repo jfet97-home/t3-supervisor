@@ -930,7 +930,7 @@ it.effect("same task and definition pin preserve added fixed workflows across pr
   } finally {yield* fixture.close;}
 }));
 
-it.effect("a reinterpreted source hash releases fixed commitments from the prior task source", () => Effect.gen(function* () {
+it.effect("a changed scope retains the same task's fixed commitments", () => Effect.gen(function* () {
   const fixture = yield* makeFixture();
   try {
     const definitions = snapshotWith(fixture.definitionReader.current,
@@ -967,11 +967,10 @@ it.effect("a reinterpreted source hash releases fixed commitments from the prior
       note: "Use the fresh task interpretation after the operative source message changed."});
     installEvidence(fixture, editedSourcePlan);
     const replaced = yield* fixture.controller.write(editedSourcePlan);
-    assert.equal(replaced.status, "applied", JSON.stringify(replaced));
+    assert.deepEqual(replaced, {status: "invalid", operationId: "source-pin-replace-edited-task", reason: "pinned_definition_context_mismatch"});
     const current = (yield* fixture.workflows.get(fixture.projectId, fixture.mainThreadId))!;
-    assert.equal(current.sourceBinding?.sourceHash, editedSourceHash);
-    assert.equal(planEntities(current.plan).some(node => node.kind === "workflow" && node.definitionId === "source-fixed-review"), false);
-    assert.ok(current.evidence.some(item => item.kind === "node_removed" && item.targetNodeId === oldFixedNode.nodeId));
+    assert.equal(current.revision, committed.revision);
+    assert.ok(planEntities(current.plan).some(node => node.nodeId === oldFixedNode.nodeId));
   } finally {yield* fixture.close;}
 }));
 
@@ -1476,6 +1475,8 @@ it.effect("activity references must resolve exactly and agree on their native ru
     sourceProjection.messages = [{id: "source-message", runId: "source-run", nodeId: null, role: "assistant",
       text: "The test result was inspected.", streaming: false, createdAt: "2026-10-15T00:00:00.000Z", updatedAt: "2026-10-15T00:00:00.000Z",
       threadId: fixture.mainThreadId}];
+    const requester = fixture.projections.get(fixture.mainThreadId)!;
+    sourceProjection.runs.push(...requester.runs);sourceProjection.messages.push(...requester.messages);sourceProjection.nodes = requester.nodes;
     fixture.projections.set(fixture.mainThreadId, sourceProjection);
     const current = (yield* fixture.workflows.get(fixture.projectId, fixture.mainThreadId))!;
     const matching = yield* applyArgs(fixture, {operationId: "source-run-match", workflowId: created.workflowId,

@@ -1,10 +1,11 @@
 import type { TaskInterpretationInfo, WorkflowAgreementInfo, WorkflowPlanGroupInfo, WorkflowPlanNodeInfo, WorkflowPlanStepInfo, WorkflowPlanWorkflowInfo, WorkflowProposalInfo, WorkflowRequirementInfo } from "../../src/project-supervisor-contract.js";
 import type { WorkflowProgressObservation, WorkflowProgressSnapshot } from "../../src/workflow-progress.js";
+import {emptyConversation} from "../../src/supervision-conversation-contract.js";
 
 // A reconstructed example of a warehouse packing change: a GTIN scan selects an article and quantity-label scans add pieces.
 // Every text is labelled; none of it records Supervisor work, native messages or a run. The plan follows a project's
 // high-level change workflow; occurrence IDs stay the same across proposals and the live plan.
-export const journeyCases = ["request", "proposal", "agreed", "working", "attention", "revised", "reagreed", "verified", "nested", "nested-attention", "completed", "stale", "retained"] as const;
+export const journeyCases = ["request", "following", "catching-up", "paused", "proposal", "agreed", "working", "attention", "revised", "reagreed", "verified", "nested", "nested-attention", "completed", "stale", "retained"] as const;
 export type JourneyCase = typeof journeyCases[number];
 
 export const journeyTitle = "Packing quantity scans (reconstructed example)";
@@ -148,13 +149,21 @@ export function fixtureJourney(phase: JourneyCase, projectId: string, threadId: 
     evidence: {kind: "supervisor_message", messageId: `fixture-packing-supervisor-${proposalId}`}, agentMessageId: `fixture-packing-agent-${proposalId}`, workflow: accepted});
   const base = {id: "fixture-task-packing", sourceHash: "fixture-source-packing", threadId, projectId, sourceRunId: "fixture-run-packing", sourceMessageId: "fixture-message-packing",
     objective: journeyObjective, reason: reconstructed, updatedAt: now - 50 * 60_000};
-  const task: TaskInterpretationInfo = phase === "request" ? {...base, status: "waiting", objective: null, reason: "Reconstructed example: the request is being interpreted."}
+  let task: TaskInterpretationInfo = phase === "request" ? {...base, status: "waiting", objective: null, reason: "Reconstructed example: the request is being interpreted."}
     : phase === "proposal" ? {...base, status: "inferred", workflow: proposalV1, workflowProposalId: "packing-proposal-1"}
     : phase === "revised" ? {...base, status: "inferred", workflow: proposalV2, workflowProposalId: "packing-proposal-2", agreement: agreement(proposalV1, "packing-proposal-1", now - 45 * 60_000)}
     : v2Accepted ? {...base, status: "inferred", workflow: proposalV2, workflowProposalId: "packing-proposal-2", agreement: agreement(proposalV2, "packing-proposal-2", now - 22 * 60_000)}
     : phase === "stale" ? {...base, status: "inferred", workflow: proposalV1, workflowProposalId: "packing-proposal-1", agreement: agreement(proposalV1, "packing-proposal-1", now - 45 * 60_000, true)}
     : {...base, status: "inferred", workflow: proposalV1, workflowProposalId: "packing-proposal-1", agreement: agreement(proposalV1, "packing-proposal-1", now - 45 * 60_000)};
-  const livePhase = phase === "revised" ? "attention" : phase === "stale" ? "working" : phase;
+  task = {...task, engagement: {mode: ["following", "paused", "catching-up"].includes(phase) ? "following" : "engaged",
+    availability: phase === "catching-up" || phase === "request" ? "catching_up" : phase === "stale" ? "stale" : "current", consideredAt: now}};
+  if (["following", "paused", "catching-up"].includes(phase)) {
+    task = {...task, ...(phase !== "paused" ? {workflow: null, agreement: null} : {}), conversation: {...emptyConversation(now), draft: {objective: "Reconstructed example: discuss the quantity scan behavior before deciding on implementation.",
+      constraints: ["No deployment is authorized."], questions: ["Should a quantity scan replace or add to the current amount?"],
+      findings: [{text: "The existing packing flow distinguishes article and quantity scans; this finding remains to be assessed.", messageIds: []}],
+      duties: ["Clarify scan behavior and the verification needed for it."]}}};
+  }
+  const livePhase = phase === "revised" ? "attention" : phase === "stale" || phase === "paused" ? "working" : phase;
   const live = (order as readonly string[]).includes(livePhase) ? history(livePhase as typeof order[number], now) : null;
   const liveVerifyNote = v2Accepted ? refinedVerify : notes.verify;
   const workflows: WorkflowProgressSnapshot["workflows"] = live ? [{workflowId: "fixture-workflow-packing", projectId, mainThreadId: threadId, threadId, parentThreadId: null,

@@ -1,3 +1,4 @@
+import { ConversationFacts } from "./supervision-conversation-contract.js";
 import { Clock, Context, Data, Effect, Layer, Ref, Schema } from "effect";
 import type { SqlError } from "effect/sql";
 import { GuidanceDb, untracedSql } from "./db.js";
@@ -158,7 +159,7 @@ export interface ProjectSupervisorStoreShape {
 // readers rely on, then kept whole, because every other field is user data written back byte for byte
 const isStoredObject = Schema.is(Schema.Record(Schema.String, Schema.Unknown));
 export const isStoredBinding = Schema.is(Schema.Struct({projectId: Schema.String, mainThreadId: Schema.String, threadId: Schema.String, generation: Schema.Finite, state: Schema.String}));
-const isStoredTask = Schema.is(Schema.Struct({threadId: Schema.String, projectId: Schema.String, status: Schema.String}));
+const isStoredTask = Schema.is(Schema.Struct({threadId: Schema.String, projectId: Schema.String, status: Schema.String, conversation: Schema.optionalKey(ConversationFacts)}));
 const isStoredStart = Schema.is(Schema.Struct({threadId: Schema.String, status: Schema.String}));
 const isStoredSettings = Schema.is(Schema.Struct({generation: Schema.Finite}));
 

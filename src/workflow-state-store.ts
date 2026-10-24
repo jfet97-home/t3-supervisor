@@ -757,7 +757,6 @@ const makeWorkflowStateStore = (enabledFor?: WorkflowEditingEnabled) => Effect.g
     try {
       const currentBinding = current.sourceBinding;
       const currentPlan = currentBinding?.taskId === validation.expectedTaskId &&
-        currentBinding.sourceHash === validation.expectedSourceHash &&
         currentBinding.workspaceRoot === validation.pinnedContext.workspaceRoot &&
         currentBinding.revision === validation.pinnedContext.revision &&
         currentBinding.globalRevision === (validation.pinnedContext.globalRevision ?? null) &&
@@ -785,6 +784,15 @@ const makeWorkflowStateStore = (enabledFor?: WorkflowEditingEnabled) => Effect.g
       ...(evidenceProblem === "generic" ? {} : {diagnostic: evidenceProblem})} satisfies WorkflowApplyResult as WorkflowApplyResult;
     const nextPlan = normalized.plan;
     const evidenceInputs = validatedInput.evidence ?? [];
+    // retained progress is never reset on scope refinement. Carrying it into this scope needs a fresh, explicit assessment
+    // of the same occurrence with actual activity references; similarly named old completion is not new-scope completion.
+    if (current.sourceBinding?.taskId === validation.expectedTaskId && current.sourceBinding.sourceHash !== validation.expectedSourceHash) {
+      const oldIds = new Set(collectPlanEntities(current.plan).map(node => node.nodeId));
+      for (const node of collectPlanEntities(nextPlan)) if (oldIds.has(node.nodeId) && node.status !== "planned" &&
+        !evidenceInputs.some(item => item.kind === "status_changed" && item.targetNodeId === node.nodeId &&
+          (item.sourceMessageId || item.sourceItemId)))
+        return {status: "invalid", operationId: input.operationId, reason: "scope_assessment_required"} satisfies WorkflowApplyResult as WorkflowApplyResult;
+    }
     const previousNodes = new Map(collectPlanEntities(current.plan).map(node => [node.nodeId, node]));
     const nextNodes = new Map(collectPlanEntities(nextPlan).map(node => [node.nodeId, node]));
     const evidence = [...current.evidence];

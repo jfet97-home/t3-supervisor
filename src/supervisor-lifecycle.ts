@@ -1,3 +1,4 @@
+import { conversationMayContact } from "./supervision-conversation.js";
 import { Cause, Clock, Context, Data, Effect, FiberMap, Layer, Option } from "effect";
 import { freshRuntimeRequestStatus, projectionHasOngoingWork } from "./domain.js";
 import { fingerprint } from "./guidance-store.js";
@@ -146,7 +147,7 @@ const makeSupervisorLifecycle = Effect.gen(function* () {
   // a not-needed or unresolved request gets no check-ins, so unreviewed activity retained for the next genuine request does not keep
   // its Supervisor open (an incomplete scan still does); any other task still waits for that activity to be reviewed
   const awaitsReview = (binding: BindingRecord) => Effect.map(store.task(binding.mainThreadId), (task) =>
-    !task || task.supervisorThreadId !== binding.threadId || !["not_supervised", "needs_context"].includes(task.status));
+    !task || task.supervisorThreadId !== binding.threadId || conversationMayContact(task));
 
   /** Returns the first gate that keeps the main supervision active, or null when settlement may proceed. */
   const mainAttention = (binding: BindingRecord, supervisor: Projection, main: Projection | null, closedMain: boolean, source: ThreadInfo | undefined,

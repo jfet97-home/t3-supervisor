@@ -244,7 +244,8 @@ export const makeWorkflowFixture = (initialDefinitions: ProjectDefinitionSnapsho
     call: (tag, payload) => readCall(tag, payload),
     initiate: (tag, payload) => Effect.map(Effect.exit(readCall(tag, payload)), (exit) => ({sent: Effect.succeed(true), result: exit, release: Effect.void})),
   };
-  const operate = nativeClient((tag, payload) => {
+  const commandIds = new Set<string>();
+  const handleNativeOperation = (tag: string, payload: Record<string, unknown>): unknown => {
     operations.push({tag, payload});
     if (tag === "orchestration.launchThread") {
       const threadId = String(payload.threadId);
@@ -252,6 +253,8 @@ export const makeWorkflowFixture = (initialDefinitions: ProjectDefinitionSnapsho
       return {accepted: true};
     }
     if (tag === "orchestration.dispatchCommand" && payload.type === "message.dispatch") {
+      const commandId = String(payload.commandId);
+      if (commandIds.has(commandId)) return {accepted: true};
       if (dispatchFailure === "unknown") {
         dispatchFailure = null;
         throw new Error("simulated lost dispatch response");
@@ -260,6 +263,7 @@ export const makeWorkflowFixture = (initialDefinitions: ProjectDefinitionSnapsho
         dispatchFailure = null;
         throw new SupervisorRpcError("rejected", true);
       }
+      commandIds.add(commandId);
       const launched = projections.get(String(payload.threadId));
       assert.ok(launched);
       addSupervisorRequest(launched, payload);
@@ -267,7 +271,8 @@ export const makeWorkflowFixture = (initialDefinitions: ProjectDefinitionSnapsho
       return {accepted: true};
     }
     throw new Error(`unexpected fake operation: ${tag}`);
-  });
+  };
+  const operate = nativeClient(handleNativeOperation);
   const definitions: CtlDefinitionOps = {
     load: (loadedProjectId, threadId) => Effect.gen(function* () {
       definitionReads.push({projectId: loadedProjectId, threadId: threadId ?? null});
@@ -276,12 +281,13 @@ export const makeWorkflowFixture = (initialDefinitions: ProjectDefinitionSnapsho
       return outcome ?? currentDefinitions;
     }),
   };
-  const makeSupervisor = (withDefinitions = true) => ctlSupervisor({
-    stores, catalog, projection, read, operate, baseline: activation, ...(withDefinitions ? {definitions} : {}),
+  const makeSupervisor = (withDefinitions = true, nativeOperate?: NativeRpcShape) => ctlSupervisor({
+    stores, catalog, projection, read, operate: nativeOperate ?? operate, baseline: activation, ...(withDefinitions ? {definitions} : {}),
   });
   return {
     binding: () => stores.supervisors.binding(projectId, sourceThreadId),
     definitionReads,
+    handleNativeOperation,
     definitions,
     dispatches: () => operations.filter((call) => call.tag === "orchestration.dispatchCommand" && call.payload.type === "message.dispatch"),
     makeSupervisor,

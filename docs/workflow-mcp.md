@@ -224,7 +224,13 @@ at their first and their final authority check.
   explicit notes for status changes and removed steps. Existing occurrence IDs are stable and separate from definition IDs;
   repeated reusable references remain distinct. New live steps start "planned";
   mark them underway or completed in a separate later apply with status_changed
-  evidence. On rejection, read the reason, code, and path. Read the current document before refining it.
+  evidence. Adequate actual work before initial planning/agreement can satisfy any
+  duty; partial evidence names the specific remaining obligations. A scope change
+  retains occurrence IDs/progress but requires explicit native activity references
+  when carrying non-planned assessments into that scope (`scope_assessment_required`).
+  Catching up to a newer requester defers a write as retryable, without reserving its
+  operation or native evidence. On rejection, read the reason, code, and path. Read
+  the current document before refining it.
 - `assess_contribution` records the root's `accepted` or `needs_more` decision for
   one main-workflow external contribution. It takes `operationId`, `workflowId`,
   `expectedRevision`, `contributionId`, `resultRevision`, `decision` and a `note` of

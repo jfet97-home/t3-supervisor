@@ -1,3 +1,5 @@
+import { engagedTask } from "./support/engaged-task.js";
+import { makeSourceProjection } from "./support/psx-submission.js";
 import assert from "node:assert/strict";
 import { it } from "@effect/vitest";
 import { Effect } from "effect";
@@ -132,12 +134,12 @@ const fixture = Effect.gen(function* () {
   const binding = {...(yield* store.reserve("p", "main", "Main", defaultSupervisorModel, 10, 1)), state: "ready" as const};yield* store.setBinding(binding);
   // the project's supervision is enabled with the run's baseline, so its scope predicates admit it
   yield* store.saveControl("p", 0, true, (yield* store.baseline())!);
-  const main: Projection = {thread: thread("main"), runs: [{id: "run", ordinal: 1, status: "completed", requestedAt: "2026-10-14T10:00:00Z", startedAt: "2026-10-14T10:00:00Z", completedAt: "2026-10-14T10:01:00Z", rootNodeId: "root"}], messages: [], runtimeRequests: [], subagents: []};
+  const main = makeSourceProjection("main", "p", [{id: "source", sequence: 1, text: "Implement"}]);
   const supervisor: Projection = {thread: thread(binding.threadId), runs: [], messages: [], runtimeRequests: [], subagents: []};settledTarget = supervisor;
   projections.set("main", main);projections.set(binding.threadId, supervisor);
   const threads = [main.thread, supervisor.thread];
-  yield* store.saveTask({id: "task", projectId: "p", threadId: "main", sourceRunId: "run", sourceMessageId: "source", sourceHash: "hash", sourceOrdinal: 1, supervisorThreadId: binding.threadId,
-    messageId: "interpretation", status: "inferred", objective: "Implement", reason: "Requested", updatedAt: 1, requestText: "", dispatchedAt: null, supervisorRunId: null, replayCount: 0});
+  yield* store.saveTask(engagedTask({id: "task", projectId: "p", threadId: "main", sourceRunId: "run", sourceMessageId: "source", sourceHash: "hash", sourceOrdinal: 1, supervisorThreadId: binding.threadId,
+    messageId: "interpretation", status: "inferred", objective: "Implement", reason: "Requested", updatedAt: 1, requestText: "", dispatchedAt: null, supervisorRunId: null, replayCount: 0}, main));
   return {process, sql, store, requests, monitor, binding, conversation, lifecycle, workflows, main, supervisor, projections, threads, calls, projectionReads: () => projectionReads,
     setUncertain: () => {uncertain = true;}, setFailure: (id: string, error: T3TransportError | null) => {if (error) failures.set(id, error);else failures.delete(id);},
     stopChat: (threadId: string) => stopChat(process, threadId),

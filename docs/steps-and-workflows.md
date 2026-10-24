@@ -294,6 +294,17 @@ ID; repeated references do not merge contributions or evidence. Template revisio
 agreement history and provenance remain explicit. Changed files
 are reviewed rather than silently changing the meaning of an existing agreement.
 
+Initial live nodes start planned. The Supervisor then promptly reconciles every
+duty against adequate actual evidence, including implementation, tests, review,
+documentation and research performed before the proposal or agreement. A separate
+assessment can complete a fully satisfied duty or mark partial work underway with
+the specific remaining obligations in its evidence note. It preserves the occurrence
+and valid progress, without percentages or rerunning a whole duty. Acceptance,
+unverified reports and a command having run do not prove execution. Native actor,
+write, fixed/required and reference/skill checks still apply. Retaining progress
+into a changed scope requires an explicit assessment with actual activity references;
+the earlier completed outcome does not satisfy an expanded goal automatically.
+
 Work that a step needs may also happen outside any observed conversation, through
 an external agent, tool, service or person. The main reports such work and its
 returned result with an `external-contribution` record for a step of its own

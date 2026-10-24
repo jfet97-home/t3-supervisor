@@ -1,3 +1,5 @@
+import { taskScopeRevision } from "./supervision-conversation-contract.js";
+import type { ConversationFacts } from "./supervision-conversation-contract.js";
 import { Schema } from "effect";
 import type { WorkflowStateDocument } from "./workflow-state-contract.js";
 
@@ -6,7 +8,7 @@ export const WorkflowAssessment = Schema.Struct({
   summary: Schema.String, updatedAt: Schema.Number,
 });
 export type WorkflowAssessmentInfo = typeof WorkflowAssessment.Type;
-type CurrentTask = {id?: string; sourceHash?: string; status: string};
+type CurrentTask = {id?: string; sourceHash?: string; status: string; conversation?: ConversationFacts};
 
 /** Projects the main assessment reason without mistaking later step or contribution notes for it. */
 export function workflowAssessment(document: WorkflowStateDocument): WorkflowAssessmentInfo | null {
@@ -20,5 +22,5 @@ export function workflowAssessment(document: WorkflowStateDocument): WorkflowAss
 
 export function assessmentForTask(assessment: WorkflowAssessmentInfo | null | undefined, task: CurrentTask | undefined) {
   return assessment && task?.id && task.sourceHash && !["expired", "not_supervised"].includes(task.status) &&
-    assessment.taskId === task.id && assessment.sourceHash === task.sourceHash ? assessment : null;
+    assessment.taskId === task.id && assessment.sourceHash === taskScopeRevision(task) ? assessment : null;
 }

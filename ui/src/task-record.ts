@@ -1,6 +1,5 @@
 import type { TaskInterpretationInfo, WorkflowAgreementInfo, WorkflowPlanGroupInfo, WorkflowPlanNodeInfo, WorkflowProposalInfo } from "../../src/project-supervisor-contract.js";
 import type { WorkflowProgressObservation, WorkflowProgressWorkflow } from "../../src/workflow-progress.js";
-import { assessmentForTask } from "../../src/workflow-assessment.js";
 
 // the one task workspace reads three records of the same task: the current proposal, the recorded acceptance and the live
 // workflow bound to the task. Statuses only ever come from the live workflow; plan notes and step-level Supervisor records are
@@ -148,7 +147,7 @@ export type JourneyRecord =
  * accepted, else the current proposal. A proposal never replaces the live workflow or the accepted plan.
  */
 export function journeyRecord(task: TaskInterpretationInfo | undefined, mainWorkflow: WorkflowProgressWorkflow | undefined): JourneyRecord {
-  if (mainWorkflow?.plan && assessmentForTask(mainWorkflow.assessment, task)) return {kind: "live", workflow: mainWorkflow, plan: mainWorkflow.plan};
+  if (mainWorkflow?.plan && task?.id && mainWorkflow.assessment?.taskId === task.id) return {kind: "live", workflow: mainWorkflow, plan: mainWorkflow.plan};
   const agreement = acceptedAgreement(task);
   if (agreement?.workflow.plan) return {kind: "agreed", plan: agreement.workflow.plan};
   if (task?.workflow?.plan && !ended(task)) return {kind: "proposed", plan: task.workflow.plan};

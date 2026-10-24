@@ -19,7 +19,12 @@ export const turnItemAnswer = (projections: ReadonlyMap<string, Projection>, tag
 export const submissionArguments = (task: TaskRecord, fields: Record<string, unknown>): Record<string, unknown> => {
   assert.ok(task.attempt, "the task has a minted attempt");
   return {supervisorThreadId: task.supervisorThreadId, bindingGeneration: task.attempt.key.bindingGeneration, taskId: task.id,
-    attemptId: task.attempt.attemptId, sourcePin: task.attempt.key.source, ...fields};
+    attemptId: task.attempt.attemptId, sourcePin: task.attempt.key.source,
+    ...(task.conversation && fields.conversation === undefined ? {conversation: {
+      draft: {objective: typeof fields.objective === "string" ? fields.objective : null, constraints: [], questions: [], findings: [], duties: []},
+      intent: typeof fields.objective === "string" && fields.supervision !== "not_needed" ? "authorize" : "following",
+      outcome: typeof fields.objective === "string" ? fields.objective : null, limits: [], sourceMessageIds: [task.sourceMessageId], antecedentMessageIds: [], scope: "changed",
+    }} : {}), ...fields};
 };
 
 // a finite one-step plan, the interpretation fields the reader prompt asks for with a definition context

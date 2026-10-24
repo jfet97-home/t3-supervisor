@@ -1,5 +1,6 @@
 import {SupportingReferences, SupportingSkills, type SupportingReference} from "./definition-references.js";
 import { Schema } from "effect";
+import { ConversationEngagement, ConversationFacts } from "./supervision-conversation-contract.js";
 
 export const ModelSelection = Schema.Struct({
   instanceId: Schema.String,
@@ -338,6 +339,9 @@ export const TaskInterpretation = Schema.Struct({
   objective: Schema.NullOr(Schema.String),
   reason: Schema.String,
   updatedAt: Schema.Number,
+  conversation: Schema.optionalKey(ConversationFacts),
+  engagement: Schema.optionalKey(ConversationEngagement),
+  supervision: Schema.optionalKey(Schema.Literals(["needed", "not_needed"])),
   workflow: Schema.optionalKey(Schema.NullOr(WorkflowProposal)),
   agreement: Schema.optionalKey(Schema.NullOr(WorkflowAgreement)),
   workflowProposalId: Schema.optionalKey(Schema.String),

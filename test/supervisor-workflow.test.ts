@@ -1085,12 +1085,12 @@ it.effect("reader-based interpretation carries earlier unresolved requests and r
   assert.match(prepared.requestText, /workflow_read/u);
   assert.doesNotMatch(prepared.requestText, /Do not use tools, MCP/u);
   assert.match(prepared.requestText, /Earlier unresolved requests remain part of the task/u);
-  assert.match(prepared.requestText, /"needed" or "not_needed"/u);
+  assert.match(prepared.requestText, /needed\|not_needed/u);
   const envelope = JSON.parse(prepared.requestText.split("UNTRUSTED_WORKFLOW_ENVELOPE\n")[1]!.split("\nEND_UNTRUSTED_WORKFLOW_ENVELOPE")[0]!);
   assert.deepEqual(envelope.earlierMessages, [{messageId: "m0", text: "https://issues.example/browse/PROJ-1"}]);
   assert.deepEqual(envelope.reader, {supervisorThreadId: "supervisor-root:reader", bindingGeneration: 3});
   assert.equal(envelope.definitions, undefined, "the catalog manifest is fetched, not pushed");
-  assert.ok(prepared.requestText.length < 2200, `interpretation request: ${prepared.requestText.length}`);
+  assert.ok(prepared.requestText.length < 2400, `interpretation request: ${prepared.requestText.length}`);
 
 }));
 

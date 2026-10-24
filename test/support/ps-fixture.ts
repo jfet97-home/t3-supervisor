@@ -605,7 +605,7 @@ export const startIntake = (supervisor: PsSupervisor, native: WorkflowNativeAcce
 );
 
 export const noProjectFixture = Effect.fnUntraced(function* () {
-  const fixture = yield* makeFixture([{threadId: "manual", projectId: "project-a", turns: []}, {threadId: "other", projectId: "project-a", turns: []}]);
+  const fixture = yield* makeFixture([{threadId: "manual", projectId: "project-a", turns: []}, {threadId: "other", projectId: "project-a", turns: []}, {threadId: "ordinary", projectId: "project-b", turns: []}]);
   yield* fixture.execute("INSERT INTO classifications VALUES(?,?)", "project-a", "scratch");
   const supervisor = yield* fixture.makeSupervisor();
   yield* supervisor.runOnce;

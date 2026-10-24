@@ -1246,8 +1246,8 @@ it.live("a main conversation over the buffered cap is discovered and interpreted
   yield* supervisor.runOnce;
   assert.ok(largestBody > 2 * retainedBudget, "the native body exceeds what the buffered reader accepts");
   const task = yield* fixture.store.task("huge-main");
-  assert.equal(task?.sourceMessageId, "old-task", "the first request after activation stays the source behind twelve newer turns");
-  assert.equal(task?.sourceRunId, "run-old-task");
+  assert.equal(task?.sourceMessageId, "later-11", "one coalesced attempt considers the latest requester turn");
+  assert.equal(task?.sourceRunId, "run-later-11");
   assert.equal(task?.status, "waiting");
   const binding = (yield* fixture.store.bindings()).find(value => value.mainThreadId === "huge-main");
   assert.ok(binding);
@@ -1383,6 +1383,19 @@ it.effect("Start rejects nonhuman, wrong-turn, project and stale sources, and ke
   assert.equal((yield* f.fixture.store.start("manual"))!.taskId, id);
 }));
 
+it.effect("an explicit human Start rejects an excluded agent-created No Project origin without pending permission", () => Effect.gen(function* () {
+  const f = yield* noProjectFixture();
+  const main = f.fixture.projections.get("manual")!;
+  main.thread = {...main.thread, createdBy: "agent", creationSource: "mcp", lineage: {parentThreadId: null, relationshipToParent: null, rootThreadId: "manual"}};
+  const result = yield* f.supervisor.startSupervision({callerThreadId: "manual", userMessageId: "request-start", operationId: "excluded-human-start"}, {runId: "run-request-start"});
+  assert.deepEqual(result, {status: "denied", reason: "conversation_origin_excluded"});
+  assert.equal(yield* f.fixture.store.start("manual"), null);
+  assert.equal(yield* f.fixture.store.task("manual"), null);
+  yield* f.supervisor.runOnce;
+  assert.equal((yield* f.fixture.store.bindings()).length, 0);
+  assert.equal(f.fixture.operations.length, 0);
+}));
+
 it.effect("Start stays human-only when the project supervises agent-created conversations", () => Effect.gen(function* () {
   const f = yield* noProjectFixture();
   const settings = yield* f.fixture.store.settings("project-a");
@@ -1397,8 +1410,17 @@ it.effect("Start stays human-only when the project supervises agent-created conv
   const args = {callerThreadId: "manual", userMessageId: "request-start", operationId: "agent-start"};
   assert.equal((yield* f.supervisor.startSupervision(args, {runId: "run-request-start"})).status, "denied");
   assert.equal(yield* f.fixture.store.start("manual"), null, "no permission is reserved for an agent request");
-  Object.assign(request, {createdBy: "user", creationSource: "web", senderThreadId: undefined});
-  assert.equal((yield* f.supervisor.startSupervision({...args, operationId: "human-start"}, {runId: "run-request-start"})).status, "pending");
+  f.fixture.addTurn("manual", "project-a", {id: "human-agent-main-start", sequence: 21, text: "Have Supervisor follow this chat."});
+  const freshMain = f.fixture.projections.get("manual")!;
+  freshMain.thread = main.thread;
+  Object.assign(freshMain.messages[0]!, {createdBy: "agent", creationSource: "mcp", senderThreadId: "other", createdAt: request.createdAt});
+  const humanStart = yield* f.supervisor.startSupervision({...args, userMessageId: "human-agent-main-start", operationId: "human-start"}, {runId: "run-human-agent-main-start"});
+  assert.equal(humanStart.status, "pending", JSON.stringify(humanStart));
+  const enabled = yield* f.fixture.store.settings("project-a");
+  yield* f.fixture.store.saveSettings("project-a", enabled.generation, enabled.modelSelection, undefined, undefined, false);
+  yield* f.supervisor.runOnce;
+  assert.equal((yield* f.fixture.store.start("manual"))?.status, "rejected", "turning the origin opt-in off closes an unprepared Start");
+  assert.equal(f.fixture.operations.length, 0);
 }));
 
 it.effect("Retry reaches a started No Project chat and still reconciles Stop notice/settlement in ordinary projects", () => Effect.gen(function* () {
@@ -1476,7 +1498,7 @@ it.effect("a later human task survives repeated discovery and restart without re
   f.fixture.projections.get("manual")!.messages.at(-1)!.createdAt = new Date(f.fixture.now() + 1000).toISOString();
   yield* resumed.runOnce;
   const next = (yield* f.fixture.store.task("manual"))!;
-  assert.notEqual(next.id, initial.id);
+  assert.equal(next.id, initial.id);
   assert.equal(next.sourceMessageId, "later-greeting");
   yield* resumed.runOnce;
   assert.equal((yield* f.fixture.store.task("manual"))?.id, next.id);
@@ -1486,7 +1508,8 @@ it.effect("a later human task survives repeated discovery and restart without re
   yield* resumed.runOnce;
   yield* resumed.runOnce;
   assert.equal((yield* f.fixture.store.task("manual"))?.id, next.id);
-  assert.equal((yield* f.fixture.store.task("manual"))?.status, "not_supervised");
+  assert.equal((yield* f.fixture.store.task("manual"))?.status, "inferred");
+  assert.equal((yield* f.fixture.store.task("manual"))?.supervision, "not_needed");
   assert.equal(f.fixture.operations.filter(op => op.payload.type === "message.dispatch" && op.payload.threadId === initial.supervisorThreadId).length, 2);
   assert.equal(yield* resumed.scopeEnabled("project-a", "manual"), true);
 }));

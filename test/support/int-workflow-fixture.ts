@@ -1,3 +1,5 @@
+import { engagedTask } from "./engaged-task.js";
+import { makeSourceProjection } from "./psx-submission.js";
 import { Clock, Effect, Fiber, type Scope } from "effect";
 import { fingerprint } from "../../src/guidance-store.js";
 import { defaultSupervisorModel, type BindingRecord, type TaskRecord } from "../../src/project-supervisor-store.js";
@@ -162,7 +164,10 @@ export const startWorkflowFixture = (mainThread = thread("main-workflows", "proj
       definitionContext,
       definitionSnapshot,
     };
-    yield* supervisors.saveTask(task).pipe(Effect.orDie);
+    const main = makeSourceProjection(mainThreadId, projectId, [{id: task.sourceMessageId, sequence: 1, text: task.objective!}]);
+    main.thread = mainThread;
+    native.projections.set(mainThreadId, main);
+    yield* supervisors.saveTask(engagedTask(task, main)).pipe(Effect.orDie);
     const sourceBinding: WorkflowSourceBindingInfo = {
       workspaceRoot: definitionSnapshot.workspaceRoot,
       revision: definitionSnapshot.revision,

@@ -5,6 +5,8 @@ import {renderToStaticMarkup} from "react-dom/server";
 import {Home, WorkTable} from "../ui/src/overview.js";
 import {activityTitle} from "../ui/src/activity-presentation.js";
 import {FixtureModel, fixtureIds} from "./ui-fixture/scenarios.js";
+import {conversationLabel, ConversationStatus, ConversationUnderstanding} from "../ui/src/conversation-status.js";
+import {deriveConversationEngagement, emptyConversation, type ConversationEngagement} from "../src/supervision-conversation-contract.js";
 
 const now = 1_800_000_000_000;
 const model = new FixtureModel(() => now);
@@ -37,4 +39,29 @@ it("an attention reason repeated by an assessment is shown once per work row", (
 it("unknown activity codes stay in inspection data instead of becoming list prose", () => {
   assert.equal(activityTitle({...data.activity[0]!, reason: "internal_unknown_code", state: "internal_pending_state"}), "Supervisor activity recorded");
   assert.equal(activityTitle({...data.activity[0]!, reason: "check_in_delivered"}), "Check-in delivered");
+});
+
+it("typed conversation availability controls Following independently of retained agreement and execution", () => {
+  const current = {mode: "following" as const, availability: "current" as const, consideredAt: now};
+  assert.equal(conversationLabel(current), "Following the conversation");
+  assert.equal(conversationLabel({...current, mode: "engaged"}), null);
+  for (const availability of ["catching_up", "stale", "uncertain", "stopped", "unavailable"] as const)
+    assert.doesNotMatch(conversationLabel({...current, availability})!, /Following/u);
+  assert.doesNotMatch(conversationLabel(current, false)!, /Following/u);
+  assert.doesNotMatch(conversationLabel(undefined)!, /Following/u);
+  const html = renderToStaticMarkup(createElement(ConversationStatus, {engagement: {...current, availability: "catching_up"}, fresh: true}));
+  assert.match(html, /Updating conversation understanding/u);assert.match(html, /aria-live="off"/u);
+  const source = {messageId: "message", runId: "run", ordinal: 1, hash: "old", requester: "human" as const};
+  const task = {status: "inferred", conversation: {...emptyConversation(now), considered: source, observed: {...source, hash: "edited"}}};
+  assert.equal(deriveConversationEngagement({task, enabled: true, available: true}).availability, "catching_up");
+  assert.equal(deriveConversationEngagement({task: {status: "needs_context", conversation: emptyConversation(now)}, enabled: true, available: true}).availability, "unavailable");
+  for (const [enabled, available, expected] of [[false, true, "stopped"], [true, false, "unavailable"]] as const)
+    assert.equal(deriveConversationEngagement({task, enabled, available}).availability, expected);
+  const draft = renderToStaticMarkup(createElement(ConversationUnderstanding, {draft: {...emptyConversation(now).draft, objective: "Discuss the retry race"}}));
+  assert.match(draft, /<details/u);assert.match(draft, /<summary>Understanding and draft duties/u);
+  assert.doesNotMatch(draft, /role="button"/u);
+  const first = model.dashboardOverview({}, now).work[0]!;
+  const row = (engagement: ConversationEngagement, fresh: boolean) => renderToStaticMarkup(createElement(WorkTable, {data, navigate: () => {}, fresh, work: [{...first, attention: [], engagement}]}));
+  assert.match(row(current, true), /Following the conversation/u);
+  assert.doesNotMatch(row(current, false), /Following the conversation/u);
 });

@@ -21,7 +21,7 @@ const mainThreadId = "source-thread";
 const sourceTask = [{threadId: mainThreadId, projectId: "project-a", turns: [{id: "source-task", sequence: 11, text: "Create a migration plan"}]}];
 
 const interpretationDispatches = (fixture: PsxFixture, taskId: string) =>
-  fixture.messageDispatches().filter(call => call.payload.commandId === `supervisor-objective:${taskId}`);
+  fixture.messageDispatches().filter(call => String(call.payload.messageId).startsWith(`supervisor-objective:${taskId}:`));
 
 const identity = (call: {payload: Record<string, unknown>}) => ({commandId: call.payload.commandId, messageId: call.payload.messageId, text: call.payload.text,
   threadId: call.payload.threadId});
@@ -135,7 +135,7 @@ it.live("CT-PS-01: an aborted interpretation dispatch becomes uncertain and a cr
     const uncertain = yield* fixture.supervisorStore.task(mainThreadId);
     assert.ok(uncertain);
     assert.equal(uncertain.status, "uncertain");
-    assert.equal(uncertain.messageId, `supervisor-objective:${uncertain.id}`);
+    assert.equal(uncertain.messageId, `supervisor-objective:${uncertain.id}:${uncertain.sourceOrdinal}:${uncertain.sourceHash.slice(0, 20)}`);
     assert.equal(uncertain.replayCount, 0);
     const [first] = interpretationDispatches(fixture, uncertain.id);
     assert.ok(first);
@@ -161,12 +161,12 @@ it.live("CT-PS-01: an aborted interpretation dispatch becomes uncertain and a cr
     const dispatching = yield* fixture.supervisorStore.task(mainThreadId);
     assert.ok(dispatching);
     assert.equal(dispatching.status, "dispatching");
-    assert.equal(dispatching.messageId, `supervisor-objective:${dispatching.id}`);
+    assert.equal(dispatching.messageId, `supervisor-objective:${dispatching.id}:${dispatching.sourceOrdinal}:${dispatching.sourceHash.slice(0, 20)}`);
     assert.equal(dispatching.replayCount, 0);
     assert.equal(typeof dispatching.dispatchedAt, "number");
     const [first] = fixture.messageDispatches();
     assert.ok(first);
-    assert.equal(first.payload.commandId, `supervisor-objective:${dispatching.id}`);
+    assert.equal(first.payload.commandId, `supervisor-objective:${dispatching.attempt!.attemptId}`);
 
     const supervisor = yield* fixture.makeSupervisor();
     yield* supervisor.cycle;
@@ -256,7 +256,7 @@ it.live("CT-PS-03: concurrent runOnce and runOnce with retry for one main launch
     assert.ok(task);
     assert.equal(task.status, "waiting");
     assert.equal(fixture.launches().length, 1);
-    assert.deepEqual(fixture.messageDispatches().map(call => call.payload.commandId), [`supervisor-objective:${task.id}`], "only the surviving task identity is sent");
+    assert.deepEqual(fixture.messageDispatches().map(call => call.payload.commandId), [`supervisor-objective:${task.attempt!.attemptId}`], "only the surviving task identity is sent");
     assert.equal(yield* taskRows(fixture), 1);
     yield* supervisor.cycle;
     assert.equal(fixture.messageDispatches().length, 1);

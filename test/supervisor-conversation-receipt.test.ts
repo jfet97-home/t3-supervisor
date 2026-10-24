@@ -75,7 +75,7 @@ it.effect("S6b-CONV-04: two concurrent public runs holding the same prepared int
   yield* reads.release(0);
   yield* runs.firstEnded;
   const unknown = yield* fixture.requests.introduction(fixture.task.id);
-  assert.deepEqual(unknown, {...held, state: "uncertain", dispatchMode: unknown?.dispatchMode, targetRunId: unknown?.targetRunId, definiteRejection: false,
+  assert.deepEqual(unknown, {...held, commandId: `supervisor-workflow:${held.messageId}`, state: "uncertain", dispatchMode: unknown?.dispatchMode, targetRunId: unknown?.targetRunId, definiteRejection: false,
     error: "Proposal delivery is uncertain. Its exact message identity is retained."});
   assert.equal(fixture.calls.filter(isIntroduction).length, 1);
 

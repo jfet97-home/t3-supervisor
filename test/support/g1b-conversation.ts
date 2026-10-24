@@ -366,6 +366,8 @@ export const openProjectSupervisor = (process: ConversationProcess, fake: FakeT3
       Layer.provide(Layer.succeedContext(stores)),
     );
     const context = yield* Layer.build(layer).pipe(Effect.orDie);
+    const current = yield* natives.catalog().pipe(Effect.orDie);
+    yield* Context.get(context, SupervisionScopeService).rememberCatalog(current.projects.map(item => item.project), current.threads).pipe(Effect.orDie);
     return {
       supervisor: Context.get(context, ProjectSupervisor), conversation: Context.get(context, SupervisorConversation), gate: Context.get(context, SupervisionGate),
       requests: process.requests, monitor: process.monitor,

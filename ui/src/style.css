@@ -1,17 +1,17 @@
 :root {
-  color-scheme: light;
-  --ink: #202c3c;
-  --quiet: #53657a;
-  --surface: #fff;
-  --line: #dce3eb;
-  --soft: #edf2f7;
-  --canvas: #f6f8fb;
-  --blue: #215eb2;
-  --control-line: #8796a9;
-  --rail: #202944;
+  color-scheme: light dark;
+  --ink: light-dark(#202c3c, #e6edf6);
+  --quiet: light-dark(#53657a, #adbed1);
+  --surface: light-dark(#fff, #1d293a);
+  --line: light-dark(#dce3eb, #3c4c60);
+  --soft: light-dark(#edf2f7, #29384c);
+  --canvas: light-dark(#f6f8fb, #152032);
+  --blue: light-dark(#215eb2, #a0c4ff);
+  --control-line: light-dark(#8796a9, #7e91ac);
+  --rail: light-dark(#202944, #182138);
   --rail-quiet: #becbdf;
   --rail-selected: #354563;
-  --teal: #007a70;
+  --teal: light-dark(#007a70, #73dbcb);
   --radius: 12px;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   color: var(--ink);
@@ -19,6 +19,9 @@
   text-rendering: optimizeLegibility;
   scrollbar-color: var(--control-line) var(--soft);
 }
+:root:has(> head > meta[name="color-scheme"][content="light"]) { color-scheme: light; }
+:root:has(> head > meta[name="color-scheme"][content="dark"]) { color-scheme: dark; }
+.theme-control { display: grid; gap: 7px; inline-size: min(100%, 220px); font-weight: 600; }
 body { margin: 0; background: var(--canvas); font-size: 15px; line-height: 1.55; }
 body, main, section, aside, div, article, form, fieldset, input, select, textarea, button, a, nav, header, footer, li, table, thead, tbody, tr, th, td, dialog { box-sizing: border-box; }
 button, input, select, textarea { font: inherit; color: inherit; }
@@ -295,22 +298,20 @@ dialog pre { max-height: 400px; overflow: auto; background: var(--soft); padding
 @media (pointer: coarse) {
   button, .button-link, input:not([type="radio"]):not([type="checkbox"]), select, .section-nav a, .project-nav a { min-height: 48px; }
 }
-@media (prefers-color-scheme: dark) {
-  :root { color-scheme: dark; --ink: #e6edf6; --quiet: #adbed1; --surface: #1d293a; --line: #3c4c60; --soft: #29384c; --canvas: #152032; --blue: #a0c4ff; --control-line: #7e91ac; --teal: #73dbcb; --rail: #182138; }
-  button.primary { background: #2863ac; color: #fff; border-color: #2863ac; }
-  .pill.blue { background: #263e64; color: #c6ddff; }
-  .pill.green { background: #203f3a; color: #b6e7d6; }
-  .pill.amber { background: #4c3a1c; color: #f4d699; }
-  .pill.critical { background: #512e30; color: #ffcfcb; }
-  .attention-list { border-color: #7d6945; }
-  .attention-row > svg:first-child, .work-warning { color: #f4cf8b; }
-  .attention-row:hover { background: #35404c; }
-  .quiet-state { background: #203c3a; }
-  .notice, .draft-notice { background: #263b53; border-color: #537190; }
-  .section-nav a[aria-current="page"] { background: #254846; color: #b9eee5; }
-  .project-avatar { color: #b0c7e1; }
-  input[aria-invalid="true"] { border-color: #ffb9b3; }
-}
+button.primary { background: light-dark(var(--blue), #2863ac); color: #fff; border-color: light-dark(var(--blue), #2863ac); }
+.pill.blue { background: light-dark(#e7effc, #263e64); color: light-dark(#244b88, #c6ddff); }
+.pill.green { background: light-dark(#e2f1eb, #203f3a); color: light-dark(#1d5d4b, #b6e7d6); }
+.pill.amber { background: light-dark(#fcf0d9, #4c3a1c); color: light-dark(#7b4b0d, #f4d699); }
+.pill.critical { background: light-dark(#fbe6e4, #512e30); color: light-dark(#92332b, #ffcfcb); }
+.attention-list { border-color: light-dark(#dac697, #7d6945); }
+.attention-row > svg:first-child { color: light-dark(#8b5712, #f4cf8b); }
+.work-warning { color: light-dark(var(--ink), #f4cf8b); }
+.attention-row:hover { background: light-dark(#fff9ec, #35404c); }
+.quiet-state { background: light-dark(#eaf4f1, #203c3a); }
+.notice, .draft-notice { background: light-dark(#edf3f9, #263b53); border-color: light-dark(#b9cddd, #537190); }
+.section-nav a[aria-current="page"] { background: light-dark(#e0eeef, #254846); color: light-dark(#125d58, #b9eee5); }
+.project-avatar { color: light-dark(#4c6581, #b0c7e1); }
+input[aria-invalid="true"] { border-color: light-dark(#a32f25, #ffb9b3); }
 @media (forced-colors: active) {
   .app-nav a[aria-current="page"], .section-nav a[aria-current="page"], .project-nav a[aria-current="page"], .pill, .quiet-state, .attention-list { border: 1px solid CanvasText; }
   .dot { background: CanvasText; }
@@ -430,15 +431,15 @@ dialog pre { max-height: 400px; overflow: auto; background: var(--soft); padding
   .step-explanation { padding-inline-start: 35px; }
   .group-parallel { padding-inline-start: 12px; }
 }
-@media (prefers-color-scheme: dark) {
-  .task-outcome.state-underway, .task-outcome.state-completed { background: #203f3a; color: #b6e7d6; }
-  .task-outcome.state-needs_attention { background: #4c3a1c; color: #f4d699; }
-  .state-underway > .journey-step { background: #203f3a; }
-  .state-underway > .journey-step .step-state, .state-completed > .journey-step .step-state { background: #254846; color: #b9eee5; }
-  .state-needs_attention > .journey-step .step-state, .step-mark.state-needs_attention { background: #4c3a1c; color: #f4d699; border-color: #f4d699; }
-  .step-mark.state-underway { outline-color: #315c55; }
-  .step-mark.state-completed { color: #152032; }
-}
+.task-outcome.state-underway, .task-outcome.state-completed { background: light-dark(#e2f1eb, #203f3a); color: light-dark(#1d5d4b, #b6e7d6); }
+.task-outcome.state-needs_attention { background: light-dark(#fcf0d9, #4c3a1c); color: light-dark(#7b4b0d, #f4d699); }
+.state-underway > .journey-step { background: light-dark(#e4f3f0, #203f3a); }
+.state-underway > .journey-step .step-state { background: light-dark(#c8e8e0, #254846); color: light-dark(#125d58, #b9eee5); }
+.state-completed > .journey-step .step-state { background: light-dark(#e2f1eb, #254846); color: light-dark(#1d5d4b, #b9eee5); }
+.state-needs_attention > .journey-step .step-state { background: light-dark(#fcf0d9, #4c3a1c); color: light-dark(#7b4b0d, #f4d699); border-color: light-dark(#99631b, #f4d699); }
+.step-mark.state-needs_attention { background: light-dark(#fcf0d9, #4c3a1c); color: light-dark(#7b4b0d, #f4d699); border-color: light-dark(#99631b, #f4d699); }
+.step-mark.state-underway { outline-color: light-dark(#bce7df, #315c55); }
+.step-mark.state-completed { color: light-dark(var(--surface), #152032); }
 @media (prefers-reduced-motion: no-preference) {
   .step-mark { transition: background-color 180ms ease-out, border-color 180ms ease-out; }
 }
@@ -505,10 +506,8 @@ button.danger-button:hover:not(:disabled) { color: #92332b; border-color: #92332
   .conversation-supervision > .stack { grid-template-columns: minmax(0, 1fr); }
   .conversation-supervision > .stack > div { grid-column: 1; grid-row: auto; justify-self: start; }
 }
-@media (prefers-color-scheme: dark) {
-  button.danger-button { color: #ffcfcb; border-color: #c58984; }
-  button.danger-button:hover:not(:disabled) { color: #ffcfcb; border-color: #ffcfcb; background: #512e30; }
-}
+button.danger-button { color: light-dark(#92332b, #ffcfcb); border-color: light-dark(#be716a, #c58984); }
+button.danger-button:hover:not(:disabled) { color: light-dark(#92332b, #ffcfcb); border-color: light-dark(#92332b, #ffcfcb); background: light-dark(#fbe6e4, #512e30); }
 .checkout-options { list-style: none; margin: 0; padding: 0; display: grid; }
 .checkout-options a { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 12px; padding: 12px 4px; border-top: 1px solid var(--line); color: var(--ink); text-decoration: none; }
 .checkout-options a span { grid-column: 1; }
@@ -540,8 +539,6 @@ button.danger-button:hover:not(:disabled) { color: #92332b; border-color: #92332
   .sign-in-intro .sign-in-tagline { font-size: 32px; }
   .task-refresh { margin-inline-start: 0; }
 }
-@media (prefers-color-scheme: dark) {
-  .step-note.proposed, .plan-changes { background: #263e64; border-color: #3c4c60; color: #c6ddff; }
-  .step-note.proposed { border-inline-start-color: #a0c4ff; }
-}
+.step-note.proposed, .plan-changes { background: light-dark(#e7effc, #263e64); border-color: light-dark(#cfe0f7, #3c4c60); color: light-dark(var(--ink), #c6ddff); }
+.step-note.proposed { border-inline-start-color: var(--blue); }
 .note-compare-toggle > summary { min-height: 32px; padding-block: 4px; font-size: .85rem; }
