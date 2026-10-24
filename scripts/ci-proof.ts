@@ -14,6 +14,7 @@ export const CiRun = Schema.Struct({
   status: Schema.String,
   conclusion: Schema.NullOr(Schema.String),
 });
+export const decodeCiRuns = Schema.decodeUnknownSync(Schema.Array(CiRun));
 export const MergeProof = Schema.Struct({
   expected: Schema.Struct({ repository: Schema.String, workflowId: Id, head: Sha, branch: Schema.String, tree: Sha }),
   headTree: Sha,
