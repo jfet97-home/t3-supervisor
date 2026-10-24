@@ -291,8 +291,9 @@ it.effect("checkout choices expose the registered root and operative main-thread
   const f = fixture();
   const targets = yield* withDefinitions(f, definitions => definitions.checkoutTargets("project"));
   assert.deepEqual(targets, [
-    {origin: "project", threadId: null, workspaceRoot: "/workspace", branch: "main", isGitRepository: true},
-    {origin: "project", threadId: "main-thread", workspaceRoot: "/worktrees/feature", branch: "feature", isGitRepository: true},
+    {origin: "project", threadId: null, workspaceRoot: "/workspace", branch: "main", isGitRepository: true, vcsAvailable: true, members: []},
+    {origin: "project", threadId: "main-thread", workspaceRoot: "/worktrees/feature", branch: "feature", isGitRepository: true, vcsAvailable: true,
+      members: [{threadId: "main-thread", title: "Main"}]},
   ]);
 }));
 

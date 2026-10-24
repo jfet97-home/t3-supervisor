@@ -1,3 +1,6 @@
+import {branchLabel} from "./checkout-identity.js";
+import { HelpDisclosure } from "./disclosure.js";
+import { GlobalSupervisionStatus, ProjectSupervisionStatus } from "./supervision-status.js";
 import React, { useContext, useEffect, useRef, useState } from "react";
 import { Clock, Effect, Option, Result } from "effect";
 import { AsyncResult, Atom, type AtomRegistry } from "effect/reactivity";
@@ -228,10 +231,10 @@ export function SupervisionControlView({control, busy, blocked, message, onToggl
   const global = control.projectId === null;
   const Heading = global ? "h2" : "h3";
   return <section className="panel stack settings-control" aria-label={global ? "Global supervision" : "Project supervision"}>
-    <div className="row between control-heading"><Heading>{global ? "Global supervision" : "Project supervision"}</Heading><span className="pill">{control.enabled ? "On" : "Off"}</span></div>{!global && control.enabled && !control.globallyEnabled && <p className="notice">The global supervision switch is off.</p>}
+    <div className="row between control-heading"><Heading>{global ? "Global supervision" : "Project supervision"}</Heading>{global ? <GlobalSupervisionStatus enabled={control.globallyEnabled}/> : <ProjectSupervisionStatus enabled={control.enabled} effectiveEnabled={control.effectiveEnabled} globallyEnabled={control.globallyEnabled}/>}</div>{!global && control.enabled && !control.globallyEnabled && <p className="notice">The global supervision switch is off.</p>}
     <p>{global ? "The master switch controls semantic supervision across every project and starts enabled." : "This project is supervised only when both its switch and the master switch are enabled. An existing .t3-supervisor folder enables a project initially; your manual choice is remembered."}</p>
-    <details><summary>How this switch works</summary>{!global && <p>Folder detection: {control.detectionStatus}. {control.detectionError}</p>}
-    <p>Disabling stops new supervisory work. An already-running model turn may finish. Chats, settings and recorded history are retained.</p></details>
+    <HelpDisclosure title={<>How this switch works</>} >{global && <p>Global On applies only to enabled projects and eligible conversations. It does not mean every chat is supervised.</p>}{!global && <p>Folder detection: {control.detectionStatus}. {control.detectionError}</p>}
+    <p>Disabling stops new supervisory work. An already-running model turn may finish. Chats, settings and recorded history are retained.</p></HelpDisclosure>
     <div className="row">
       <button type="button" className={control.enabled ? "danger-button" : "primary"} disabled={busy || blocked} onClick={onToggle}>{busy ? "Saving…" : control.enabled ? "Disable supervision" : "Enable supervision"}</button>
       <button type="button" className="quiet-button" title={readAt ? `Last read ${new Date(readAt).toLocaleTimeString()}` : undefined} disabled={busy} onClick={onReload}>Reload status</button>
@@ -290,7 +293,7 @@ export function SupervisionControlPanel({projectId = null, onChanged, onStateCha
 type SetupOptions = typeof SupervisionSetupOptions.Type;
 type SetupCheckout = SetupOptions["checkouts"][number];
 const checkoutKey = (checkout: SetupCheckout) => JSON.stringify([checkout.threadId, checkout.workspaceRoot]);
-const checkoutBranch = (checkout: SetupCheckout) => checkout.branch ?? (checkout.isGitRepository ? "Detached HEAD" : "No Git repository");
+const checkoutBranch = (checkout: SetupCheckout) => branchLabel({...checkout, vcsAvailable: true});
 
 export function buildSupervisionSetupIntent(projectId: string, generation: number, checkout: SetupCheckout, action: SupervisionSetupInput["action"]): SupervisionSetupInput {
   return {projectId, expectedGeneration: generation, threadId: checkout.threadId, expectedWorkspaceRoot: checkout.workspaceRoot,
@@ -311,9 +314,9 @@ export function SupervisionSetupView({options, selected, busy, blocked, message,
       <option value="">Choose a checkout</option>
       {options.checkouts.map(value => <option key={checkoutKey(value)} value={checkoutKey(value)}>{value.workspaceRoot} — {checkoutBranch(value)}</option>)}
     </select>
-    {checkout && <div><p>Folder: <code>{checkout.workspaceRoot}/.t3-supervisor</code></p><p>Branch: <strong>{checkoutBranch(checkout)}</strong></p><p>Existing setup: {checkout.folderStatus}.</p></div>}
+    {checkout && <div><p>Folder: <code>{checkout.workspaceRoot}/.t3-supervisor</code></p><p><strong>{checkoutBranch(checkout)}</strong></p><p>Existing setup: {checkout.folderStatus}.</p></div>}
     {checkout?.folderStatus === "present" ? <div>
-      <p>Enable the existing definitions at <code>{checkout.workspaceRoot}/.t3-supervisor</code> on branch <strong>{checkoutBranch(checkout)}</strong>. This enables supervision using those files; no files will be written or committed.</p>
+      <p>Enable the existing definitions at <code>{checkout.workspaceRoot}/.t3-supervisor</code> · <strong>{checkoutBranch(checkout)}</strong>. This enables supervision using those files; no files will be written or committed.</p>
       <button type="button" disabled={!canEnableExisting} onClick={() => onSetup("enable_existing")}>Enable existing definitions</button>
     </div> : <p>Create leaves files uncommitted. Create + commit submits the two setup paths from a clean checkout through T3. Repository hooks and signing apply; hooks can alter committed contents, and failure can leave files staged. Neither action switches branches.</p>}
     <div className="row">
@@ -359,10 +362,10 @@ export function GlobalDefinitionsControlView({control, busy, blocked, message, o
 }) {
   return <section className="panel stack settings-control" aria-label="Use global steps and workflows">
     <div className="row between control-heading"><h2>Use global steps and workflows</h2><span className="pill">{control.enabled ? "On" : "Off"}</span></div>{control.enabled && !control.effectiveEnabled && <p className="notice">The master supervision switch is off.</p>}
-    <p>Share reusable steps and workflows across enabled projects and No Project chats.</p><details><summary>Shared definition files and behavior</summary><p>Shared definitions: <code>~/.t3-supervisor/project.yaml</code>, <code>steps/</code>, and <code>workflows/</code> in the T3 server user's home.</p>
+    <p>Share reusable steps and workflows across enabled projects and No Project chats.</p><HelpDisclosure title={<>Shared definition files and behavior</>} ><p>Shared definitions: <code>~/.t3-supervisor/project.yaml</code>, <code>steps/</code>, and <code>workflows/</code> in the T3 server user's home.</p>
     <p>This starts disabled. First enabling creates the shared project.yaml and empty steps/ and workflows/ directories if needed. Existing definitions are preserved, and the files are left uncommitted.</p>
     <p>These definitions supply policy to enabled Supervisors. This switch never activates a chat or changes No Project mode. Disabling them leaves project definitions available; No Project plans use task-local steps.</p>
-    <p>Folder detection: {control.detectionStatus}. {control.detectionError}</p></details>
+    <p>Folder detection: {control.detectionStatus}. {control.detectionError}</p></HelpDisclosure>
     <div className="row">
       <button type="button" className={control.enabled ? "danger-button" : "primary"} disabled={busy || blocked} onClick={onToggle}>{busy ? "Saving…" : control.enabled ? "Disable global definitions" : "Enable global definitions"}</button>
       <button type="button" className="quiet-button" title={readAt ? `Last read ${new Date(readAt).toLocaleTimeString()}` : undefined} disabled={busy} onClick={onReload}>Reload global definitions status</button>

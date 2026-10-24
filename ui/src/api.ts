@@ -10,7 +10,10 @@ export const sessionHttpClient: Layer.Layer<HttpClient.HttpClient> = Layer.effec
   const access = yield* SessionAccess;
   const client = yield* HttpClient.HttpClient;
   return client.pipe(HttpClient.mapRequestEffect((request) =>
-    Effect.map(access.headers, (headers) => HttpClientRequest.setHeaders(request, headers))));
+    Effect.map(access.headers, (headers) => HttpClientRequest.setHeaders(request, headers))),
+    // a rejected read ends only the session that sent it; mutation outcomes retain their existing classification
+    HttpClient.tap(response => response.status === 401 && response.request.method === "GET"
+      ? access.clear(response.request.headers["x-supervisor-session"] ?? "") : Effect.void));
 })).pipe(
   Layer.provide(FetchHttpClient.layer.pipe(Layer.provide(Layer.succeed(FetchHttpClient.RequestInit, { credentials: "omit" })))),
   Layer.provide(SessionAccess.layerBrowser),

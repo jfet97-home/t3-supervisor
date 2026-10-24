@@ -271,9 +271,9 @@ it("the shell is told the route of a pending project draft and nothing while the
   const selection: DefinitionsSelection = {projectId: "project", threadId: "thread-1", contextSelected: true};
   const none = {dirty: false, saving: false, configurationDirty: false};
   assert.equal(draftTarget(selection, none), null);
-  assert.deepEqual(draftTarget(selection, {...none, dirty: true, configurationDirty: true}), {page: "projects", projectId: "project", main: "thread-1", section: "definitions"});
+  assert.deepEqual(draftTarget(selection, {...none, dirty: true, configurationDirty: true}), {page: "projects", projectId: "project", main: "thread-1", section: "editor"});
   assert.deepEqual(draftTarget(selection, {...none, dirty: true}), {page: "projects", projectId: "project", main: "thread-1", section: "settings"});
   assert.deepEqual(draftTarget(selection, {...none, saving: true}), {page: "projects", projectId: "project", main: "thread-1", section: "settings"});
   assert.deepEqual(draftTarget({...selection, threadId: "", contextSelected: false}, {...none, dirty: true, configurationDirty: true}),
-    {page: "projects", projectId: "project", main: null, section: "definitions"});
+    {page: "projects", projectId: "project", main: null, section: "editor"});
 });

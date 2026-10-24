@@ -150,6 +150,13 @@ const make = Effect.fnUntraced(function* (config: SupervisorConfig, options: Gui
       retryProjectSupervisor: ({payload}) => supervised("Native access retry could not be confirmed. Refresh to inspect the retained state.", ({supervisor}) => supervisor.retry(payload)),
       chatSupervision: ({payload}) => supervised("The chat supervision change could not be confirmed. Refresh to inspect the saved state.",
         ({supervisor}) => supervisor.setChatSupervision(payload)),
+      projectCheckouts: ({query}) => {
+        if (!definitions) return Effect.succeed({projectId: query.projectId, available: false, reason: "Checkout reading is unavailable.", complete: false, issues: [], targets: []});
+        return definitions.checkoutInventory(query.projectId).pipe(Effect.match({
+          onSuccess: inventory => inventory,
+          onFailure: error => ({projectId: query.projectId, available: false, reason: "Working folders could not be read: " + (error._tag === "DefinitionCheckoutUnavailable" ? error.reason : "source_unavailable"), complete: false, issues: [], targets: []}),
+        }));
+      },
       projectConfiguration: ({query}) => !definitions ? Effect.fail(new UiError({message: "Project definition access is unavailable."}))
         : failingWith("Project definition access is unavailable.", Effect.map(Effect.suspend(() => definitions.load(query.projectId, query.threadId ?? null)),
           (result) => ({...result, editingAvailable: Boolean(editor)}))),

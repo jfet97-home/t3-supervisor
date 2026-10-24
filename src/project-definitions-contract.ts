@@ -194,3 +194,12 @@ export const ProjectConfigSaveResult = Schema.Struct({
 });
 export type ProjectConfigSave = typeof ProjectConfigSaveInput.Type;
 export type ProjectConfigSaveOutcome = typeof ProjectConfigSaveResult.Type;
+
+export const ProjectCheckoutInventory = Schema.Struct({
+  projectId: Schema.String, available: Schema.Boolean, complete: Schema.Boolean, reason: Schema.NullOr(Schema.String),
+  issues: Schema.Array(Schema.Struct({threadId: Schema.NullOr(Schema.String), message: Schema.String})),
+  targets: Schema.Array(Schema.Struct({workspaceRoot: Schema.String, threadId: Schema.NullOr(Schema.String),
+    branch: Schema.NullOr(Schema.String), isGitRepository: Schema.Boolean, vcsAvailable: Schema.Boolean,
+    members: Schema.Array(Schema.Struct({threadId: Schema.String, title: Schema.String}))})),
+});
+export type ProjectCheckoutInventoryInfo = typeof ProjectCheckoutInventory.Type;

@@ -147,9 +147,9 @@ it.effect("CT-UI-SHELL-01 an expired session keeps the open dashboard and its dr
   assert.equal(browser.local.has("supervisor-session"), false, "the expired session is forgotten");
   assert.equal(registry.get(shell.dashboardOpened).opened, true, "the dashboard stays open behind Sign in again");
   assert.deepEqual(registry.get(shell.chatSettingsDraft), draft);
-  assert.equal(shell.snapshotView(registry.get(shell.dashboardSnapshot)).alert, "Supervisor connection unavailable. Your drafts are kept.");
   // the expiry is a new auth epoch: the snapshot is read once more without a session and still fails
   yield* until(registry, shell.dashboardSnapshot, (result) => AsyncResult.isFailure(result) && !result.waiting, "the re-read after the expiry");
+  assert.equal(shell.snapshotView(registry.get(shell.dashboardSnapshot)).alert, "Supervisor connection unavailable. Your drafts are kept.");
 
   csrf = () => json({ csrf: "csrf-2" });
   answer = () => json(snapshot(true));

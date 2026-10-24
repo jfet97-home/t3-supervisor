@@ -222,6 +222,7 @@ export const makeFakeT3 = (options: FakeT3Options): Effect.Effect<FakeT3, never,
     load: (projectId, threadId = null, cancel) => Effect.suspend(() => load ? load(projectId, threadId, cancel) : Effect.succeed(options.definitions(projectId, threadId))),
     globalFingerprint: () => Effect.succeed(null),
     presence: unused("definitions presence"), presenceGlobal: unused("definitions presence"), presenceForCheckout: unused("definitions presence"),
+    checkoutInventory: (projectId: string) => Effect.succeed({projectId, available: true, complete: true, reason: null, issues: [], targets: []}),
     checkoutTargets: unused("checkout targets"), currentWorkspace: unused("current workspace"), initialize: unused("definitions setup"),
     initializeGlobal: unused("definitions setup"), readProjectConfig: unused("project configuration read"),
   });

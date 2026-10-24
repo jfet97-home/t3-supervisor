@@ -1,5 +1,5 @@
 import { ConversationEngagement, deriveConversationEngagement } from "./supervision-conversation-contract.js";
-import { Data, Effect, Option, Schema } from "effect";
+import { Schema } from "effect";
 import type { BindingRecord, TaskRecord } from "./project-supervisor-store.js";
 import type { TaskInterpretationInfo, SupervisorMonitoringStatus } from "./project-supervisor-contract.js";
 import type { SupervisionControlInfo } from "./supervisor-control-contract.js";
@@ -32,17 +32,22 @@ export const DashboardOverview = Schema.Struct({
   limit: Schema.Number,
   total: Schema.Number,
   attentionTotal: Schema.Number,
+  availableTotal: Schema.Number,
+  attention: Schema.Array(DashboardWork),
+  query: Schema.Struct({q: Schema.String, projectId: Schema.String, filter: Schema.Literals(["all", "attention", "active", "stopped"])}),
   hasMore: Schema.Boolean,
   projects: Schema.Array(Schema.Struct({
     id: Schema.String, title: Schema.String, available: Schema.Boolean,
     enabled: Schema.Boolean, effectiveEnabled: Schema.Boolean,
-    detectionStatus: Schema.String,
+    detectionStatus: Schema.String, attentionTotal: Schema.optional(Schema.Number),
   })),
   work: Schema.Array(DashboardWork),
 });
 export type DashboardOverviewInfo = typeof DashboardOverview.Type;
 
-export function overviewPage(query: {offset?: string | undefined; limit?: string | undefined}) {
+export type OverviewQuery = {q: string; projectId: string; filter: "all" | "attention" | "active" | "stopped"};
+export type OverviewPage = {offset: number; limit: number; mainThreadIds?: readonly string[]} & Partial<OverviewQuery>;
+export function overviewPage(query: {offset?: string | undefined; limit?: string | undefined; q?: string | undefined; projectId?: string | undefined; filter?: string | undefined; mainThreadId?: readonly string[] | undefined}) {
   const integer = (value: string | undefined, fallback: number, minimum: number, maximum: number) => {
     if (value === undefined) return fallback;
     if (!/^\d+$/u.test(value)) throw new Error("invalid_overview_page");
@@ -50,7 +55,23 @@ export function overviewPage(query: {offset?: string | undefined; limit?: string
     if (!Number.isSafeInteger(parsed) || parsed < minimum || parsed > maximum) throw new Error("invalid_overview_page");
     return parsed;
   };
-  return {offset: integer(query.offset, 0, 0, 100_000), limit: integer(query.limit, 100, 1, 200)};
+  const q = query.q?.trim() ?? ""; const projectId = query.projectId ?? ""; const filter = query.filter ?? "all";
+  if (q.length > 300 || projectId.length > 512 || !["all", "attention", "active", "stopped"].includes(filter)) throw new Error("invalid_overview_page");
+  if (query.mainThreadId && (!projectId || query.mainThreadId.length === 0 || query.mainThreadId.length > 25 || query.mainThreadId.some(id => !id || id.length > 512))) throw new Error("invalid_overview_page");
+  return {offset: integer(query.offset, 0, 0, 100_000), limit: integer(query.limit, 25, 1, 200), q, projectId, filter: filter as OverviewQuery["filter"], ...(query.mainThreadId ? {mainThreadIds: [...new Set(query.mainThreadId)]} : {})};
+}
+
+// filtering precedes the page boundary; attention and project coverage remain independent of the selected page
+export function overviewWorkPage(all: readonly DashboardWorkInfo[], page: OverviewPage) {
+  const query: OverviewQuery = {q: page.q ?? "", projectId: page.projectId ?? "", filter: page.filter ?? "all"};
+  const needle = query.q.toLocaleLowerCase();
+  const visibleIds = page.mainThreadIds ? new Set(page.mainThreadIds) : null;
+  const matching = all.filter(item => (!visibleIds || visibleIds.has(item.mainThreadId)) && (!query.projectId || item.projectId === query.projectId) &&
+    (query.filter === "all" || query.filter === "attention" && item.attention.length > 0 || query.filter === "active" && item.nativeState === "active" || query.filter === "stopped" && item.supervision !== "enabled") &&
+    `${item.title} ${item.objective ?? ""} ${item.reason}`.toLocaleLowerCase().includes(needle));
+  const attention = all.filter(item => item.attention.length > 0);
+  return {query, offset: page.offset, limit: page.limit, availableTotal: all.length, total: matching.length, attentionTotal: attention.length,
+    attention: attention.slice(0, 5), hasMore: page.offset + page.limit < matching.length, work: matching.slice(page.offset, page.offset + page.limit)};
 }
 
 /** The same current-state explanations are used by the overview and the selected conversation. */
@@ -95,7 +116,7 @@ export function buildDashboardOverview(input: {
   assessment?: (binding: BindingRecord, task: TaskRecord | undefined) => DashboardWorkInfo["assessment"];
   scopeEnabled?: (projectId: string, mainThreadId: string) => boolean;
   excluded: ReadonlySet<string>;
-  offset: number; limit: number;
+  offset: number; limit: number; q?: string; projectId?: string; filter?: OverviewQuery["filter"]; mainThreadIds?: readonly string[];
 }): DashboardOverviewInfo {
   const projects = input.projects.map(({project, available}) => {
     const control = input.control(project.id);
@@ -128,39 +149,8 @@ export function buildDashboardOverview(input: {
   }
   work.sort((a, b) => Number(b.attention.length > 0) - Number(a.attention.length > 0) ||
     Number(b.nativeState === "active") - Number(a.nativeState === "active") || (b.updatedAt ?? 0) - (a.updatedAt ?? 0) || a.mainThreadId.localeCompare(b.mainThreadId));
-  const revision = input.fingerprint({available: input.available, globallyEnabled: input.globallyEnabled, projects, work});
+  const summaries = projects.map(project => ({...project, ...(project.available ? {attentionTotal: work.filter(item => item.projectId === project.id && item.attention.length > 0).length} : {})}));
+  const revision = input.fingerprint({available: input.available, globallyEnabled: input.globallyEnabled, projects: summaries, work});
   return {revision, observedAt: input.observedAt, available: input.available, globallyEnabled: input.globallyEnabled,
-    projects, offset: input.offset, limit: input.limit, total: work.length,
-    attentionTotal: work.filter(item => item.attention.length > 0).length,
-    hasMore: input.offset + input.limit < work.length, work: work.slice(input.offset, input.offset + input.limit)};
+    projects: summaries, ...overviewWorkPage(work, input)};
 }
-
-// a page sequence that cannot form one coherent prefix of the overview; the reason is its message
-export class OverviewRangeError extends Data.TaggedError("OverviewRangeError")<{readonly reason: "invalid_overview_page" | "overview_changed_during_read"}> {
-  override get message() { return this.reason; }
-}
-
-// reads a coherent fresh prefix of at least `count` conversations in pages, retaining the loaded range across polls,
-// restarting once when the overview changes between pages and rejecting reordered or duplicate pages
-export const readOverviewPages = <E, R>(read: (offset: number) => Effect.Effect<DashboardOverviewInfo, E, R>, count: number) => {
-  const attempt = Effect.gen(function* () {
-    const first = yield* read(0);
-    if (first.offset !== 0) return yield* new OverviewRangeError({reason: "invalid_overview_page"});
-    let latest = first;
-    const work = [...first.work];
-    while (latest.hasMore && work.length < count) {
-      const offset = latest.offset + latest.work.length;
-      if (!latest.work.length) return yield* new OverviewRangeError({reason: "invalid_overview_page"});
-      const next = yield* read(offset);
-      if (next.revision !== first.revision) return Option.none<DashboardOverviewInfo>();
-      if (next.offset !== offset || next.total !== first.total) return yield* new OverviewRangeError({reason: "invalid_overview_page"});
-      work.push(...next.work); latest = next;
-    }
-    if (new Set(work.map(item => item.mainThreadId)).size !== work.length) return yield* new OverviewRangeError({reason: "invalid_overview_page"});
-    return Option.some({...first, work, hasMore: latest.hasMore});
-  });
-  return Effect.flatMap(attempt, Option.match({
-    onSome: Effect.succeed,
-    onNone: () => Effect.flatMap(attempt, Option.match({onSome: Effect.succeed, onNone: () => Effect.fail(new OverviewRangeError({reason: "overview_changed_during_read"}))})),
-  }));
-};
