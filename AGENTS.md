@@ -15,9 +15,11 @@ ownership, delegation, provider recovery, bounded review and completion evidence
 Keep the procedure there; the requirements below are specific to this product.
 
 All contributions go through a pull request. Do not push changes directly to
-`main`; the repository requires a PR and the strict `check` status. An explicit
+`main`; the repository requires a PR and a passing `check` status. An explicit
 admin bypass at PR merge is an exceptional human decision, not permission for
 ordinary pushes. `git push --force` does not bypass GitHub's rules.
+Do not merge or rebase `main` solely to satisfy branch freshness: it is not required.
+Resolve actual merge conflicts, and require passing checks on the latest PR head.
 
 While editing, run focused local checks. Leave the final complete main and runner
 harness suites to GitHub CI rather than duplicating them locally.
