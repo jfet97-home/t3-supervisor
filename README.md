@@ -16,8 +16,8 @@ credentials; installing Supervisor does not install T3 or configure its provider
 Requires Node.js **24.22.1 or newer**. Install with either package manager:
 
 ```sh
-npm install --global t3-supervisor@latest
-# or: pnpm add --global t3-supervisor@latest
+npm install --global @jfet97/t3-supervisor@latest
+# or: pnpm add --global @jfet97/t3-supervisor@latest
 ```
 
 Put the T3 read credential in a private file, then start Supervisor:
@@ -80,13 +80,13 @@ same version as an npm package and a container image for Linux amd64 and arm64.
 
 | Channel | npm/pnpm selector | Container tag | Intended use |
 | --- | --- | --- | --- |
-| Stable | `t3-supervisor@latest` | `:latest` | Normal use |
-| Beta | `t3-supervisor@beta` | `:beta` | Testing a release candidate |
-| Alpha | `t3-supervisor@alpha` | `:alpha` | Earlier testing |
-| Nightly | `t3-supervisor@nightly` | `:nightly` | Latest successful main build |
+| Stable | `@jfet97/t3-supervisor@latest` | `:latest` | Normal use |
+| Beta | `@jfet97/t3-supervisor@beta` | `:beta` | Testing a release candidate |
+| Alpha | `@jfet97/t3-supervisor@alpha` | `:alpha` | Earlier testing |
+| Nightly | `@jfet97/t3-supervisor@nightly` | `:nightly` | Latest successful main build |
 
 Previews are optional and may not exist until one has been published. For example,
-`npm install --global t3-supervisor@beta` selects beta; with Compose, set
+`npm install --global @jfet97/t3-supervisor@beta` selects beta; with Compose, set
 `SUPERVISOR_VERSION=beta`. You can pin an exact release instead of a channel.
 Installing a new version does not restart your running service automatically.
 

@@ -86,7 +86,7 @@ workflow MCP bearer. Copying live SQLite files without their WAL is not a reliab
 backup; take the backup while the service is stopped.
 
 For local installation, install the desired version with
-`npm install --global t3-supervisor@VERSION` (or `pnpm add --global ...`), then
+`npm install --global @jfet97/t3-supervisor@VERSION` (or `pnpm add --global ...`), then
 restart the service. For Compose, set `SUPERVISOR_VERSION=VERSION`, run
 `docker compose pull`, then `docker compose up -d`. Confirm `--version` and
 `/health` after restarting. Updating an alias in the registry never changes a

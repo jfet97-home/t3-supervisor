@@ -84,7 +84,7 @@ jobs:
       id-token: write
       actions: read
     env:
-      IMAGE: ghcr.io/jfet97/t3-supervisor
+      IMAGE: ghcr.io/${{ github.repository }}
       PUBLISH: ${{ vars.RELEASE_PUBLISH_ENABLED == 'true' && (github.event_name == 'workflow_run' || inputs.publish) }}
     steps:
       - uses: actions/checkout@v4
@@ -104,7 +104,9 @@ jobs:
           pnpm changeset status --output release-status.json
           node --import tsx scripts/release.ts prepare
       - name: Build the complete package
-        run: pnpm pack --pack-destination release
+        env:
+          VERSION: ${{ steps.plan.outputs.version }}
+        run: pnpm pack --out "release/t3-supervisor-$VERSION.tgz"
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
@@ -121,13 +123,13 @@ jobs:
         run: |
           set -euo pipefail
           for selector in "$VERSION" "$NPM_TAG"; do
-            code=$(curl --silent --show-error --connect-timeout 10 --max-time 30 --output release/registry-response.json --write-out '%{http_code}' "https://registry.npmjs.org/t3-supervisor/$selector")
+            code=$(curl --silent --show-error --connect-timeout 10 --max-time 30 --output release/registry-response.json --write-out '%{http_code}' "https://registry.npmjs.org/@jfet97%2Ft3-supervisor/$selector")
             case "$code" in
               200)
                 if [ "$selector" = "$VERSION" ]; then
                   cp release/registry-response.json release/registry-version.json
                   node --import tsx scripts/release.ts verify-registry
-                  url=$(jq -er '.dist.tarball | select(startswith("https://registry.npmjs.org/t3-supervisor/-/"))' release/registry-version.json)
+                  url=$(jq -er '.dist.tarball | select(startswith("https://registry.npmjs.org/@jfet97/t3-supervisor/-/"))' release/registry-version.json)
                   curl --fail --silent --show-error --connect-timeout 10 --max-time 120 "$url" --output "release/t3-supervisor-$VERSION.tgz"
                   node --import tsx scripts/release.ts verify-archive
                   echo 'exists=true' >> "$GITHUB_OUTPUT"
@@ -154,7 +156,7 @@ jobs:
         with:
           script: |
             try {
-              await github.rest.packages.getPackageForOrganization({ org: context.repo.owner, package_type: 'container', package_name: context.repo.repo });
+              await github.rest.packages.getPackageForUser({ username: context.repo.owner, package_type: 'container', package_name: context.repo.repo });
               core.setOutput('exists', 'true');
             } catch (error) { if (error.status !== 404) throw error; }
       - name: Reconcile immutable image
@@ -245,7 +247,7 @@ jobs:
           VERSION: ${{ steps.plan.outputs.version }}
           NPM_TAG: ${{ steps.plan.outputs.npmTag }}
         run: |
-          curl --fail --silent --show-error --connect-timeout 10 --max-time 30 "https://registry.npmjs.org/t3-supervisor/$NPM_TAG" --output release/published-alias.json
+          curl --fail --silent --show-error --connect-timeout 10 --max-time 30 "https://registry.npmjs.org/@jfet97%2Ft3-supervisor/$NPM_TAG" --output release/published-alias.json
           jq -e --arg version "$VERSION" --arg revision "${{ steps.plan.outputs.revision }}" '.version == $version and .gitHead == $revision' release/published-alias.json
           digest=$(jq -er '.digest' release/image-manifest.json)
           docker buildx imagetools create --tag "$IMAGE:$NPM_TAG" "$IMAGE@$digest"
@@ -276,7 +278,7 @@ jobs:
             }
             const manifest = JSON.parse(fs.readFileSync('release/image-manifest.json', 'utf8'));
             const notes = fs.readFileSync('release/notes.md', 'utf8').trim();
-            const body = `${notes}\n\nSource: ${sha}\n\nnpm: t3-supervisor@${version}\n\nContainer: ${process.env.IMAGE}@${manifest.digest}\n\nChannel: ${channel}. Upgrades are opt-in; back up state before upgrading.`;
+            const body = `${notes}\n\nSource: ${sha}\n\nnpm: @jfet97/t3-supervisor@${version}\n\nContainer: ${process.env.IMAGE}@${manifest.digest}\n\nChannel: ${channel}. Upgrades are opt-in; back up state before upgrading.`;
             let release;
             try { ({ data: release } = await github.rest.repos.getReleaseByTag({ ...context.repo, tag })); }
             catch (error) {

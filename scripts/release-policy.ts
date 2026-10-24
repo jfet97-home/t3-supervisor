@@ -10,7 +10,7 @@ export const ReleaseRequest = Schema.Struct({
 export const ReleaseStatus = Schema.Struct({
   releases: Schema.Array(Schema.Struct({ name: Schema.String, newVersion: StableVersion })),
 });
-export const ReleaseManifest = Schema.Struct({ name: Schema.Literal("t3-supervisor"), version: StableVersion });
+export const ReleaseManifest = Schema.Struct({ name: Schema.Literal("@jfet97/t3-supervisor"), version: StableVersion });
 export const ReleasePlan = Schema.Struct({
   channel: ReleaseRequest.fields.channel,
   version: Schema.String,

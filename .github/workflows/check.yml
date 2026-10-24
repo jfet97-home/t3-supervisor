@@ -14,11 +14,62 @@ permissions:
   contents: read
 
 jobs:
+  reuse:
+    if: ${{ github.event_name == 'push' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+    outputs:
+      proven: ${{ steps.proof.outputs.proven }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-dependencies
+      - name: Verify the merged tree has full PR validation
+        id: proof
+        uses: actions/github-script@v8
+        with:
+          script: |
+            // this small GitHub API adapter delegates proof decisions to the shared schema-checked policy
+            core.setOutput('proven', 'false');
+            try {
+              const { pathToFileURL } = require('node:url');
+              const root = pathToFileURL(`${process.cwd()}/package.json`).href;
+              const localRequire = require('node:module').createRequire(root);
+              const { tsImport } = localRequire('tsx/esm/api');
+              const { Schema } = localRequire('effect');
+              const { CiRun, newestPrRun, proveMergedValidation } = await tsImport('./scripts/ci-proof.ts', root);
+              const repository = `${context.repo.owner}/${context.repo.repo}`;
+              const { data: prs } = await github.rest.repos.listPullRequestsAssociatedWithCommit({ ...context.repo, commit_sha: context.sha, per_page: 100 });
+              const pr = prs.find(pr => pr.merged_at && pr.merge_commit_sha === context.sha && pr.base.ref === 'main' && pr.head.repo?.full_name === repository);
+              if (!pr) throw new Error('no matching merged PR');
+              const { data: merged } = await github.rest.git.getCommit({ ...context.repo, commit_sha: context.sha });
+              const { data: head } = await github.rest.git.getCommit({ ...context.repo, commit_sha: pr.head.sha });
+              const { data: workflow } = await github.rest.actions.getWorkflow({ ...context.repo, workflow_id: 'check.yml' });
+              const expected = { repository, workflowId: workflow.id, head: pr.head.sha, branch: pr.head.ref, tree: merged.tree.sha };
+              const { data: response } = await github.rest.actions.listWorkflowRuns({ ...context.repo, workflow_id: workflow.id, head_sha: pr.head.sha, per_page: 100 });
+              const runs = Schema.decodeUnknownSync(Schema.Array(CiRun))(response.workflow_runs);
+              const run = newestPrRun(runs, expected);
+              if (!run || run.status !== 'completed' || run.conclusion !== 'success') throw new Error('no successful latest PR run');
+              const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, { ...context.repo, run_id: run.id, filter: 'latest', per_page: 100 });
+              const proof = proveMergedValidation({ expected, headTree: head.tree.sha, runs, jobs });
+              await core.summary.addHeading('Full PR validation reused').addRaw(`The merged tree matches the checked PR head. All full jobs passed in [run ${proof.runId}](https://github.com/${repository}/actions/runs/${proof.runId}).`).write();
+              core.setOutput('proven', 'true');
+            } catch {
+              core.notice('Matching full PR validation could not be proven; running complete validation on main.');
+            }
+
   static:
+    needs: reuse
+    if: ${{ always() && !cancelled() && needs.reuse.outputs.proven != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: ./.github/actions/setup-dependencies
       - run: pnpm lint
       - run: pnpm typecheck
@@ -26,11 +77,11 @@ jobs:
       - name: Prepare the installable artifact
         id: package
         env:
-          REVISION: ${{ github.sha }}
+          REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           node -e 'const fs=require("node:fs");const p=JSON.parse(fs.readFileSync("package.json","utf8"));p.gitHead=process.env.REVISION;fs.writeFileSync("package.json",JSON.stringify(p,null,2)+"\n");fs.appendFileSync(process.env.GITHUB_OUTPUT,"version="+p.version+"\n")'
           mkdir -p "$RUNNER_TEMP/release-package" "$RUNNER_TEMP/release-install"
-          pnpm pack --ignore-scripts --pack-destination "$RUNNER_TEMP/release-package"
+          pnpm pack --ignore-scripts --out "$RUNNER_TEMP/release-package/t3-supervisor-$(node -p 'require("./package.json").version').tgz"
           pnpm --dir "$RUNNER_TEMP/release-install" add --prod --offline --ignore-scripts "$RUNNER_TEMP/release-package/t3-supervisor-$(node -p 'require("./package.json").version').tgz"
           node --import tsx scripts/smoke-release.ts package "$RUNNER_TEMP/release-install/node_modules/.bin/t3-supervisor"
       - uses: docker/setup-buildx-action@v3
@@ -41,13 +92,15 @@ jobs:
           tags: t3-supervisor:ci-check
           build-args: |
             VERSION=${{ steps.package.outputs.version }}
-            REVISION=${{ github.sha }}
+            REVISION=${{ github.event.pull_request.head.sha || github.sha }}
           cache-from: type=gha,scope=ci-image
           cache-to: type=gha,mode=max,scope=ci-image
       - name: Verify the container artifact
         run: node --import tsx scripts/smoke-release.ts image t3-supervisor:ci-check
 
   main:
+    needs: reuse
+    if: ${{ always() && !cancelled() && needs.reuse.outputs.proven != 'true' }}
     name: main (${{ matrix.shard }}/4)
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -58,29 +111,45 @@ jobs:
         shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: ./.github/actions/setup-dependencies
       - run: pnpm test --shard=${{ matrix.shard }}/4 --maxWorkers=1
 
   harness:
+    needs: reuse
+    if: ${{ always() && !cancelled() && needs.reuse.outputs.proven != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: ./.github/actions/setup-dependencies
       - run: pnpm test:harness
 
   check:
     if: ${{ always() }}
-    needs: [static, main, harness]
+    needs: [reuse, static, main, harness]
     runs-on: ubuntu-latest
     timeout-minutes: 1
     steps:
       - name: Require every validation job to pass
         env:
+          EVENT: ${{ github.event_name }}
+          REUSE_PROVEN: ${{ needs.reuse.outputs.proven }}
+          REUSE_RESULT: ${{ needs.reuse.result }}
           STATIC_RESULT: ${{ needs.static.result }}
           MAIN_RESULT: ${{ needs.main.result }}
           HARNESS_RESULT: ${{ needs.harness.result }}
         run: |
-          test "$STATIC_RESULT" = success
-          test "$MAIN_RESULT" = success
-          test "$HARNESS_RESULT" = success
+          if [ "$EVENT" = push ] && [ "$REUSE_PROVEN" = true ]; then
+            test "$REUSE_RESULT" = success
+            test "$STATIC_RESULT" = skipped
+            test "$MAIN_RESULT" = skipped
+            test "$HARNESS_RESULT" = skipped
+          else
+            test "$STATIC_RESULT" = success
+            test "$MAIN_RESULT" = success
+            test "$HARNESS_RESULT" = success
+          fi

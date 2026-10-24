@@ -198,7 +198,7 @@ export const installedBinLayer: Layer.Layer<InstalledBin, never, FileSystem.File
   const firstLine = new TextDecoder().decode(yield* Effect.orDie(fs.readFile(builtCli))).split("\n")[0] ?? "";
   if (firstLine !== shebang) return yield* Effect.die(new Error("dist/cli.js lost its shebang"));
   const pnpm = pnpmEnvironment();
-  yield* step("pnpm pack", "pnpm", ["pack", "--ignore-scripts", "--silent", "--pack-destination", root], repositoryRoot, pnpm);
+  yield* step("pnpm pack", "pnpm", ["pack", "--ignore-scripts", "--silent", "--out", join(root, `t3-supervisor-${buildInfo.version}.tgz`)], repositoryRoot, pnpm);
   yield* step("tar extract", "tar", ["-xzf", join(root, `t3-supervisor-${buildInfo.version}.tgz`), "-C", root], root, pnpm);
   const packageDirectory = join(root, "package");
   // the tarball carries no lockfile; the baseline one keeps the installed dependency set identical to this checkout

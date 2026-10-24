@@ -1,5 +1,5 @@
 {
-  "name": "t3-supervisor",
+  "name": "@jfet97/t3-supervisor",
   "version": "0.1.0",
   "description": "Dashboard and background service for supervising T3 projects and conversations",
   "repository": {
