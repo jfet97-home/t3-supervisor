@@ -11,7 +11,7 @@ import {deriveConversationEngagement, emptyConversation, type ConversationEngage
 const now = 1_800_000_000_000;
 const model = new FixtureModel(() => now);
 const data = model.guidanceSnapshot(now);
-const overview = {data: null, loading: false, error: "The last successful read is kept.", refresh: () => {}, loadMore: () => {}};
+const overview = {data: null, loading: false, error: "The last successful read is kept.", refresh: () => {}, selection: {q: "", projectId: "", filter: "all" as const, page: 1}, setSelection: () => {}};
 
 it("a first-load failure cannot claim that a previous successful read is visible", () => {
   const html = renderToStaticMarkup(createElement(Home, {data, overview, navigate: () => {}}));

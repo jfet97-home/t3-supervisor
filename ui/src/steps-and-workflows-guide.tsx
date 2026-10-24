@@ -115,7 +115,7 @@ const walkthrough: ReadonlyArray<{id: string; title: string; body: React.ReactNo
   {id: "agreement", title: "Proposal, acceptance and refinement", body: <p><strong>Agent and Supervisor</strong> states once what the Supervisor proposed and whether the agent accepted it. Acceptance happens in their conversations and the dashboard only reads it; an accepted plan is not evidence that work was done. When the Supervisor proposes a refinement, <strong>Proposed update awaiting acceptance</strong> lists the changed steps and <strong>Update proposed</strong> marks them, while the earlier plan stays accepted and recorded progress stays as it is.</p>},
   {id: "records", title: "Evidence and history for each step", body: <p>Open a step for its <strong>Plan note</strong>, the <strong>Supervisor assessment</strong> that set its current status and any <strong>Earlier step records</strong>. <strong>Latest Supervisor record</strong> shows the newest one. <strong>Connected work</strong> lists contributing child conversations, and <strong>Evidence and history</strong> shows the retained Supervisor records and available earlier acceptance or workflow records.</p>},
   {id: "supervision", title: "Supervisor health and interventions", body: <p><strong>Supervision</strong> shows <strong>Supervisor health</strong>, <strong>Monitoring</strong> with its check-ins and the <strong>Supervisor team</strong> for this conversation. <strong>Stop supervision</strong> applies only to this chat and stays off until you enable it again; the chat itself is not changed. <strong>Open in T3</strong> opens the conversation.</p>},
-  {id: "definitions", title: "Definitions and project settings", body: <p>A project’s reusable steps and workflows are in <strong>Definitions</strong>, read from a checkout you choose: <strong>Project root</strong> or the checkout a conversation works in. <strong>Project settings</strong> holds which conversations are supervised and the defaults for new Supervisors. Instance-wide switches and global definitions are in <strong>Settings</strong>. The reference below describes the files.</p>},
+  {id: "definitions", title: "Definitions and project settings", body: <p>A project’s reusable steps and workflows are in <strong>Definitions</strong>, read from a checkout you choose: <strong>Project folder</strong> or a <strong>Separate working copy</strong>. Conversations sharing a folder share its definitions; the chooser shows the actual folder and reported branch. <strong>Project settings</strong> holds which conversations are supervised and the defaults for new Supervisors. Instance-wide switches and global definitions are in <strong>Settings</strong>. The reference below describes the files.</p>},
 ];
 
 const referenceTopics = [
@@ -298,7 +298,7 @@ skills:
 
     <Topic id="guide-faq-title" title="Frequently asked questions">
       <div className="stack guide-faq-list">{questions.map(({question, answer}) => <EntityDetails title={<>{question}</>} className="guide-faq" key={question}>
-        
+
         <p>{answer}</p>
       </EntityDetails>)}</div>
     </Topic>

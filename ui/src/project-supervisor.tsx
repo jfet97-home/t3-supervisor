@@ -1,3 +1,4 @@
+import {RefreshAction} from "./refresh-action.js";
 import { Icon } from "./icons.js";
 import { EntityDetails, HelpDisclosure } from "./disclosure.js";
 import { ConversationStatus, ConversationUnderstanding } from "./conversation-status.js";
@@ -203,7 +204,7 @@ function DefinitionReviewView({review}: {review: DefinitionReviewInfo}) {
     <p><strong>Status:</strong> {definitionReviewMessages[review.status]}</p>
     {review.message && <p>{review.message}</p>}
     {outcome && <EntityDetails title={<>Definition review details</>} >
-      
+
       <p><strong>Expected revision:</strong> <code>{review.expectedRevision}</code></p>
       <p><strong>Observed revision:</strong> {review.observedRevision === null ? "Not recorded" : <code>{review.observedRevision}</code>}</p>
       <p><strong>Supervisor message ID:</strong> {review.supervisorMessageId === null ? "Not recorded" : <code>{review.supervisorMessageId}</code>}</p>
@@ -482,13 +483,13 @@ function SupportingActivity({thread}: {thread: WorkflowProgressThreadView}) {
   </EntityDetails>;
 }
 
-function ConnectedWork({threads, mainThreadId, workflows, coverage, task, complete}: {threads: readonly WorkflowProgressThreadView[]; mainThreadId: string;
-  workflows: ReadonlyMap<string, WorkflowProgressWorkflow>; coverage: ReadonlyMap<string, WorkflowProgressCoverage>; task: TaskInterpretationInfo | undefined; complete: boolean}) {
+export function ConnectedWork({threads, mainThreadId, workflows, coverage, task, complete, metadata}: {threads: readonly WorkflowProgressThreadView[]; mainThreadId: string;
+  workflows: ReadonlyMap<string, WorkflowProgressWorkflow>; coverage: ReadonlyMap<string, WorkflowProgressCoverage>; task: TaskInterpretationInfo | undefined; complete: boolean; metadata?: React.ReactNode}) {
   const children = threads.filter(thread => thread.threadId !== mainThreadId);
   const mainCoverage = coverage.get(mainThreadId);
-  
+
   return <section className="stack connected-work" aria-labelledby="connected-work-title">
-    <h2 id="connected-work-title">Connected work</h2><p className="muted">Conversations started from this task. Their workflows and contributions are recorded separately; a finished child does not complete a parent step.</p>{children.length === 0 && <p>{complete ? "No contributing child conversations are recorded in this read." : "No children in the loaded pages. More conversations may be on a later page."}</p>}
+    <div className="row between"><h2 id="connected-work-title">Connected work</h2>{metadata}</div><p className="muted">Conversations started from this task. Their workflows and contributions are recorded separately; a finished child does not complete a parent step.</p>{children.length === 0 && <p>{complete ? "No contributing child conversations are recorded in this read." : "No children in the loaded pages. More conversations may be on a later page."}</p>}
     {mainCoverage && mainCoverage.state !== "root" && <WorkflowAssignee coverage={mainCoverage}/>}
     <ul className="stack">{children.map(thread => {
       const lifecycle = lifecyclePresentation(thread);
@@ -496,8 +497,8 @@ function ConnectedWork({threads, mainThreadId, workflows, coverage, task, comple
       const notes = workflow ? stepNotes(task, {kind: "live", workflow, plan: workflow.plan ?? {kind: "sequence", templatePath: null, nodes: []}}) : null;
       return <li key={thread.threadId} className="workflow-progress-thread">
         <div className="row between">
-          <div><strong>{thread.title || workflow?.objective || `Conversation ${thread.threadId}`}</strong><p className="muted small">{childOriginText[thread.origin]}{workflow ? ` · ${workflowExecutionStatusText[workflow.status]}` : ""}</p></div>
-          <span className={`pill ${lifecycle.tone}`}>{lifecycle.label}</span>
+          <div><strong>{thread.title || workflow?.objective || `Conversation ${thread.threadId}`}</strong><p className="muted small">{childOriginText[thread.origin]}{workflow ? ` · Workflow: ${workflowExecutionStatusText[workflow.status]}` : ""}</p></div>
+          <span className={`pill ${lifecycle.tone}`}>Conversation: {lifecycle.label}</span>
         </div>
         <p className="small">{workflow?.parentNodeReferences.length ? <>Contributes to: {workflow.parentNodeReferences.map(reference => reference.nodeName).join(", ")}</> : "No recorded contribution to a parent step"}</p><div className="conversation-meta"><WorkflowAssignee coverage={coverage.get(thread.threadId)}/>{!thread.deletedAt && <a href={threadHref(thread.threadId)}>Open in T3 →</a>}</div>
         <EntityDetails title={<>{workflow ? "Child workflow and records" : "Conversation details"}</>} ><div className="stack">
@@ -554,7 +555,7 @@ export function TaskWorkspace({snapshot, task, threadId, progress, connected, at
       <div className="task-reading">
         <span><strong>{alignmentLabel(task)}</strong></span>
         <span>{assessmentState}</span>
-        <span className="task-refresh">{readAt !== null && <span>Read {new Date(readAt).toLocaleTimeString()}</span>}<button type="button" className="quiet-button" aria-disabled={!connected || refreshing} onClick={() => {if (connected && !refreshing) onRefresh();}}>{refreshing ? "Refreshing…" : "Refresh"}</button></span>
+        <span className="task-refresh">{readAt !== null && <span>Read {new Date(readAt).toLocaleTimeString()}</span>}<RefreshAction label="Refresh task and supervision state" busy={refreshing} enabled={connected} onRefresh={onRefresh}/></span>
       </div>
     </section>
     <ConversationUnderstanding draft={task?.conversation?.draft}/>
@@ -615,7 +616,7 @@ const noProjectEligibility = {
 /** The read time and the one refresh action of a Supervisor view. */
 function Freshness({readAt, refreshing, connected, onRefresh}: {readAt: number | null; refreshing: boolean; connected: boolean; onRefresh: () => void}) {
   return <div className="view-freshness small muted">{readAt !== null && <span>Read {new Date(readAt).toLocaleTimeString()}</span>}
-    <button type="button" className="quiet-button" aria-disabled={!connected || refreshing} onClick={() => {if (connected && !refreshing) onRefresh();}}>{refreshing ? "Refreshing…" : "Refresh"}</button></div>;
+    <RefreshAction label="Refresh task and supervision state" busy={refreshing} enabled={connected} onRefresh={onRefresh}/></div>;
 }
 
 export function ProjectSupervisorView({
@@ -723,8 +724,9 @@ export function ProjectSupervisorView({
       onLoadMore={onWorkflowProgressLoadMore ?? (() => {})} {...(supervisionLink ? {supervisionLink} : {})} {...(connectedWorkLink ? {connectedWorkLink} : {})}/>}
     {section === "connected" && threadId && (() => {
       const view = progressView(workflowProgress?.pages ?? []);
-      return <div className="stack"><Freshness readAt={readAt} refreshing={refreshing} connected={connected} onRefresh={onRefresh}/><ConnectedWork threads={[...view.threadById.values()]} mainThreadId={threadId} workflows={view.workflowByThreadId} coverage={view.coverageByThreadId} task={selectedTask} complete={view.complete}/>{workflowProgress?.error && <p role="status">{workflowProgress.error}</p>}{view.canLoadMore && <button type="button" disabled={!connected || workflowProgress?.loading} onClick={onWorkflowProgressLoadMore}>Load more connected workflows and activity</button>}</div>;
+      return <div className="stack"><ConnectedWork metadata={<Freshness readAt={readAt} refreshing={refreshing} connected={connected} onRefresh={onRefresh}/>} threads={[...view.threadById.values()]} mainThreadId={threadId} workflows={view.workflowByThreadId} coverage={view.coverageByThreadId} task={selectedTask} complete={view.complete}/>{workflowProgress?.error && <p role="status">{workflowProgress.error}</p>}{view.canLoadMore && <button type="button" disabled={!connected || workflowProgress?.loading} onClick={onWorkflowProgressLoadMore}>Load more connected workflows and activity</button>}</div>;
     })()}
+    {(section === "supervision" || section === "connected") && <ConversationStatus engagement={selectedTask?.engagement} fresh={connected && snapshot.available && currentRead} explicitlyStopped={Boolean(snapshot.chatSupervision?.stopped)}/>}
     {section === "supervision" && <Freshness readAt={readAt} refreshing={refreshing} connected={connected} onRefresh={onRefresh}/>}
     {(section === "all" || section === "supervision") && snapshot.mainThreadId && snapshot.chatSupervision?.stopped && snapshot.chatSupervision.stoppedAt !== null && <StopNotice title={threadId ?? snapshot.mainThreadId} audit={{route: snapshot.chatSupervision.stoppedBy ?? "unknown", stoppedAt: snapshot.chatSupervision.stoppedAt, callerThreadId: snapshot.chatSupervision.stoppedCallerThreadId ?? null, userMessageId: snapshot.chatSupervision.stoppedUserMessageId ?? null}} onEnable={() => onChatSupervision(true)} busy={!connected || chatSupervisionBusy || chatSupervisionLocked}/>}
     <div hidden={section !== "all" && section !== "supervision"} className="panel stack">
@@ -780,7 +782,7 @@ export function ProjectSupervisorView({
       <h3 className="form-section-title">Defaults for new Supervisors</h3>
       <fieldset disabled={fieldsDisabled} className="stack">
         <legend>Model</legend>
-        <label htmlFor="supervisor-model">Model</label>
+        <label htmlFor="supervisor-model">Supervisor model</label>
         <select id="supervisor-model" name="model" value={selectedModelKey(selection)} disabled={!modelCanChange} onChange={event => {
             const next = parseModelKey(event.target.value);
             const model = snapshot.models.find(candidate => candidate.instanceId === next.instanceId && candidate.model === next.model);

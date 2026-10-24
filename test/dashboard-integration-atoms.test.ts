@@ -58,7 +58,7 @@ const snapshot = (environmentId = "environment", connected = true) => ({
     reasoning: "low", dailyTokenBudget: 1, evidenceHours: 1, maxAnchorAgeSeconds: 1 },
   threadPolicy: { generation: 1, excludedThreadIds: [] }, threads: [], projects: [], rules: [], mutes: [], activity: [], coverage: "", tokensUsed: 0,
 });
-const overviewPage = { revision: "one", observedAt: 1, available: true, globallyEnabled: true, offset: 0, limit: 100, total: 0, attentionTotal: 0,
+const overviewPage = { revision: "one", observedAt: 1, available: true, globallyEnabled: true, offset: 0, limit: 100, total: 0, availableTotal: 0, attention: [], query: {q: "", projectId: "", filter: "all" as const}, attentionTotal: 0,
   hasMore: false, projects: [], work: [] };
 const candidates = { exceptions: [], candidates: [], message: "No recent chats." };
 const loadedDefinitions = (revision: string): ProjectDefinitionSnapshot => ({

@@ -6,7 +6,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { defaultMonitoringSettings, defaultSupervisorTeamSettings, ProjectSupervisorSave, ProjectSupervisorSnapshot, type DefinitionReviewInfo, type ProjectSupervisorInfo, type ProjectSupervisorRetryInput, type ProjectSupervisorSaveInput, type ProjectSupervisorTeamInfo, type SupervisorModelSelection, type WorkflowAgreementInfo, type WorkflowPlanGroupInfo, type WorkflowProposalInfo } from "../src/project-supervisor-contract.js";
 import type { WorkflowProgressSnapshot } from "../src/workflow-progress.js";
 import { SessionAccess } from "../ui/src/access.js";
-import { confirmChatSupervisionChange, mergeLoadedDraft, ProjectSupervisorView, TaskWorkspace, shouldOfferNativeRetry } from "../ui/src/project-supervisor.js";
+import { confirmChatSupervisionChange, mergeLoadedDraft, ConnectedWork, progressView, ProjectSupervisorView, TaskWorkspace, shouldOfferNativeRetry } from "../ui/src/project-supervisor.js";
 import { loadProjectSupervisor, loadWorkflowProgress, ProjectSupervisorRequestError, refreshWorkflowProgressPages, retryProjectSupervisor, saveProjectSupervisor } from "../ui/src/project-supervisor-api.js";
 import { keepFetch, locationLayer, pageLayer, rejects } from "./support/g6-page.js";
 
@@ -151,6 +151,11 @@ const renderWorkspace = (pages: WorkflowProgressSnapshot[], task?: ProjectSuperv
   snapshot, task, threadId: "task-thread", progress: {key: "progress-key", pages, loading: false, error: null}, connected: true, attention: [], stopped: false,
   readAt: null, refreshing: false, onRefresh: () => {}, onLoadMore: () => {}}));
 
+const renderConnected = (pages: WorkflowProgressSnapshot[]) => {
+  const view = progressView(pages);
+  return renderToStaticMarkup(createElement(ConnectedWork, {threads: [...view.threadById.values()], mainThreadId: "task-thread", workflows: view.workflowByThreadId, coverage: view.coverageByThreadId, task: undefined, complete: view.complete}));
+};
+
 const renderTaskView = (task: ProjectSupervisorInfo["tasks"][number]) => renderToStaticMarkup(createElement(ProjectSupervisorView, {
   ...viewDefaults,
   snapshot: {...snapshot, tasks: [task]}, selection, monitoring, threadId: task.threadId, connected: true,
@@ -178,10 +183,10 @@ it("Supervisor settings markup explains automatic conversation reuse and separat
   assert.match(html, /Project default for new Supervisors/);
   assert.match(html, /Selected Supervisor model in T3/);
   assert.match(html, /Edit this conversation/);
-  assert.match(html, /<summary>Task interpretation<\/summary>/);
+  assert.match(html, /class="disclosure-title">Task interpretation<\/span>/);
   assert.match(html, /&lt;script&gt;task&lt;\/script&gt;/);
   assert.match(html, /&lt;img src=x onerror=&quot;alert\(1\)&quot;&gt;/);
-  assert.match(html, /<label for="supervisor-model">Model/);
+  assert.match(html, /<label for="supervisor-model">Supervisor model/);
   assert.match(html, /<label for="supervisor-reasoning">Reasoning/);
   assert.doesNotMatch(html, /<label>Temperature/);
   assert.doesNotMatch(html, /supervisor-monitoring-enabled|monitoringEnabled|pause monitoring/i);
@@ -606,7 +611,7 @@ it("workflow proposal status and message remain visible across every contract st
       workflow: workflow({status, message: `Explanation for ${status}.`}),
     };
     const html = renderTaskView(task);
-    assert.match(html, /<details class="small"><summary>Plan provenance<\/summary>/);
+    assert.match(html, /class="disclosure-title">Plan provenance<\/span>/);
     assert.equal(html.split(`Explanation for ${status}.`).length - 1, 1, "the proposal message has one home");
   }
 });
@@ -638,7 +643,7 @@ it("an uncertain result from another project thread exposes retry only after the
   assert.match(html, /Retry native access/);
   assert.match(html, /Save or discard your settings draft before retrying native access/);
   assert.match(html, /<button type="button" disabled="">Retry native access<\/button>/);
-  assert.match(html, /<summary>Task interpretation<\/summary>/);
+  assert.match(html, /class="disclosure-title">Task interpretation<\/span>/);
 });
 
 it("a deleted binding has a distinct explicit replacement action and no live link to the deleted thread", () => {
@@ -921,14 +926,14 @@ it.effect("an expired dashboard session is a definite rejection and never repeat
 }).pipe(Effect.provide(onPage)));
 
 it("the task workspace separates an unlinked workflow from the current task and preserves child uncertainty", () => {
-  const html = renderWorkspace([progressSnapshot]);
+  const html = renderWorkspace([progressSnapshot]) + renderConnected([progressSnapshot]);
   assert.match(html, /Evidence and history/);
   assert.match(html, /Statuses and notes are the Supervisor’s assessments of the conversation’s work; they are not independent proof of execution/);
-  assert.match(html, /Native child · Needs attention/);
+  assert.match(html, /Native child · Workflow: Needs attention/);
   assert.doesNotMatch(html, /native driver.*verified|workflow updates.*verified/i);
   assert.match(html, /Native child/);
-  assert.match(html, /Native child<\/p><\/div><span class="pill amber">Failed<\/span>/);
-  assert.match(html, /Delegated child<\/p><\/div><span class="pill amber">Cancelled<\/span>/);
+  assert.match(html, /Native child<\/p><\/div><span class="pill amber">Conversation: Failed<\/span>/);
+  assert.match(html, /Delegated child<\/p><\/div><span class="pill amber">Conversation: Cancelled<\/span>/);
   assert.match(html, /Earlier workflow: Review the source change/);
   assert.match(html, /Lifecycle: Unknown/);
   assert.match(html, /idle thread mirror alone does not establish that its work is finished/);
@@ -954,7 +959,7 @@ it("operational rows distinguish root, helper, observe-only, transfer, unknown a
       {threadId: "cancelled-delegated", state: "unknown", assigneeThreadId: null, assigneeTitle: null, assignmentRootThreadId: null},
     ],
   };
-  const html = renderWorkspace([withCoverage]);
+  const html = renderConnected([withCoverage]);
   assert.doesNotMatch(html, /Supervisor root \(unassigned operational work\)/, "the main conversation's default root coverage is not repeated as a row");
   assert.match(html, /href="t3-thread:\/\/v1\/helper-thread-1">Testing helper<\/a>/);
   assert.match(html, /Assigned to:<\/strong> Handover in progress/);
@@ -1207,7 +1212,7 @@ it("task-path assessments keep unknown reads distinct from absence and retain as
 it("an earlier workflow cannot borrow the current task's agreement panel", () => {
   const task = {...snapshot.tasks[0]!, id: "new-task", sourceHash: "new-source", workflow: workflow(), workflowProposalId: "proposal-1", agreement: agreement({message: "Current task acceptance only"})};
   const html = renderWorkspace([progressSnapshot], task);
-  const history = html.indexOf('class="retained-workflow"');
+  const history = html.indexOf('retained-workflow"');
   assert.ok(history > 0);
   assert.match(html.slice(0, history), /Current task acceptance only/);
   assert.match(html.slice(0, history), /Accepted plan/);

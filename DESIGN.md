@@ -586,10 +586,7 @@ focus when temporarily unavailable.
 
 ### Operate interface correction
 
-The persistent status header uses a shield or availability icon plus explicit text for
-global supervision, native T3 connectivity and the open project's effective supervision.
-Teal indicates enabled state, a red-tinted outline indicates disabled state, and amber
-indicates an unavailable read. Every state is also named in text in light and dark themes.
+The persistent utility header uses one compact global-supervision indicator linking to Settings, quiet T3 connectivity and Sign out at the row end. The project context names effective project supervision separately. Teal indicates enabled state, a red-tinted outline indicates disabled state, and amber indicates an unavailable read. Every state is also named in text in light and dark themes.
 
 Use the 4/8/12/16/24/32 spacing scale: 6px label-to-control, 8px within a compact disclosure,
 16px between fields, 24px between form groups and 32px between major sections. Selects fit
@@ -611,3 +608,7 @@ Interaction references: [Carbon pagination](https://www.carbondesignsystem.com/b
 [back links](https://design-system.service.gov.uk/components/back-link/), and the
 [GitHub workflow graph](https://docs.github.com/en/actions/how-tos/monitor-workflows/use-the-visualization-graph).
 The brief explicitly requires both a list-targeted Back link and breadcrumbs.
+
+At narrow widths the status header stays in normal document flow so its wrapping labels do not obscure the work while scrolling. Desktop retains the sticky header. Conversation badges use the same icon-plus-text treatment, and connected rows explicitly name Workflow and Conversation status.
+
+Ordinary reconciliation actions are quiet 32px icon buttons beside read metadata, with explicit accessible names and focus rings. Recovery Retry remains in its error context. Definition/folder refresh remains explicit because filesystem detection and native collection have their own cadence; there is no invented Live badge.

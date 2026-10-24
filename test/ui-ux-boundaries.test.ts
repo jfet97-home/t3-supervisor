@@ -26,14 +26,14 @@ it.effect("checkout inventory groups normalized folders, preserves every working
   assert.deepEqual(targets.find(target => target.workspaceRoot === f.root)!.members.map(member => member.threadId), ["chat-0", "chat-1", "chat-2"]);
   assert.equal(targets.find(target => target.workspaceRoot === "/worktrees/feature")!.members.length, 2);
   assert.equal(targets.find(target => target.workspaceRoot === "/worktrees/no-branch")!.branch, null);
-  assert.equal(branchLabel(targets.find(target => target.workspaceRoot.endsWith("no-branch"))!), "Git repository · no branch name reported");
+  assert.equal(branchLabel({...targets.find(target => target.workspaceRoot.endsWith("no-branch"))!, vcsAvailable: true}), "Git repository · no branch name reported");
 }));
 
 it("working-folder failures are explicit and never fall back to a chat-title chooser", () => {
-  const html = renderToStaticMarkup(createElement(CheckoutChooser, {inventory: {projectId: "p", available: false, reason: "workspace_binding_unavailable", targets: []}, selected: null, disabled: false, onRefresh: () => {}, onSelect: () => {}}));
+  const html = renderToStaticMarkup(createElement(CheckoutChooser, {inventory: {projectId: "p", available: false, complete: false, issues: [], reason: "workspace_binding_unavailable", targets: []}, selected: null, disabled: false, onRefresh: () => {}, onSelect: () => {}}));
   assert.match(html, /workspace_binding_unavailable/);
   assert.doesNotMatch(html, /checkout-target|branch-looking-title/);
-  assert.equal(branchLabel({branch: null, isGitRepository: false}), "Not a Git repository");
+  assert.equal(branchLabel({branch: null, isGitRepository: false, vcsAvailable: true}), "Not a Git repository");
 });
 
 it("catalog bounds a long collection and exposes full template duties only in the selected detail", () => {
@@ -83,3 +83,16 @@ it("global, project and conversation labels keep independent truth and explicit 
   assert.match(conversationLabel({mode: "following", availability: "stopped", consideredAt: null})!, /disabled/);
   assert.match(conversationLabel({mode: "following", availability: "stopped", consideredAt: null}, true, true)!, /stopped/);
 });
+
+it.effect("read-only inventory retains an independent root when a conversation binding is unreadable, while setup and chat loading stay strict", () => Effect.gen(function*() {
+  const f = makeDefinitionFixture();
+  const definitions = yield* f.makeDefinitions({t3: {projection: id => f.t3.projection(id).pipe(Effect.map(value => ({...value, projection: {...value.projection, thread: {...value.projection.thread, worktreePath: undefined}}})))}});
+  const inventory = yield* definitions.checkoutInventory(f.projectId);
+  assert.equal(inventory.available, true); assert.equal(inventory.complete, false);
+  assert.equal(inventory.targets.length, 1); assert.equal(inventory.targets[0]!.workspaceRoot, f.root);
+  assert.equal(inventory.targets[0]!.members.length, 0, "an unread conversation is not counted as a shared-root member");
+  assert.match(inventory.issues[0]!.message, /has not been established by T3/);
+  const strict = yield* Effect.flip(definitions.checkoutTargets(f.projectId));
+  assert.equal(strict._tag, "DefinitionCheckoutUnavailable");
+  assert.equal(yield* definitions.currentWorkspace(f.projectId, "thread"), null, "missing conversation binding must never substitute the root");
+}));

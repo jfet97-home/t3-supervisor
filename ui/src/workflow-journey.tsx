@@ -103,7 +103,7 @@ export function PlanJourney({node, mode = "proposed", notes = noNotes, contribut
           {(changeProposed || outsideAccepted) && <span className="step-flags">{changeProposed && <span className="pill blue">Update proposed</span>}{outsideAccepted && <span className="pill">Not in the accepted plan</span>}</span>}</span>
         <span className="step-state">{label}</span>
       </>} className="journey-step" open={live && hasActiveNode(node) || undefined} summaryProps={{"aria-current":live && node.status === "underway" ? "step" : undefined}}>
-      
+
       <div className="step-explanation">
         {node.description && <p>{node.description}</p>}
         <DefinitionReferences references={node.references} skills={node.skills}/>

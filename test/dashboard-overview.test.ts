@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { it } from "@effect/vitest";
 import {Context, Effect, Layer, Schema} from "effect";
-import {DashboardOverview, overviewPage, workAttention, readOverviewPages, type DashboardOverviewInfo} from "../src/dashboard-overview.js";
+import {DashboardOverview, overviewPage, workAttention, overviewWorkPage, type DashboardWorkInfo} from "../src/dashboard-overview.js";
 import {GuidanceDb} from "../src/db.js";
 import {ProjectSupervisor} from "../src/project-supervisor.js";
 import {ProjectSupervisorStore, defaultSupervisorModel, type TaskRecord} from "../src/project-supervisor-store.js";
@@ -13,7 +13,7 @@ import {forbiddenNatives, supervisionRun} from "./support/g11-supervision.js";
 // fake that dies when used, and the pure page, attention and range helpers. it.effect: no case waits on time
 
 // the range cases call the Effect range reader with the page reads they were written for
-const readOverviewRange = (read: (offset: number) => Effect.Effect<DashboardOverviewInfo>, count: number) => readOverviewPages(read, count);
+
 
 const nativeThread = (id: string): ThreadInfo => ({id, title: `Work ${id}`, projectId: "project", activeRunId: id === "active" ? "run" : null,
   lineage: {parentThreadId: null, relationshipToParent: null}});
@@ -45,6 +45,8 @@ it.effect("the overview reads retained supervision state without native calls, w
   assert.equal(result.work[1]?.nativeState, "active");
   assert.equal(result.work[1]?.planStatus, null, "native activity does not imply an agreed plan or completed work");
   assert.equal(result.hasMore, true);
+  const search = yield* supervisor.overview({offset: 0, limit: 25, q: "Objective quiet"});
+  assert.equal(search.total, 1); assert.equal(search.work[0]?.mainThreadId, "quiet"); assert.equal(search.attentionTotal, 1); assert.equal(search.projects.length, 1);
   const second = yield* supervisor.overview({offset: 2, limit: 2});
   assert.equal(second.hasMore, false);
   assert.deepEqual(new Set([...result.work, ...second.work].map(item => item.mainThreadId)), new Set(threads.map(thread => thread.id)));
@@ -56,8 +58,8 @@ it.effect("the overview reads retained supervision state without native calls, w
 }));
 
 it.effect("overview pagination rejects malformed and excessive pages", () => Effect.sync(() => {
-  assert.deepEqual(overviewPage({}), {offset: 0, limit: 100});
-  assert.deepEqual(overviewPage({offset: "100", limit: "200"}), {offset: 100, limit: 200});
+  assert.deepEqual(overviewPage({}), {offset: 0, limit: 25, q: "", projectId: "", filter: "all"});
+  assert.deepEqual(overviewPage({offset: "100", limit: "200"}), {offset: 100, limit: 200, q: "", projectId: "", filter: "all"});
   for (const query of [{offset: "-1"}, {offset: "1.2"}, {offset: "100001"}, {limit: "0"}, {limit: "201"}, {limit: "Infinity"}])
     assert.throws(() => overviewPage(query), /invalid_overview_page/u);
 }));
@@ -73,23 +75,13 @@ it.effect("current attention explanations retain protocol repair and exclude int
 }));
 
 
-it.effect("overview refresh preserves the loaded range and restarts a reordered prefix", () => Effect.gen(function* () {
-  const row = (id: string) => ({projectId: "p", mainThreadId: id, title: id, supervisorThreadId: "s", nativeState: "quiet" as const,
-    supervision: "enabled" as const, objective: null, reason: "", taskStatus: null, planStatus: null, assessment: null, attention: [], updatedAt: null});
-  const all = Array.from({length: 230}, (_, i) => row(`work-${i}`));
-  const response = (offset: number, revision: string, rows = all): DashboardOverviewInfo => ({revision, observedAt: 1, available: true, globallyEnabled: true,
-    offset, limit: 100, total: rows.length, attentionTotal: 0, hasMore: offset + 100 < rows.length, projects: [], work: rows.slice(offset, offset + 100)});
-  const calls: number[] = [];
-  const retained = yield* readOverviewRange(offset => Effect.sync(() => {calls.push(offset); return response(offset, "one");}), 200);
-  assert.equal(retained.work.length, 200);
-  assert.equal(retained.work[150]?.mainThreadId, "work-150");
-  assert.deepEqual(calls, [0, 100]);
-  let count = 0;
-  const promoted = [all[220]!, ...all.filter(row => row.mainThreadId !== "work-220")];
-  const reordered = yield* readOverviewRange(offset => Effect.sync(() => response(offset, ++count === 1 ? "one" : "two", count === 1 ? all : promoted)), 200);
-  assert.equal(count, 4, "a changed second page restarts the full prefix");
-  assert.equal(reordered.work[0]?.mainThreadId, "work-220");
-  assert.equal(new Set(reordered.work.map(row => row.mainThreadId)).size, 200);
-  const changed = yield* Effect.flip(readOverviewRange(offset => Effect.sync(() => response(offset, String(++count))), 200));
-  assert.throws(() => {throw changed;}, /overview_changed_during_read/u);
-}));
+it("server search and filters cover rows beyond the old prefix, with stable pages and independent attention", () => {
+  const rows: DashboardWorkInfo[] = Array.from({length: 230}, (_, i) => ({projectId: i % 2 ? "p" : "q", mainThreadId: `work-${String(i).padStart(3, "0")}`, title: `Title ${i}`, supervisorThreadId: "s", nativeState: "quiet", supervision: "enabled", objective: null, reason: "", taskStatus: null, planStatus: null, assessment: null, attention: i === 229 ? ["needs review"] : [], updatedAt: null}));
+  const found = overviewWorkPage(rows, {offset: 0, limit: 25, q: "Title 229"});
+  assert.equal(found.total, 1); assert.equal(found.availableTotal, 230); assert.equal(found.work[0]!.mainThreadId, "work-229");
+  const filtered = overviewWorkPage(rows, {offset: 0, limit: 25, q: "Title 0", projectId: "q"});
+  assert.equal(filtered.total, 1); assert.equal(filtered.attentionTotal, 1); assert.equal(filtered.attention[0]!.mainThreadId, "work-229");
+  const before = overviewWorkPage(rows, {offset: 25, limit: 25});
+  const after = overviewWorkPage(rows.map(row => ({...row, updatedAt: 999, nativeState: "active"})), {offset: 25, limit: 25});
+  assert.deepEqual(after.work.map(row => row.mainThreadId), before.work.map(row => row.mainThreadId), "paging preserves the server-provided order");
+});

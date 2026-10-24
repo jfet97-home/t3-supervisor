@@ -6,9 +6,9 @@ import { uiRuntime } from "./atoms.js";
 
 const sections = ["task", "supervision", "definitions", "settings", "conversations", "connected", "editor"] as const;
 export type ProjectSection = typeof sections[number];
-export type Route = {page: "home" | "projects" | "activity" | "settings" | "guide"; projectId: string; main: string | null; section: ProjectSection; q?: string; listPage?: number; checkout?: string; definition?: string};
+export type Route = {page: "home" | "projects" | "activity" | "settings" | "guide"; projectId: string; main: string | null; section: ProjectSection; q?: string; listPage?: number; checkout?: string; definition?: string; workProject?: string; workFilter?: "all" | "attention" | "active" | "stopped"};
 export const directoryRoute: Route = {page: "projects", projectId: "", main: null, section: "conversations"};
-/** The two views of one main conversation. */
+/** The views of one main conversation. */
 export const conversationSections: readonly ProjectSection[] = ["task", "supervision", "connected"];
 export const isConversationView = (route: Route) => route.main !== null && route.main !== "" && conversationSections.includes(route.section);
 export const homeRoute: Route = {...directoryRoute, page: "home"};
@@ -25,23 +25,36 @@ export function parseRoute(hash: string): Route {
       const section = projectSections.find(value => value === parts[2]) ?? (main ? "task" : "conversations");
       const q = url.searchParams.get("q") ?? "";
       const listPage = Math.max(1, Number(url.searchParams.get("page")) || 1);
-      const checkout = url.searchParams.get("checkout");
-      const definition = url.searchParams.get("definition");
+      const checkout = ["definitions", "editor"].includes(section) ? url.searchParams.get("checkout") : null;
+      const definition = section === "definitions" ? url.searchParams.get("definition") : null;
       return {...directoryRoute, projectId: parts[1] ?? "", section, main, ...(q ? {q} : {}), ...(listPage > 1 ? {listPage} : {}), ...(checkout ? {checkout} : {}), ...(definition ? {definition} : {})};
     }
-    if (page === "home" || page === "activity" || page === "settings" || page === "guide") return {...directoryRoute, page};
+    if (page === "home") {
+      const q = url.searchParams.get("q") ?? ""; const workProject = url.searchParams.get("project") ?? "";
+      const filter = url.searchParams.get("filter"); const workFilter = filter === "attention" || filter === "active" || filter === "stopped" ? filter : "all";
+      const listPage = Math.max(1, Number(url.searchParams.get("page")) || 1);
+      return {...homeRoute, ...(q ? {q} : {}), ...(workProject ? {workProject} : {}), ...(workFilter !== "all" ? {workFilter} : {}), ...(listPage > 1 ? {listPage} : {})};
+    }
+    if (page === "activity" || page === "settings" || page === "guide") return {...directoryRoute, page};
   } catch { /* Invalid addresses return to the project directory. */ }
   return directoryRoute;
 }
 
 export function routeHref(route: Route): string {
-  if (route.page !== "projects" || !route.projectId) return `#/${route.page}`;
   const params = new URLSearchParams();
+  if (route.page === "home") {
+    if (route.q) params.set("q", route.q);
+    if ((route.listPage ?? 1) > 1) params.set("page", String(route.listPage));
+    if (route.workProject) params.set("project", route.workProject);
+    if (route.workFilter && route.workFilter !== "all") params.set("filter", route.workFilter);
+    return `#/home${params.size ? `?${params}` : ""}`;
+  }
+  if (route.page !== "projects" || !route.projectId) return `#/${route.page}`;
   if (route.main !== null) params.set("main", route.main);
   if (route.q) params.set("q", route.q);
   if ((route.listPage ?? 1) > 1) params.set("page", String(route.listPage));
-  if (route.checkout) params.set("checkout", route.checkout);
-  if (route.definition) params.set("definition", route.definition);
+  if (route.checkout && ["definitions", "editor"].includes(route.section)) params.set("checkout", route.checkout);
+  if (route.definition && route.section === "definitions") params.set("definition", route.definition);
   const query = params.size ? `?${params}` : "";
   return `#/projects/${encodeURIComponent(route.projectId)}/${route.section}${query}`;
 }
@@ -249,10 +262,14 @@ export function focusAfterNavigation(previous: Route, next: Route) {
   if (typeof requestAnimationFrame !== "function" || typeof document === "undefined") return;
   requestAnimationFrame(() => {
     const heading = [...document.querySelectorAll<HTMLElement>("#workspace h1")].find(element => !element.closest("[hidden]") && !element.closest(".sr-only"));
-    if (heading) {heading.tabIndex = -1; heading.focus({preventScroll: true});}
     let top = 0;
     if (isProjectList(next)) try {top = Number(sessionStorage.getItem(listScrollKey(next))) || 0;} catch { /* storage is optional */ }
     window.scrollTo({top, behavior: "instant"});
+    const rows = isProjectList(next) ? [...document.querySelectorAll<HTMLAnchorElement>(".conversation-list > a")] : [];
+    const selected = rows.find(row => parseRoute(new URL(row.href).hash).main === previous.main);
+    const visible = rows.find(row => {const rect = row.getBoundingClientRect();return rect.top >= 0 && rect.bottom <= window.innerHeight;});
+    const target = top > 0 ? selected ?? visible ?? heading : heading;
+    if (target) {if (target === heading) target.tabIndex = -1; target.focus({preventScroll: true});}
   });
 }
 

@@ -20270,7 +20270,7 @@
    ],
    "residualAdapter": {
     "what": "History API, hash events, optional sessionStorage list context/scroll and one focus-restoring animation frame",
-    "why": "Browser navigation, scroll and focus have no Effect platform service; the navigator remains pure over its injected host, while the frame performs only DOM focus/scroll after navigation.",
+    "why": "Browser navigation, scroll and focus have no Effect platform service; list return restores focus to its selected visible row, other navigation focuses the destination heading.",
     "cleanup": "History listeners and Effect restore deadlines are owned by the navigation atom; focus frames perform no application effects."
    },
    "sharedCallers": [

@@ -1,3 +1,4 @@
+import { ProjectSupervisionStatus } from "./supervision-status.js";
 import { CheckoutChooser, CheckoutIdentity } from "./checkout-identity.js";
 import { projectCheckouts } from "./project-definitions-api.js";
 import type { ProjectCheckoutInventoryInfo } from "../../src/project-definitions-contract.js";
@@ -223,7 +224,6 @@ export function ProjectDefinitionsPanel({data, overview, route, navigate, guard,
   const dirty = configurationDirty || supervisorDirty;
   const saving = configurationSaving || supervisorSaving;
   useEffect(() => {onDirtyChange?.(dirty || saving);}, [dirty, saving, onDirtyChange]);
-  useEffect(() => {onDraftTargetChange?.(draftTarget(selection, {dirty, saving, configurationDirty}));}, [dirty, saving, selection.projectId, selection.threadId, selection.contextSelected, selection.checkout, configurationDirty, onDraftTargetChange]);
   const projects = data.projects.filter(project => project.available);
   const projectId = projects.some(project => project.id === selection.projectId) ? selection.projectId : "";
   const threads = data.threads.filter(thread => thread.available && thread.projectId === projectId).sort((a, b) => a.id.localeCompare(b.id));
@@ -243,7 +243,7 @@ export function ProjectDefinitionsPanel({data, overview, route, navigate, guard,
   const globalOnly = data.projects.find(project => project.id === projectId)?.classification === "scratch";
   const inventoryKey = scopeKey(environmentId, projectId, epoch, revision);
   const inventoryRead = useAtomValue(definitionView && projectId && !globalOnly ? projectCheckouts(inventoryKey) : noCheckouts);
-  const inventory = AsyncResult.isFailure(inventoryRead) ? {projectId, available: false, reason: "Working folders could not be read. Check the connection and refresh folders.", targets: []} : Option.getOrNull(AsyncResult.value(inventoryRead));
+  const inventory = AsyncResult.isFailure(inventoryRead) ? {projectId, available: false, reason: "Working folders could not be read. Check the connection and refresh folders.", complete: false, issues: [], targets: []} : Option.getOrNull(AsyncResult.value(inventoryRead));
   const selectedCheckout = inventory?.targets.find(target => route.checkout ? target.workspaceRoot === route.checkout : route.main !== null && (route.main === "" ? target.threadId === null : target.members.some(member => member.threadId === route.main)));
   const definitionThreadId = selectedCheckout?.threadId ?? null;
   const canLoad = Boolean(projectId && definitionView && (globalOnly || selectedCheckout) && data.connected);
@@ -260,6 +260,13 @@ export function ProjectDefinitionsPanel({data, overview, route, navigate, guard,
   const loaded = shown.result?.environmentId === environmentId ? shown.result : null;
   const current = view.key === key ? {result: loaded, error: shown.error, loadedAt: loaded?.loadedAt ?? null} : null;
   const busy = Boolean(canLoad && (shown.reading || !current?.result && !current?.error));
+  const knownDefinitions = useRef<LoadedDefinitions | null>(null);
+  if (loaded) knownDefinitions.current = loaded;
+  const owner = configurationDirty || configurationSaving ? knownDefinitions.current : loaded;
+  useEffect(() => {
+    const target = configurationDirty && owner ? {projectId: owner.definitions.projectId, threadId: "", contextSelected: false, checkout: owner.definitions.workspaceRoot} : selection;
+    onDraftTargetChange?.(draftTarget(target, {dirty, saving, configurationDirty}));
+  }, [dirty, saving, configurationDirty, owner?.definitions.projectId, owner?.definitions.workspaceRoot, selection.projectId, selection.threadId, selection.contextSelected, selection.checkout, onDraftTargetChange]);
   const registry = useContext(RegistryContext);
   // the editor's reports and completions belong to the read and environment of the definitions it edits
   const editorEnvironment = loaded?.environmentId ?? environmentId;
@@ -278,9 +285,11 @@ export function ProjectDefinitionsPanel({data, overview, route, navigate, guard,
   };
   useEffect(() => {
     guard.current = next => {
-      const folder = loaded?.definitions.workspaceRoot;
+      const folder = owner?.definitions.workspaceRoot;
+      const definitionDestination = next.page === "projects" && ["definitions", "editor"].includes(next.section);
+      if ((!definitionDestination || next.main === null && !next.checkout) && !supervisorDirty && !supervisorSaving) return true;
       const nextFolder = inventory?.targets.find(target => next.checkout && ["definitions", "editor"].includes(next.section) ? target.workspaceRoot === next.checkout : next.main === "" ? target.threadId === null : target.members.some(member => member.threadId === next.main));
-      if (!saving && !supervisorDirty && next.projectId === selection.projectId && folder && nextFolder?.workspaceRoot === folder) return true;
+      if (!saving && !supervisorDirty && next.projectId === selection.projectId && folder && (next.checkout === folder || nextFolder?.workspaceRoot === folder)) return true;
       const changedFolder = ["definitions", "editor"].includes(next.section) && next.checkout && next.checkout !== folder;
       const change = changedFolder ? {projectChanges: next.projectId !== selection.projectId} : scopeChange(next, selection);
       return change === null || discard(change.projectChanges);
@@ -291,6 +300,7 @@ export function ProjectDefinitionsPanel({data, overview, route, navigate, guard,
   const showDefinitions = inWorkspace && (route.section === "definitions" || route.section === "editor");
   const showSupervisor = inWorkspace && route.section !== "definitions" && route.section !== "editor" && route.section !== "conversations";
   const conversation = inWorkspace && Boolean(threadId) && isConversationView(route);
+  const projectStatus = overview?.data?.projects.find(project => project.id === selection.projectId);
   const selectedProject = data.projects.find(project => project.id === selection.projectId);
   return <section className="stack project-definitions" aria-label="Projects">
     <div hidden={inWorkspace} className="stack">
@@ -302,8 +312,8 @@ export function ProjectDefinitionsPanel({data, overview, route, navigate, guard,
           const work = overview?.data?.work.filter(item => item.projectId === project.id) ?? [];
           return <RouteLink key={project.id} to={openProject(project.id)} navigate={navigate} className="project-card">
             <span className="project-avatar" aria-hidden="true"><Icon name="projects"/></span>
-            <span className="project-card-copy"><strong>{project.title}</strong><span className="muted small">{data.threads.filter(thread => thread.available && thread.projectId === project.id).length} conversations{project.classification === "scratch" ? " · Scratch workspace" : ""}</span></span>
-            <span className="project-status"><span className={`pill ${!project.available ? "amber" : status?.effectiveEnabled ? "green" : ""}`}>{!project.available ? "Project unavailable" : status ? status.effectiveEnabled ? "Supervision on" : status.enabled ? "Off — global supervision is off" : "Supervision off" : "Supervision status not read"}</span><span className="small muted">{work.some(item => item.attention.length) ? "Attention needed in loaded work" : "Open workspace"}</span></span><Icon name="arrow" size={18}/>
+            <span className="project-card-copy"><strong>{project.title}</strong><span className="muted small">{data.threads.filter(thread => thread.available && thread.projectId === project.id).length} {data.threads.filter(thread => thread.available && thread.projectId === project.id).length === 1 ? "conversation" : "conversations"}{project.classification === "scratch" ? " · Scratch workspace" : ""}</span></span>
+            <span className="project-status"><ProjectSupervisionStatus enabled={status?.enabled ?? false} effectiveEnabled={status?.effectiveEnabled ?? false} globallyEnabled={overview?.data?.globallyEnabled ?? false} available={project.available && Boolean(status) && data.connected && !overview?.error}/><span className="small muted">{work.some(item => item.attention.length) ? "Attention needed in loaded work" : "Open workspace"}</span></span><Icon name="arrow" size={18}/>
           </RouteLink>;
         })}
       </div>
@@ -311,7 +321,7 @@ export function ProjectDefinitionsPanel({data, overview, route, navigate, guard,
       {!data.projects.some(project => project.title.toLowerCase().includes(projectQuery.toLowerCase())) && <p className="empty-state muted">{projectQuery ? "No projects match your search." : "No T3 projects are available. Add a project in T3 to begin."}</p>}
     </div>
     <div hidden={!inWorkspace} className={`stack ${conversation ? "conversation-workspace" : ""}`}>
-      <div className="page-heading">{conversation && <RouteLink className="back-link" to={listRoute} navigate={navigate}><Icon name="back" size={17}/>Back to conversations</RouteLink>}<nav className="workspace-breadcrumb" aria-label="Workspace breadcrumb"><RouteLink to={directoryRoute} navigate={navigate}>Projects</RouteLink><span aria-hidden="true">/</span><RouteLink to={{...workspaceRoute, main: null, section: "conversations"}} navigate={navigate}>{selectedProject?.title ?? "Unavailable project"}</RouteLink></nav><div className="row between page-title-row"><h1>{conversation ? threads.find(thread => thread.id === threadId)?.title ?? "Unavailable conversation" : selectedProject?.title ?? "Unavailable project"}</h1>{conversation && <div className="title-actions"><nav className="section-nav" aria-label="Conversation views">{conversationSections.map(section => <RouteLink key={section} to={{...workspaceRoute, section}} navigate={navigate} aria-current={route.section === section ? "page" : undefined}>{section === "task" ? "Task" : section === "connected" ? "Connected work" : "Supervision"}</RouteLink>)}</nav><a className="button-link" href={`t3-thread://v1/${threadId}`}><Icon name="external" size={16}/>Open in T3</a></div>}</div></div>
+      <div className="page-heading">{conversation && <RouteLink className="back-link" to={listRoute} navigate={navigate}><Icon name="back" size={17}/>Back to conversations</RouteLink>}<div className="project-context-line"><nav className="workspace-breadcrumb" aria-label="Workspace breadcrumb"><RouteLink to={directoryRoute} navigate={navigate}>Projects</RouteLink><span aria-hidden="true">/</span><RouteLink to={{...workspaceRoute, main: null, section: "conversations"}} navigate={navigate}>{selectedProject?.title ?? "Unavailable project"}</RouteLink></nav><span className="project-context-status"><ProjectSupervisionStatus compact enabled={projectStatus?.enabled ?? false} effectiveEnabled={projectStatus?.effectiveEnabled ?? false} globallyEnabled={overview?.data?.globallyEnabled ?? false} available={Boolean(projectStatus?.available) && data.connected && !overview?.error}/></span></div><div className="row between page-title-row"><h1>{conversation ? threads.find(thread => thread.id === threadId)?.title ?? "Unavailable conversation" : selectedProject?.title ?? "Unavailable project"}</h1>{conversation && <div className="title-actions"><nav className="section-nav" aria-label="Conversation views">{conversationSections.map(section => <RouteLink key={section} to={{...workspaceRoute, section}} navigate={navigate} aria-current={route.section === section ? "page" : undefined}>{section === "task" ? "Task" : section === "connected" ? "Connected work" : "Supervision"}</RouteLink>)}</nav><a className="button-link" href={`t3-thread://v1/${threadId}`}><Icon name="external" size={16}/>Open in T3</a></div>}</div></div>
       <nav className="project-nav" aria-label="Project sections" hidden={conversation}>
         <RouteLink to={{...workspaceRoute, main: null, section: "conversations"}} navigate={navigate} aria-current={route.section === "conversations" || conversationSections.includes(route.section) ? "page" : undefined}>Conversations</RouteLink>
         <RouteLink to={{...workspaceRoute, section: "definitions"}} navigate={navigate} aria-current={route.section === "definitions" ? "page" : undefined}>Definitions</RouteLink>
@@ -319,7 +329,7 @@ export function ProjectDefinitionsPanel({data, overview, route, navigate, guard,
         <RouteLink to={{...workspaceRoute, section: "settings"}} navigate={navigate} aria-current={route.section === "settings" ? "page" : undefined}>Project settings</RouteLink>
       </nav>
       {inWorkspace && !conversation && <div className="section-heading"><h2 id="project-section-heading" className="sr-only">{route.section === "definitions" ? "Definitions" : route.section === "editor" ? "Edit index" : route.section === "settings" ? "Project settings" : "Conversations"}</h2><p className="muted">{route.section === "definitions" ? "Reusable steps and workflow templates in the selected working folder." : route.section === "editor" ? "Edit the shared working folder’s definition index. Reusable definitions remain read-only." : route.section === "settings" ? "Which conversations are supervised here, and the defaults for new Supervisors." : "Open a conversation to see its task, plan and supervision."}</p></div>}
-      {showDefinitions && !globalOnly && <CheckoutChooser inventory={inventory} selected={selectedCheckout?.workspaceRoot ?? null} disabled={saving || !data.connected} onSelect={checkout => navigate({...workspaceRoute, checkout, definition: ""})} onRefresh={() => registry.refresh(projectCheckouts(inventoryKey))}/>}
+      {showDefinitions && !globalOnly && <CheckoutChooser inventory={inventory} selected={selectedCheckout?.workspaceRoot ?? null} disabled={saving || !data.connected} onSelect={checkout => navigate({...workspaceRoute, main: null, checkout, definition: ""})} onRefresh={() => registry.refresh(projectCheckouts(inventoryKey))}/>}
       {showDefinitions && globalOnly && <p className="notice">Global definitions · No Project has no project-owned configuration to edit.</p>}
       {showDefinitions && selectedCheckout && <div className="checkout-bar"><CheckoutIdentity target={selectedCheckout} projectFolder={selectedCheckout.threadId === null}/><button type="button" className="quiet-button" disabled={!canLoad || busy || saving} onClick={refresh}>Refresh definitions</button></div>}
       {!projectId && <p className="panel" role="status">The selected project is unavailable. Its context is kept; choose an available project to continue.</p>}
@@ -329,7 +339,7 @@ export function ProjectDefinitionsPanel({data, overview, route, navigate, guard,
       {dirty && !onDraftTargetChange && <p className="draft-notice" role="status">Unsaved changes · <RouteLink to={{...workspaceRoute, section: configurationDirty ? "editor" : "settings"}} navigate={navigate}>Return to your draft</RouteLink>. Switching views keeps your changes.</p>}
       {(route.section === "conversations" || route.main === null && conversationSections.includes(route.section)) && <div className="panel stack">
         <label className="search"><span className="sr-only">Find a conversation</span><input aria-label="Find a conversation" type="search" placeholder="Search conversation titles" value={conversationQuery} onChange={event => navigate({...listRoute, q: event.target.value, listPage: 1}, {replace: true})}/></label>
-        {resume && threads.some(thread => thread.id === resume.main) && <p className="small muted">Continue where you left off: <RouteLink to={resume} navigate={navigate}>{threads.find(thread => thread.id === resume.main)?.title} · {resume.section}</RouteLink></p>}
+        {resume && threads.some(thread => thread.id === resume.main) && <p className="small muted">Continue where you left off: <RouteLink to={resume} navigate={navigate}>{threads.find(thread => thread.id === resume.main)?.title} · {resume.section === "task" ? "Task" : resume.section === "connected" ? "Connected work" : "Supervision"}</RouteLink></p>}
         <ListPager label="Conversations" total={matchingThreads.length} page={conversationRange.page} onPage={listPage => navigate({...listRoute, listPage})}/>
         <div className="conversation-list">{visibleThreads.map(thread => {
           const work = overview?.data?.work.find(item => item.mainThreadId === thread.id);

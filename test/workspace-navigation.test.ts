@@ -1,3 +1,4 @@
+import type {Route} from "../ui/src/navigation.js";
 import assert from "node:assert/strict";
 import { it } from "vitest";
 import { createNavigator, directoryRoute, openProject, parseRoute, rememberContext, routeHref } from "../ui/src/navigation.js";
@@ -335,4 +336,10 @@ it("project-list return retains search and page while clearing the selected conv
   const back = {...task, main: null, section: "conversations" as const};
   assert.deepEqual(parseRoute(routeHref(back)), list);
   assert.equal(openProject("project").section, "conversations");
+});
+
+it("Home search, project, status filter and page round-trip through browser history URLs", () => {
+  const route: Route = {page: "home", projectId: "", main: null, section: "conversations", q: "export race", workProject: "scanner", workFilter: "attention", listPage: 3};
+  assert.deepEqual(parseRoute(routeHref(route)), route);
+  assert.equal(routeHref({...route, page: "projects", projectId: "scanner", section: "conversations", checkout: "/working/folder", definition: "step:check"}).includes("checkout="), false);
 });

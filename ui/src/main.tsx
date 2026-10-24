@@ -1,6 +1,6 @@
 import { ListPager, pageWindow } from "./pagination.js";
 import { HelpDisclosure } from "./disclosure.js";
-import { GlobalSupervisionStatus, ProjectSupervisionStatus, StatusBadge } from "./supervision-status.js";
+import { GlobalSupervisionStatus, ConnectionStatus } from "./supervision-status.js";
 import {activityTitle} from "./activity-presentation.js";
 import {NoProjectPanel, StartSupervisionPanel, useChatCandidates} from "./no-project.js";
 import { SessionAccess } from "./access.js";
@@ -253,11 +253,12 @@ function History({
       <dialog ref={dialog} aria-labelledby="detail-title">
         <div className="row between">
           <h2 id="detail-title">
-            {selected ? label(selected.kind) : "Activity"}
+            {selected ? activityTitle(selected) : "Activity"}
           </h2>
           <button onClick={() => dialog.current?.close()}>Close</button>
         </div>
-        <p>{selected ? label(selected.state) : ""}</p>
+        {selected && <p className="muted"><time dateTime={new Date(selected.createdAt).toISOString()}>{new Date(selected.createdAt).toLocaleString()}</time> · Event <code>{selected.id}</code></p>}
+        <p>{selected ? label(selected.state) : ""}{selected?.reason ? ` · ${label(selected.reason)}` : ""}</p>
         <pre>
           {selected?.detail ??
             "Detailed evidence was not retained or has expired."}
@@ -392,7 +393,7 @@ function Dashboard({onSignedOut}: {onSignedOut: () => void}) {
   const [projectDirty, setProjectDirty] = useState(false);
   const [projectDraftTarget, setProjectDraftTarget] = useState<Route | null>(null);
   const {data, connected, alert} = snapshotView(snapshot);
-  const overview = useOverview(true, connected);
+  const overview = useOverview(true, connected, route);
   useEffect(() => {
     const handler = (event: BeforeUnloadEvent) => {
       if (startPending || projectDirty || settingsDirty) event.preventDefault();
@@ -404,7 +405,7 @@ function Dashboard({onSignedOut}: {onSignedOut: () => void}) {
     return (
       <div className="app-shell">
         <aside className="app-sidebar"><span className="app-name"><img src="/app-icon.png" width="36" height="36" alt=""/><span>Supervisor<span className="app-name-detail">Keep work in view</span></span></span></aside>
-        <div className="app-body"><header className="environment-bar"><GlobalSupervisionStatus enabled={null}/><StatusBadge icon="activity" label={snapshot._tag === "Failure" ? "T3 connection: unavailable" : "T3 connection: not yet read"}/></header><main id="workspace" tabIndex={-1} className="boot-state stack">
+        <div className="app-body"><header className="app-header"><div className="environment-context"><GlobalSupervisionStatus compact enabled={null}/><ConnectionStatus connected={null}/></div></header><main id="workspace" tabIndex={-1} className="boot-state stack">
           {snapshot._tag === "Failure"
             ? <><h1>Supervisor is unavailable</h1><p className="muted">The Supervisor connection could not be read. Your session is kept.</p><div><button className="primary" onClick={() => retry()}>Retry</button></div></>
             : <><h1 className="sr-only">Supervisor</h1><div className="loading-state" role="status"><div className="skeleton"/><div className="skeleton"/><p>Connecting to Supervisor…</p></div></>}
@@ -429,15 +430,12 @@ function Dashboard({onSignedOut}: {onSignedOut: () => void}) {
         <nav className="sidebar-utility" aria-label="Reference"><RouteLink to={{...directoryRoute, page: "guide"}} navigate={navigate} aria-current={view === "guide" ? "page" : undefined}><Icon name="guide"/>Guide</RouteLink></nav>
       </aside>
       <div className="app-body">
-      <header className="app-header"><div className="environment-context"><span className="environment-label">Supervisor instance</span><GlobalSupervisionStatus enabled={overview.data && !overview.error && connected ? overview.data.globallyEnabled : null}/><StatusBadge icon="activity" tone={connected ? "on" : "unknown"} label={connected ? "T3: Connected" : "T3: Disconnected"}/>{route.page === "projects" && route.projectId && (() => {
-        const project = overview.data?.projects.find(project => project.id === route.projectId);
-        return project ? <ProjectSupervisionStatus enabled={project.enabled} effectiveEnabled={project.effectiveEnabled} globallyEnabled={overview.data!.globallyEnabled} available={project.available && !overview.error && connected}/> : <StatusBadge label="Project supervision: Status unavailable"/>;
-      })()}<span className="status-explanation">Global On applies only to enabled projects and eligible conversations.</span></div><div className="row"><SignOutButton blocked={dirty} onSignOut={() => void signOutNow()}/></div></header>
+      <header className="app-header"><div className="environment-context"><RouteLink to={{...directoryRoute, page: "settings"}} navigate={navigate} className="header-global"><GlobalSupervisionStatus compact enabled={overview.data && !overview.error ? overview.data.globallyEnabled : null}/></RouteLink><ConnectionStatus connected={connected}/></div><SignOutButton blocked={dirty} onSignOut={() => void signOutNow()}/></header>
       <main id="workspace" tabIndex={-1}>
         {dirty && <p id="pending-changes" className="notice" role="status">Save drafts and resolve pending changes before signing out. {projectDirty && projectDraftTarget && <RouteLink to={projectDraftTarget} navigate={navigate}>Review project changes</RouteLink>}{projectDirty && settingsDirty && " · "}{settingsDirty && <RouteLink to={{...directoryRoute, page: "settings"}} navigate={navigate}>Review instance settings</RouteLink>}</p>}
         {signOutError && <p className="notice" role="alert">{signOutError}</p>}
         {alert && <p className="notice" role="alert">{alert}</p>}
-        <div hidden={view !== "home"}><Home data={data} overview={overview} navigate={navigate} startPanel={<StartSupervisionPanel active={view === "home"} onStateChange={setStartPending} onChanged={refresh}/>}/></div>
+        <div hidden={view !== "home"}><Home route={route} data={data} overview={overview} navigate={navigate} startPanel={<StartSupervisionPanel active={view === "home"} onStateChange={setStartPending} onChanged={refresh}/>}/></div>
         <div hidden={view !== "projects"}><ProjectDefinitionsPanel data={data} dataCurrent={!snapshot.waiting && !AsyncResult.isFailure(snapshot)} overview={overview} route={route} navigate={navigate} guard={guard} onDirtyChange={setProjectDirty} onDraftTargetChange={setProjectDraftTarget}/></div>
         {view === "guide" && <StepsAndWorkflowsGuide />}
         {view === "activity" && <History items={data.activity} title="Supervision activity" data={data} navigate={navigate} />}

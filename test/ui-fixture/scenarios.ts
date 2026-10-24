@@ -5,7 +5,7 @@ import {workAttention} from "../../src/dashboard-overview.js";
 import { createHash } from "node:crypto";
 import { stringify } from "yaml";
 import type { GuidanceActivity, GuidanceSnapshot } from "../../src/guidance-contract.js";
-import { overviewPage, type DashboardOverviewInfo, type DashboardWorkInfo } from "../../src/dashboard-overview.js";
+import { overviewPage, overviewWorkPage, type DashboardOverviewInfo, type DashboardWorkInfo } from "../../src/dashboard-overview.js";
 import type {
   GlobalDefinitionsControl, GlobalDefinitionsControlInput, GlobalDefinitionsControlResult, NoProjectControl, NoProjectControlInput, NoProjectControlResult,
   NoProjectModeValue, SupervisionCandidates, SupervisionControlInfo, SupervisionControlInput, SupervisionControlResult, SupervisionSetupInput,
@@ -201,11 +201,13 @@ export class FixtureModel {
   private current: FixtureEnvironmentName = "a";
   private journey: JourneyCase | null = null;
   private largeInterface = false;
+  private partialInventory = false;
+  setPartialInventory() {this.partialInventory = true;}
   setLargeInterface() {
     if (this.largeInterface) return;
     this.largeInterface = true;
     const project = this.project(fixtureIds.projectA);
-    for (let i = 1; i <= 86; i++) {
+    for (let i = 1; i <= 146; i++) {
       const id = `fixture-long-${String(i).padStart(3, "0")}`;
       this.data.threads.push({id, title: `Fixture ${String(i).padStart(3, "0")}: Scanner-like repository analysis and delivery conversation`, projectId: project.id, binding: binding(project.id, id, "ready"), selectedModel: null, task: task(project.id, id, "Synthetic long-list task; no native work or settings are changed.")});
     }
@@ -237,6 +239,7 @@ export class FixtureModel {
   reset() {
     this.journey = null;
     this.largeInterface = false;
+    this.partialInventory = false;
     this.datasets = {a: initialFixtureData("a"), b: initialFixtureData("b")};
     this.current = "a";
   }
@@ -298,20 +301,17 @@ export class FixtureModel {
     });
   }
 
-  dashboardOverview(query: {offset?: string | undefined; limit?: string | undefined}, now: number): DashboardOverviewInfo {
-    let page: {offset: number; limit: number};
+  dashboardOverview(query: Parameters<typeof overviewPage>[0], now: number): DashboardOverviewInfo {
+    let page: ReturnType<typeof overviewPage>;
     try {page = overviewPage(query);} catch {throw new FixtureFailure("Fixture: invalid overview page.");}
     const work = this.work();
-    const slice = work.slice(page.offset, page.offset + page.limit);
     return {
       observedAt: now, revision: sha256(JSON.stringify(work)), available: true, globallyEnabled: this.data.global.enabled,
-      offset: page.offset, limit: page.limit, total: work.length, attentionTotal: work.filter(item => item.attention.length > 0).length,
-      hasMore: page.offset + slice.length < work.length,
+      ...overviewWorkPage(work, page),
       projects: this.data.projects.filter(project => project.classification === "project").map(project => ({
         id: project.id, title: project.title, available: true, enabled: project.control.enabled, effectiveEnabled: this.effective(project),
         detectionStatus: this.folderPresent(project) ? "present" : "missing",
       })),
-      work: slice,
     };
   }
 
@@ -572,9 +572,9 @@ export class FixtureModel {
 
   checkoutInventory(projectId: string) {
     const project = this.project(projectId);
-    const targets = project.checkouts.map(target => ({workspaceRoot: target.workspaceRoot, threadId: target.threadId, branch: target.branch, isGitRepository: target.isGitRepository,
+    const targets = project.checkouts.filter(target => !this.partialInventory || target.threadId !== fixtureIds.threadA3).map(target => ({workspaceRoot: target.workspaceRoot, threadId: target.threadId, branch: target.branch, isGitRepository: target.isGitRepository, vcsAvailable: true,
       members: this.data.threads.filter(thread => thread.projectId === projectId && (target.threadId === null ? !project.checkouts.some(checkout => checkout.threadId === thread.id) : target.threadId === thread.id)).map(thread => ({threadId: thread.id, title: thread.title}))}));
-    return {projectId, available: true, reason: null, targets};
+    return {projectId, available: true, complete: !this.partialInventory, reason: null, issues: this.partialInventory ? [{threadId: fixtureIds.threadA3, message: "Working folder unavailable for Fixture chat A3: workspace_binding_unavailable."}] : [], targets};
   }
 
   saveProjectConfiguration(input: ProjectConfigSave, forced: ForcedOutcome | null): ProjectConfigSaveOutcome {
@@ -597,7 +597,7 @@ export class FixtureModel {
 export const scenarioNames = [
   "journey-request", "journey-following", "journey-catching-up", "journey-paused", "journey-proposal", "journey-agreed", "journey-working", "journey-attention", "journey-revised", "journey-reagreed", "journey-verified",
   "journey-nested", "journey-nested-attention", "journey-completed", "journey-stale", "journey-retained",
-  "large-interface", "baseline", "session-expiry-next-call", "signout-other-tab", "mutation-never-answered", "mutation-dropped",
+  "partial-inventory", "large-interface", "baseline", "session-expiry-next-call", "signout-other-tab", "mutation-never-answered", "mutation-dropped",
   "save-401", "save-403", "save-409", "save-413", "editor-conflict", "editor-uncertain", "slow-reads", "setup-race", "reload",
 ] as const;
 export type ScenarioName = typeof scenarioNames[number];
@@ -620,7 +620,8 @@ const setupPath = "/api/guidance/supervision-setup";
 const plan = (arms: Arm[], revokeSessions = false): ScenarioPlan => ({arms, revokeSessions});
 
 export const scenarioCatalog: Record<ScenarioName, {description: string; plan: (params: ScenarioParams) => ScenarioPlan}> = {
-  "large-interface": {description: "synthetic 89-conversation collection, 45 additional full duties and distinct/shared working folders", plan: () => plan([])},
+  "partial-inventory": {description: "independently readable project folder with one unavailable conversation binding", plan: () => plan([])},
+  "large-interface": {description: "synthetic 149-conversation collection, 45 additional full duties and distinct/shared working folders", plan: () => plan([])},
   "journey-request": {description: "reconstructed packing example: the request is being interpreted", plan: () => plan([])},
   "journey-following": {description: "reconstructed packing example: quiet discussion and draft understanding", plan: () => plan([])},
   "journey-catching-up": {description: "reconstructed packing example: a newer requester message is being considered", plan: () => plan([])},

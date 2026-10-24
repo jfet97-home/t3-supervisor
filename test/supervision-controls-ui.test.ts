@@ -28,7 +28,7 @@ it("setup keeps the two creation actions for a selected checkout with no definit
   assert.match(unselected, /disabled="">Create<\/button>/);
   const selected = renderToStaticMarkup(createElement(SupervisionSetupView, {...handlers, selected: JSON.stringify([checkout.threadId, checkout.workspaceRoot])}));
   assert.match(selected, /\/work\/feature-a\/.t3-supervisor/);
-  assert.match(selected, /Branch: <strong>feature-a/);
+  assert.match(selected, /<strong>Branch feature-a/);
   assert.match(selected, />Create<\/button>/);
   assert.match(selected, />Create \+ commit<\/button>/);
   assert.match(selected, /Create leaves files uncommitted/);
@@ -43,7 +43,7 @@ it("a selected worktree with existing definitions offers an explicit no-write en
   const selected = renderToStaticMarkup(createElement(SupervisionSetupView, {options, selected: JSON.stringify([checkout.threadId, checkout.workspaceRoot]),
     busy: false, blocked: false, message: "", onSelect: () => {}, onSetup: () => {}, onReload: () => {}}));
   assert.match(selected, /\/worktrees\/feature-a\/\.t3-supervisor/);
-  assert.match(selected, /Branch: <strong>feature-a/);
+  assert.match(selected, /<strong>Branch feature-a/);
   assert.match(selected, /This enables supervision using those files; no files will be written or committed/);
   assert.match(selected, />Enable existing definitions<\/button>/);
   assert.match(selected, /disabled="">Create<\/button>/);

@@ -585,7 +585,7 @@ h1:focus { width: fit-content; max-width: 100%; }
 fieldset.stack { gap: 12px; padding: 20px 0 0; border: 0; border-top: 1px solid var(--line); min-width: 0; }
 fieldset.stack > legend { font-weight: 650; padding-inline-end: 8px; }
 fieldset.stack > p { max-width: 72ch; }
-label:has(> input:not([type=checkbox])), label:has(> select) { display: grid; gap: 6px; }
+label:not(.search):has(> input:not([type=checkbox]):not([type=radio])), label:has(> select) { display: grid; gap: 6px; }
 input[type=number] { max-width: 10rem; }
 select { max-width: 36rem; }
 .project-config-entry { padding: 16px 0; }
@@ -655,3 +655,35 @@ select { max-width: 36rem; }
   .project-nav { gap: 0 16px; }
   .section-nav { gap: 0 8px; }
 }
+
+.filter-bar { align-items: end; }
+.panel .disclosure-help { border-color: transparent; }
+@media (max-width: 600px) { .app-header { position: static; } }
+
+/* scope is explicit while the header stays a quiet, contained utility row */
+.app-header { min-height: 48px; padding: 8px 24px; gap: 16px; flex-wrap: nowrap; }
+.app-header .environment-context { flex: 1; min-width: 0; flex-wrap: nowrap; gap: 14px; }
+.header-global { display: inline-flex; color: inherit; text-decoration: none; min-width: 0; flex-shrink: 1; }
+.scope-status-compact { min-height: 26px; padding: 4px 7px; border-radius: 6px; font-size: 13px; line-height: 1.25; font-weight: 600; background: transparent; }
+.scope-status-compact > svg { width: 14px; height: 14px; }
+.app-header .scope-status-compact { font-size: 13px; padding: 4px 7px; gap: 6px; }
+.app-header .connection { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 400; }
+.app-header .connection .dot { margin: 0; width: 8px; height: 8px; }
+.app-header .connection.disconnected { color: light-dark(#714b16, #f4d699); }
+.app-header > button { flex: 0 0 auto; min-height: 30px; padding: 4px; font-size: 12px; white-space: nowrap; }
+.project-context-line { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; }
+.project-context-status .scope-status { border: 0; padding: 2px 0; font-size: 12px; }
+.icon-action { min-width: 32px; min-height: 32px; padding: 6px; flex: 0 0 auto; }
+.task-refresh .icon-action, .view-freshness .icon-action { min-width: 32px; min-height: 32px; padding: 6px; }
+@media (max-width: 760px) {
+  .app-header { min-height: 48px; max-height: 56px; padding: 6px 12px; gap: 8px; position: static; }
+  .app-header .environment-context { gap: 8px; }
+  .app-header .scope-status-compact { font-size: 12px; padding: 3px 5px; gap: 5px; }
+  .app-header .connection.connected .connection-text { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .app-header .connection.disconnected { font-size: 11px; white-space: normal; max-width: 80px; }
+  .app-header .scope-status-compact > span { white-space: normal; }
+  .project-context-line { gap: 6px; }
+}
+fieldset.stack { row-gap: 6px; }
+fieldset.stack > p { margin-block-start: -2px; margin-block-end: 10px; }
+fieldset.stack > p:last-child { margin-block-end: 0; }

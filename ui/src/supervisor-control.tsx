@@ -1,3 +1,4 @@
+import {branchLabel} from "./checkout-identity.js";
 import { HelpDisclosure } from "./disclosure.js";
 import { GlobalSupervisionStatus, ProjectSupervisionStatus } from "./supervision-status.js";
 import React, { useContext, useEffect, useRef, useState } from "react";
@@ -232,7 +233,7 @@ export function SupervisionControlView({control, busy, blocked, message, onToggl
   return <section className="panel stack settings-control" aria-label={global ? "Global supervision" : "Project supervision"}>
     <div className="row between control-heading"><Heading>{global ? "Global supervision" : "Project supervision"}</Heading>{global ? <GlobalSupervisionStatus enabled={control.globallyEnabled}/> : <ProjectSupervisionStatus enabled={control.enabled} effectiveEnabled={control.effectiveEnabled} globallyEnabled={control.globallyEnabled}/>}</div>{!global && control.enabled && !control.globallyEnabled && <p className="notice">The global supervision switch is off.</p>}
     <p>{global ? "The master switch controls semantic supervision across every project and starts enabled." : "This project is supervised only when both its switch and the master switch are enabled. An existing .t3-supervisor folder enables a project initially; your manual choice is remembered."}</p>
-    <HelpDisclosure title={<>How this switch works</>} >{!global && <p>Folder detection: {control.detectionStatus}. {control.detectionError}</p>}
+    <HelpDisclosure title={<>How this switch works</>} >{global && <p>Global On applies only to enabled projects and eligible conversations. It does not mean every chat is supervised.</p>}{!global && <p>Folder detection: {control.detectionStatus}. {control.detectionError}</p>}
     <p>Disabling stops new supervisory work. An already-running model turn may finish. Chats, settings and recorded history are retained.</p></HelpDisclosure>
     <div className="row">
       <button type="button" className={control.enabled ? "danger-button" : "primary"} disabled={busy || blocked} onClick={onToggle}>{busy ? "Saving…" : control.enabled ? "Disable supervision" : "Enable supervision"}</button>
@@ -292,7 +293,7 @@ export function SupervisionControlPanel({projectId = null, onChanged, onStateCha
 type SetupOptions = typeof SupervisionSetupOptions.Type;
 type SetupCheckout = SetupOptions["checkouts"][number];
 const checkoutKey = (checkout: SetupCheckout) => JSON.stringify([checkout.threadId, checkout.workspaceRoot]);
-const checkoutBranch = (checkout: SetupCheckout) => checkout.branch ?? (checkout.isGitRepository ? "Detached HEAD" : "No Git repository");
+const checkoutBranch = (checkout: SetupCheckout) => branchLabel({...checkout, vcsAvailable: true});
 
 export function buildSupervisionSetupIntent(projectId: string, generation: number, checkout: SetupCheckout, action: SupervisionSetupInput["action"]): SupervisionSetupInput {
   return {projectId, expectedGeneration: generation, threadId: checkout.threadId, expectedWorkspaceRoot: checkout.workspaceRoot,
@@ -313,9 +314,9 @@ export function SupervisionSetupView({options, selected, busy, blocked, message,
       <option value="">Choose a checkout</option>
       {options.checkouts.map(value => <option key={checkoutKey(value)} value={checkoutKey(value)}>{value.workspaceRoot} — {checkoutBranch(value)}</option>)}
     </select>
-    {checkout && <div><p>Folder: <code>{checkout.workspaceRoot}/.t3-supervisor</code></p><p>Branch: <strong>{checkoutBranch(checkout)}</strong></p><p>Existing setup: {checkout.folderStatus}.</p></div>}
+    {checkout && <div><p>Folder: <code>{checkout.workspaceRoot}/.t3-supervisor</code></p><p><strong>{checkoutBranch(checkout)}</strong></p><p>Existing setup: {checkout.folderStatus}.</p></div>}
     {checkout?.folderStatus === "present" ? <div>
-      <p>Enable the existing definitions at <code>{checkout.workspaceRoot}/.t3-supervisor</code> on branch <strong>{checkoutBranch(checkout)}</strong>. This enables supervision using those files; no files will be written or committed.</p>
+      <p>Enable the existing definitions at <code>{checkout.workspaceRoot}/.t3-supervisor</code> · <strong>{checkoutBranch(checkout)}</strong>. This enables supervision using those files; no files will be written or committed.</p>
       <button type="button" disabled={!canEnableExisting} onClick={() => onSetup("enable_existing")}>Enable existing definitions</button>
     </div> : <p>Create leaves files uncommitted. Create + commit submits the two setup paths from a clean checkout through T3. Repository hooks and signing apply; hooks can alter committed contents, and failure can leave files staged. Neither action switches branches.</p>}
     <div className="row">

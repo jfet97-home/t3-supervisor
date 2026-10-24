@@ -151,10 +151,10 @@ const make = Effect.fnUntraced(function* (config: SupervisorConfig, options: Gui
       chatSupervision: ({payload}) => supervised("The chat supervision change could not be confirmed. Refresh to inspect the saved state.",
         ({supervisor}) => supervisor.setChatSupervision(payload)),
       projectCheckouts: ({query}) => {
-        if (!definitions) return Effect.succeed({projectId: query.projectId, available: false, reason: "Checkout reading is unavailable.", targets: []});
-        return definitions.checkoutTargets(query.projectId).pipe(Effect.match({
-          onSuccess: targets => ({projectId: query.projectId, available: true, reason: null, targets}),
-          onFailure: error => ({projectId: query.projectId, available: false, reason: "Working folders could not be read: " + (error._tag === "DefinitionCheckoutUnavailable" ? error.reason : "source_unavailable"), targets: []}),
+        if (!definitions) return Effect.succeed({projectId: query.projectId, available: false, reason: "Checkout reading is unavailable.", complete: false, issues: [], targets: []});
+        return definitions.checkoutInventory(query.projectId).pipe(Effect.match({
+          onSuccess: inventory => inventory,
+          onFailure: error => ({projectId: query.projectId, available: false, reason: "Working folders could not be read: " + (error._tag === "DefinitionCheckoutUnavailable" ? error.reason : "source_unavailable"), complete: false, issues: [], targets: []}),
         }));
       },
       projectConfiguration: ({query}) => !definitions ? Effect.fail(new UiError({message: "Project definition access is unavailable."}))

@@ -104,7 +104,7 @@ once, except `slow-reads`.
 | Name | Behaviour |
 | --- | --- |
 | `baseline` | normal synthetic behaviour |
-| `session-expiry-next-call` | the next `/api/*` call with a valid session revokes that session and gets 401 "Sign in to Supervisor." (in practice usually the 5 s snapshot poll) |
+| `session-expiry-next-call` | the next `/api/*` call with a valid session revokes that session and gets 401 "Sign in to Supervisor." (on the next explicit read or SSE connection) |
 | `signout-other-tab` | revokes every session now, which is the server side of a sign-out in another tab |
 | `mutation-never-answered` | the next mutation is received and held unanswered; `apply=1` applies it first |
 | `mutation-dropped` | the next mutation is received and its connection destroyed with no response; `apply=1` applies it first |
@@ -135,9 +135,7 @@ logged.
   that path and hash, and no later entry for it after reload or re-sign-in (check with
   `?since=<seq>`). A Save the user clicks again with the same draft also has the same hash;
   record it as an explicit action.
-- `polls` lists `GET /api/*` paths with `count` and the last ten `intervalsMs`. Use it for
-  poll cadence. Cadences in source: snapshot 5 s, overview 30 s while visible, and with a
-  chat selected, project-supervisor and workflow-progress 30 s while visible.
+- `polls` is the historical log field name for authenticated GETs, with `count` and the last ten `intervalsMs`. It does not imply periodic polling. The current UI uses one authenticated SSE stream per visible registry, and typed reads refresh on hints or an explicit action. The synthetic listener sends the initial reset and holds the stream; it does not model the production commit bus or revocation watcher. Real stream commit/revocation proof belongs to the listener tests, not this fixture.
 
 ## Plain DOM snippets (preview evaluate)
 
@@ -268,19 +266,12 @@ read-only on native, without saving).
    draft is still present. Record exactly what you see; the source does not establish that
    no draft crosses sessions.
 4. Optional: `signout-other-tab` (server-only revocation, no storage event) and record each
-   tab's next poll.
+   tab's next authenticated read. The fixture does not model the production access-file revocation watcher.
 
-**UI-STORY-06 — unmount, one poll per interval, no leaks** (also runnable read-only on
-native).
-1. Install the counter snippet, read `/__fixture/log` `polls`, then for 2 minutes
-   navigate repeatedly between Home, Projects, a chat (Task, Supervision), Definitions, Settings and Activity. End on Home.
-2. Record `polls[].intervalsMs` (snapshot about 5000 ms with no doubled entries; the others
-   about 30000 ms while visible) and `window.__fixtureCounts` (listener add/remove balance
-   per type, live intervals). Hide the tab (switch tabs) for 60 s and record the cadence.
-3. StrictMode: the baseline `ui/src/main.tsx` does not render `<StrictMode>`, and a
-   development build (`pnpm exec vite build --mode development`, different hashes) does not
-   enable it. A StrictMode check would need a source change, so this part is optional and
-   cannot be recorded on the unchanged baseline.
+**UI-STORY-06 — visible stream ownership, no periodic reads.**
+1. Start the current built fixture, sign in, inspect `/__fixture/log`, and navigate Home, Projects, Task, Supervision, Connected work, Definitions, Settings and Activity.
+2. Leave a visible page idle. There should be one held `/api/events` connection and no scheduled snapshot/overview/chat/progress reads. Hiding the tab interrupts the stream; returning reconnects and reconciles mounted reads once. Navigation and background reconciliation preserve focus, draft values and admitted operation identities.
+3. Listener tests exercise real commit, rollback, coalescing, expiry and active revocation. This synthetic fixture supplies only reset/lifetime behavior and records request traffic; it is not that native proof.
 
 **UI-STORY-07 — concurrent setup and reload; cut Start; Stop/Enable.**
 1. Setup: "Fixture project B (setup)", then "Project settings", then "Enable supervision"
@@ -312,7 +303,7 @@ at 1280 px equivalence) and at a 320 px wide viewport. Record `reflowOk` and scr
 
 **Environment switch (A-R18-03, mounted).** Start each check with `POST /__fixture/reset`,
 reload and sign in; the fixture answers for `a`. Switch with `POST /__fixture/environment/b`
-and wait for the next 5 s snapshot (read back `environmentId` from the log or the state
+and refresh the current view or reconnect/reload to reconcile its snapshot (read back `environmentId` from the log or the state
 control). For each panel record what is shown and enabled before and after the switch, and
 again after switching back to `a`:
 1. Home, "Start supervision for a No Project chat": a shows the two "Fixture No Project chat"
@@ -323,7 +314,7 @@ again after switching back to `a`:
    a draft; back in a, the a draft is present. Variant: start the a save with
    `scenario/mutation-never-answered?path=/api/guidance/thread-policy`, switch to b,
    `held/answer`, and record that b shows no a outcome while a does.
-3. Projects, "Fixture project A", "Definitions", "Inspect project root checkout", "Edit
+3. Projects, "Fixture project A", "Definitions", "Project folder", "Edit index", then "Edit
    project configuration": change step 1's summary (a dirty a draft), then switch. Record
    that b shows its own definitions (`/fixture-b/project-a`, one step) and no a draft, that
    no Save of a can reach b, and that back in a the a draft is present. Variant: start the a
@@ -350,3 +341,13 @@ again after switching back to `a`:
   assert it.
 
 `journey-nested-attention` retains a planned parent while revealing its attention-needing child, without changing the parent assessment.
+
+## Bounded Operate UI fixture
+
+Run `pnpm exec tsx test/ui-fixture/run.ts --assets ui-dist --port 18127 --scenario large-interface` after `pnpm build`. This is synthetic data: 149 project conversations, 48 catalog entries, a shared project folder, a separate working copy and a Git folder with no branch name reported. Search precedes paging; Home queries the complete available supervised collection at the typed server boundary. Activity pages the retained events.
+
+For the long Task and Connected work views, POST `/__fixture/scenario/journey-nested-attention` and reload. With `large-interface` already initialized it includes a separately recorded child contribution. Other `journey-*` scenarios cover Following, catching up, paused discussion, proposal, agreement, refinement, completion and stale acceptance. These are rendered examples, not evidence of real operative execution.
+
+Definitions first selects an actual folder. Catalog and per-definition detail show template sequence/parallel topology with no execution state; Edit index names the shared project.yaml target and pages compact editable entries ten at a time. Uncertain/conflict stories retain their original operation and draft fences.
+
+`partial-inventory` renders the independently readable project folder while listing an unavailable conversation binding. Selecting a folder is explicit; the missing conversation is never assumed to use the root. The actual ProjectDefinitions regression separately verifies that browsing can be partial while setup target validation remains strict.

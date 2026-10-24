@@ -57,8 +57,8 @@ a remembered conversation is an optional Continue link. Conversations offer Task
 Supervision and Connected work as separate views.
 
 Conversation search covers the available project collection before paging. Home search
-covers the explicitly loaded work prefix; Activity covers retained events. All three
-show bounded rows and truthful ranges. Background invalidation preserves the selected page.
+covers the full available supervised collection through a typed server query; Activity covers retained events. All three
+show bounded rows and truthful ranges. Home attention and project coverage are independent of its selected result page. Background invalidation preserves the selected page.
 
 Definitions are selected by actual working folder, with shared conversations grouped
 and branch names taken only from native checkout facts. Catalog and detail are separate;
