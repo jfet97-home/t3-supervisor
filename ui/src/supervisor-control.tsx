@@ -1,6 +1,6 @@
 import {branchLabel} from "./checkout-identity.js";
 import { HelpDisclosure } from "./disclosure.js";
-import { GlobalSupervisionStatus, ProjectSupervisionStatus } from "./supervision-status.js";
+import { GlobalSupervisionStatus, ProjectSupervisionStatus, StatusBadge } from "./supervision-status.js";
 import React, { useContext, useEffect, useRef, useState } from "react";
 import { Clock, Effect, Option, Result } from "effect";
 import { AsyncResult, Atom, type AtomRegistry } from "effect/reactivity";
@@ -361,7 +361,7 @@ export function GlobalDefinitionsControlView({control, busy, blocked, message, o
   control: GlobalDefinitionsControlInfo; readAt?: number | null; busy: boolean; blocked: boolean; message: string; onToggle: () => void; onReload: () => void;
 }) {
   return <section className="panel stack settings-control" aria-label="Use global steps and workflows">
-    <div className="row between control-heading"><h2>Use global steps and workflows</h2><span className="pill">{control.enabled ? "On" : "Off"}</span></div>{control.enabled && !control.effectiveEnabled && <p className="notice">The master supervision switch is off.</p>}
+    <div className="row between control-heading"><h3>Use global steps and workflows</h3><StatusBadge compact label={control.enabled ? "Global definitions: On" : "Global definitions: Off"} tone={control.enabled ? "on" : "off"}/></div>{control.enabled && !control.effectiveEnabled && <p className="notice">The master supervision switch is off.</p>}
     <p>Share reusable steps and workflows across enabled projects and No Project chats.</p><HelpDisclosure title={<>Shared definition files and behavior</>} ><p>Shared definitions: <code>~/.t3-supervisor/project.yaml</code>, <code>steps/</code>, and <code>workflows/</code> in the T3 server user's home.</p>
     <p>This starts disabled. First enabling creates the shared project.yaml and empty steps/ and workflows/ directories if needed. Existing definitions are preserved, and the files are left uncommitted.</p>
     <p>These definitions supply policy to enabled Supervisors. This switch never activates a chat or changes No Project mode. Disabling them leaves project definitions available; No Project plans use task-local steps.</p>

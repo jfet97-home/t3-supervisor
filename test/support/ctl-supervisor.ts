@@ -69,7 +69,7 @@ const teamDefinitions = (ops: CtlDefinitionOps): ProjectDefinitions["Service"] =
     globalDefinitionsPath: ops.globalDefinitionsPath?.() ?? "~/.t3-supervisor",
     load: (projectId, threadId = null) => Effect.orDie(Effect.suspend(() => ops.load(projectId, threadId))),
     globalFingerprint: () => ops.globalFingerprint ? Effect.orDie(Effect.suspend(() => ops.globalFingerprint!())) : Effect.succeed(null),
-    presence: unused, presenceGlobal: unused, presenceForCheckout: unused, checkoutInventory: (projectId: string) => Effect.succeed({projectId, available: true, complete: true, reason: null, issues: [], targets: []}),
+    presence: unused, presenceGlobal: unused, presenceForCheckout: unused, checkoutInventory: (projectId: string) => Effect.succeed({projectId, available: true, complete: true, reason: null, defaultBranch: null, issues: [], targets: []}),
     checkoutTargets: unused, currentWorkspace: unused,
     initialize: unused, initializeGlobal: unused, readProjectConfig: unused,
   });

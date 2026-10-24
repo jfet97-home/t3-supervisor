@@ -6,7 +6,7 @@ import { uiRuntime } from "./atoms.js";
 
 const sections = ["task", "supervision", "definitions", "settings", "conversations", "connected", "editor"] as const;
 export type ProjectSection = typeof sections[number];
-export type Route = {page: "home" | "projects" | "activity" | "settings" | "guide"; projectId: string; main: string | null; section: ProjectSection; q?: string; listPage?: number; checkout?: string; definition?: string; workProject?: string; workFilter?: "all" | "attention" | "active" | "stopped"};
+export type Route = {page: "home" | "projects" | "activity" | "settings" | "guide"; projectId: string; main: string | null; section: ProjectSection; q?: string; listPage?: number; checkout?: string; definition?: string; showOrphaned?: boolean; workProject?: string; workFilter?: "all" | "attention" | "active" | "stopped"};
 export const directoryRoute: Route = {page: "projects", projectId: "", main: null, section: "conversations"};
 /** The views of one main conversation. */
 export const conversationSections: readonly ProjectSection[] = ["task", "supervision", "connected"];
@@ -27,7 +27,7 @@ export function parseRoute(hash: string): Route {
       const listPage = Math.max(1, Number(url.searchParams.get("page")) || 1);
       const checkout = ["definitions", "editor"].includes(section) ? url.searchParams.get("checkout") : null;
       const definition = section === "definitions" ? url.searchParams.get("definition") : null;
-      return {...directoryRoute, projectId: parts[1] ?? "", section, main, ...(q ? {q} : {}), ...(listPage > 1 ? {listPage} : {}), ...(checkout ? {checkout} : {}), ...(definition ? {definition} : {})};
+      return {...directoryRoute, projectId: parts[1] ?? "", section, main, ...(q ? {q} : {}), ...(listPage > 1 ? {listPage} : {}), ...(checkout ? {checkout} : {}), ...(definition ? {definition} : {}), ...(url.searchParams.get("orphaned") === "show" ? {showOrphaned: true} : {})};
     }
     if (page === "home") {
       const q = url.searchParams.get("q") ?? ""; const workProject = url.searchParams.get("project") ?? "";
@@ -50,6 +50,7 @@ export function routeHref(route: Route): string {
     return `#/home${params.size ? `?${params}` : ""}`;
   }
   if (route.page !== "projects" || !route.projectId) return `#/${route.page}`;
+  if (route.showOrphaned) params.set("orphaned", "show");
   if (route.main !== null) params.set("main", route.main);
   if (route.q) params.set("q", route.q);
   if ((route.listPage ?? 1) > 1) params.set("page", String(route.listPage));

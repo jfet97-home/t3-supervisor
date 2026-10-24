@@ -151,7 +151,7 @@ export const SupervisorApi = HttpApi.make("supervisor").add(
       }),
       HttpApiEndpoint.get("projectCheckouts", "/project-checkouts", {query: {projectId: Schema.String}, success: ProjectCheckoutInventory, error: UiError}),
       HttpApiEndpoint.get("projectConfiguration", "/project-configuration", {
-        query: {projectId: Text, threadId: Schema.optional(Text)},
+        query: {projectId: Text, threadId: Schema.optional(Text), checkout: Schema.optional(Text)},
         success: ProjectDefinitions,
         error: UiError,
       }),

@@ -1,5 +1,5 @@
 import { ProjectSupervisionStatus } from "./supervision-status.js";
-import { CheckoutChooser, CheckoutIdentity } from "./checkout-identity.js";
+import { CheckoutChooser, CheckoutIdentity, orphanedConversations } from "./checkout-identity.js";
 import { projectCheckouts } from "./project-definitions-api.js";
 import type { ProjectCheckoutInventoryInfo } from "../../src/project-definitions-contract.js";
 import { EntityDetails, HelpDisclosure } from "./disclosure.js";
@@ -100,7 +100,7 @@ export function DefinitionsContent({definitions, selectedDefinition = null, onSe
       })}</ul>{!entries.length && <p className="empty-state muted">No definitions match this view.</p>}<ListPager label="Definition catalog" total={entries.length} page={range.page} onPage={setPage}/>
     </section></>}
     {definitions.issues.length > 0 && <section className="definition-issues stack"><h3>Definition issues</h3><ul>{definitions.issues.map((issue, i) => <li key={`${issue.path}:${i}`}><code>{issue.path}</code><p>{issue.message}</p></li>)}</ul></section>}
-    <HelpDisclosure title="How definitions are used"><p>The catalog combines reusable project and enabled global definitions. The index lists available files; a task can add local duties while preserving required and fixed commitments. The Edit index view changes only this folder’s project.yaml. Full duty text, references and skills are available in each definition.</p></HelpDisclosure>
+    <HelpDisclosure title="How definitions are used"><p>The catalog combines reusable project and enabled global definitions. The index lists available files; a task can add local duties while preserving required and fixed commitments. Edit project.yaml changes only that existing index file. Full duty text, references and skills are available in each definition.</p></HelpDisclosure>
   </div>;
 }
 
@@ -227,7 +227,16 @@ export function ProjectDefinitionsPanel({data, overview, route, navigate, guard,
   const projects = data.projects.filter(project => project.available);
   const projectId = projects.some(project => project.id === selection.projectId) ? selection.projectId : "";
   const threads = data.threads.filter(thread => thread.available && thread.projectId === projectId).sort((a, b) => a.id.localeCompare(b.id));
-  const matchingThreads = threads.filter(thread => `${thread.title} ${thread.id}`.toLowerCase().includes(conversationQuery.toLowerCase()));
+  const threadUnavailable = Boolean(projectId && selection.threadId && !threads.some(thread => thread.id === selection.threadId));
+  const threadId = selection.threadId;
+  const epoch = useAtomValue(authEpochAtom, epochOf);
+  const definitionView = inWorkspace && ["definitions", "editor"].includes(route.section);
+  const globalOnly = data.projects.find(project => project.id === projectId)?.classification === "scratch";
+  const inventoryKey = scopeKey(environmentId, projectId, epoch, revision);
+  const inventoryRead = useAtomValue(inWorkspace && projectId && !globalOnly ? projectCheckouts(inventoryKey) : noCheckouts);
+  const inventory = AsyncResult.isFailure(inventoryRead) ? {projectId, available: false, reason: "Working folders could not be read. Check the connection and refresh folders.", complete: false, defaultBranch: null, issues: [], targets: []} : Option.getOrNull(AsyncResult.value(inventoryRead));
+  const orphaned = orphanedConversations(inventory);
+  const matchingThreads = threads.filter(thread => (route.showOrphaned || !orphaned.has(thread.id)) && `${thread.title} ${thread.id}`.toLowerCase().includes(conversationQuery.toLowerCase()));
   const conversationRange = pageWindow(matchingThreads.length, conversationPage);
   const visibleThreads = matchingThreads.slice(conversationRange.offset, conversationRange.offset + conversationRange.size);
   const conversationListVisible = inWorkspace && (route.section === "conversations" || route.main === null && conversationSections.includes(route.section));
@@ -239,19 +248,11 @@ export function ProjectDefinitionsPanel({data, overview, route, navigate, guard,
     if (dataCurrent && data.connected && projectId && route.section === "conversations" && conversationPage !== conversationRange.page)
       navigate({...listRoute, listPage: conversationRange.page}, {replace: true});
   }, [projectId, conversationQuery, conversationPage, conversationRange.page, route.section, dataCurrent, data.connected]);
-  const threadUnavailable = Boolean(projectId && selection.threadId && !threads.some(thread => thread.id === selection.threadId));
-  const threadId = selection.threadId;
-  const epoch = useAtomValue(authEpochAtom, epochOf);
-  const definitionView = inWorkspace && ["definitions", "editor"].includes(route.section);
-  const globalOnly = data.projects.find(project => project.id === projectId)?.classification === "scratch";
-  const inventoryKey = scopeKey(environmentId, projectId, epoch, revision);
-  const inventoryRead = useAtomValue(definitionView && projectId && !globalOnly ? projectCheckouts(inventoryKey) : noCheckouts);
-  const inventory = AsyncResult.isFailure(inventoryRead) ? {projectId, available: false, reason: "Working folders could not be read. Check the connection and refresh folders.", complete: false, issues: [], targets: []} : Option.getOrNull(AsyncResult.value(inventoryRead));
   const selectedCheckout = inventory?.targets.find(target => route.checkout ? target.workspaceRoot === route.checkout : route.main !== null && (route.main === "" ? target.threadId === null : target.members.some(member => member.threadId === route.main)));
   const definitionThreadId = selectedCheckout?.threadId ?? null;
-  const canLoad = Boolean(projectId && definitionView && (globalOnly || selectedCheckout) && data.connected);
+  const canLoad = Boolean(projectId && definitionView && (globalOnly || selectedCheckout?.presence === "present") && data.connected);
   const key = JSON.stringify([environmentId, projectId, selectedCheckout?.workspaceRoot ?? "global", revision, canLoad]);
-  const live = {key, read: canLoad ? definitionsReadKey(environmentId, projectId, definitionThreadId, epoch) : null, environmentId};
+  const live = {key, read: canLoad ? definitionsReadKey(environmentId, projectId, definitionThreadId, epoch, selectedCheckout && !selectedCheckout.isProjectFolder && selectedCheckout.threadId === null ? selectedCheckout.workspaceRoot : undefined) : null, environmentId};
   const held = useRef(live);
   held.current = heldView(held.current, live, configurationDirty || configurationSaving);
   const view = held.current;
@@ -326,14 +327,15 @@ export function ProjectDefinitionsPanel({data, overview, route, navigate, guard,
       <div className="page-heading">{conversation && <RouteLink className="back-link" to={listRoute} navigate={navigate}><Icon name="back" size={17}/>Back to conversations</RouteLink>}<div className="project-context-line"><nav className="workspace-breadcrumb" aria-label="Workspace breadcrumb"><RouteLink to={directoryRoute} navigate={navigate}>Projects</RouteLink><span aria-hidden="true">/</span><RouteLink to={{...workspaceRoute, main: null, section: "conversations"}} navigate={navigate}>{selectedProject?.title ?? "Unavailable project"}</RouteLink></nav><span className="project-context-status"><ProjectSupervisionStatus compact enabled={projectStatus?.enabled ?? false} effectiveEnabled={projectStatus?.effectiveEnabled ?? false} globallyEnabled={overview?.data?.globallyEnabled ?? false} available={Boolean(projectStatus?.available) && data.connected && !overview?.error}/></span></div><div className="row between page-title-row"><h1>{conversation ? threads.find(thread => thread.id === threadId)?.title ?? "Unavailable conversation" : selectedProject?.title ?? "Unavailable project"}</h1>{conversation && <div className="title-actions"><nav className="section-nav" aria-label="Conversation views">{conversationSections.map(section => <RouteLink key={section} to={{...workspaceRoute, section}} navigate={navigate} aria-current={route.section === section ? "page" : undefined}>{section === "task" ? "Task" : section === "connected" ? "Connected work" : "Supervision"}</RouteLink>)}</nav><a className="button-link" href={`t3-thread://v1/${threadId}`}><Icon name="external" size={16}/>Open in T3</a></div>}</div></div>
       <nav className="project-nav" aria-label="Project sections" hidden={conversation}>
         <RouteLink to={{...workspaceRoute, main: null, section: "conversations"}} navigate={navigate} aria-current={route.section === "conversations" || conversationSections.includes(route.section) ? "page" : undefined}>Conversations</RouteLink>
-        <RouteLink to={{...workspaceRoute, section: "definitions"}} navigate={navigate} aria-current={route.section === "definitions" ? "page" : undefined}>Definitions</RouteLink>
-        <RouteLink to={{...workspaceRoute, section: "editor"}} navigate={navigate} aria-current={route.section === "editor" ? "page" : undefined}>Edit index</RouteLink>
+        <RouteLink to={{...workspaceRoute, section: "definitions"}} navigate={navigate} aria-current={definitionView ? "page" : undefined}>Definitions</RouteLink>
         <RouteLink to={{...workspaceRoute, section: "settings"}} navigate={navigate} aria-current={route.section === "settings" ? "page" : undefined}>Project settings</RouteLink>
       </nav>
-      {inWorkspace && !conversation && <div className="section-heading"><h2 id="project-section-heading" className="sr-only">{route.section === "definitions" ? "Definitions" : route.section === "editor" ? "Edit index" : route.section === "settings" ? "Project settings" : "Conversations"}</h2><p className="muted">{route.section === "definitions" ? "Reusable steps and workflow templates in the selected working folder." : route.section === "editor" ? "Edit the shared working folder’s definition index. Reusable definitions remain read-only." : route.section === "settings" ? "Which conversations are supervised here, and the defaults for new Supervisors." : "Open a conversation to see its task, plan and supervision."}</p></div>}
-      {showDefinitions && !globalOnly && <CheckoutChooser inventory={inventory} selected={selectedCheckout?.workspaceRoot ?? null} disabled={saving || !data.connected} onSelect={checkout => navigate({...workspaceRoute, main: null, checkout, definition: ""})} onRefresh={() => registry.refresh(projectCheckouts(inventoryKey))}/>}
+      {inWorkspace && !conversation && <div className="section-heading"><h2 id="project-section-heading" className="sr-only">{route.section === "definitions" ? "Definitions" : route.section === "editor" ? "Edit project.yaml" : route.section === "settings" ? "Project settings" : "Conversations"}</h2><p className="muted">{route.section === "definitions" ? "Reusable steps and workflow templates in the selected working folder." : route.section === "editor" ? "Edit the selected folder’s .t3-supervisor/project.yaml. Reusable definitions remain read-only." : route.section === "settings" ? "Which conversations are supervised here, and the defaults for new Supervisors." : "Open a conversation to see its task, plan and supervision."}</p></div>}
+      {route.section === "definitions" && !globalOnly && <CheckoutChooser inventory={inventory} selected={selectedCheckout?.workspaceRoot ?? null} disabled={saving || !data.connected} onSelect={checkout => navigate({...workspaceRoute, main: null, checkout, definition: ""})} onRefresh={() => registry.refresh(projectCheckouts(inventoryKey))}/>}
       {showDefinitions && globalOnly && <p className="notice">Global definitions · No Project has no project-owned configuration to edit.</p>}
-      {showDefinitions && selectedCheckout && <div className="checkout-bar"><CheckoutIdentity target={selectedCheckout} projectFolder={selectedCheckout.threadId === null}/><button type="button" className="quiet-button" disabled={!canLoad || busy || saving} onClick={refresh}>Refresh definitions</button></div>}
+      {showDefinitions && selectedCheckout && <div className="checkout-bar"><CheckoutIdentity target={selectedCheckout} projectFolder={selectedCheckout.isProjectFolder}/><div className="row">{route.section === "definitions" && selectedCheckout.presence === "present" && (selectedCheckout.isProjectFolder || selectedCheckout.threadId !== null) && <RouteLink to={{...workspaceRoute, section: "editor"}} navigate={navigate}>Edit project.yaml</RouteLink>}<button type="button" className="quiet-button" disabled={!canLoad || busy || saving} onClick={refresh}>Refresh definitions</button></div></div>}
+      {route.section === "editor" && <div className="row"><RouteLink className="back-link" to={{...workspaceRoute, section: "definitions"}} navigate={navigate}><Icon name="back" size={17}/>Back to Definitions</RouteLink>{!selectedCheckout && <p className="muted small">Choose a working folder in Definitions before editing project.yaml.</p>}</div>}
+      {conversation && orphaned.has(threadId) && <p className="notice" role="status"><strong>Orphaned chat · working folder missing.</strong> <code>{orphaned.get(threadId)}</code>. The conversation history is retained; this folder is no longer available.</p>}
       {!projectId && <p className="panel" role="status">The selected project is unavailable. Its context is kept; choose an available project to continue.</p>}
       {threadUnavailable && !["settings", "conversations"].includes(route.section) && <p className="panel" role="status">The selected conversation is no longer available in this project. Choose another conversation.</p>}
       {!data.connected && <p className="panel" role="status">T3 is disconnected. Any unsaved project configuration draft is kept.</p>}
@@ -341,11 +343,13 @@ export function ProjectDefinitionsPanel({data, overview, route, navigate, guard,
       {dirty && !onDraftTargetChange && <p className="draft-notice" role="status">Unsaved changes · <RouteLink to={{...workspaceRoute, section: configurationDirty ? "editor" : "settings"}} navigate={navigate}>Return to your draft</RouteLink>. Switching views keeps your changes.</p>}
       {(route.section === "conversations" || route.main === null && conversationSections.includes(route.section)) && <div className="panel stack">
         <label className="search"><span className="sr-only">Find a conversation</span><input aria-label="Find a conversation" type="search" placeholder="Search conversation titles" value={conversationQuery} onChange={event => navigate({...listRoute, q: event.target.value, listPage: 1}, {replace: true})}/></label>
-        {resume && threads.some(thread => thread.id === resume.main) && <p className="small muted">Continue where you left off: <RouteLink to={resume} navigate={navigate}>{threads.find(thread => thread.id === resume.main)?.title} · {resume.section === "task" ? "Task" : resume.section === "connected" ? "Connected work" : "Supervision"}</RouteLink></p>}
+        <div className="row between"><label className="toggle"><input type="checkbox" checked={route.showOrphaned ?? false} onChange={event => navigate({...listRoute, showOrphaned: event.target.checked, listPage: 1})}/><span>Show orphaned chats{orphaned.size ? ` (${orphaned.size})` : ""}</span></label><button type="button" className="quiet-button" onClick={() => registry.refresh(projectCheckouts(inventoryKey))} disabled={!data.connected}>Refresh folders</button></div>
+        {inventory && !inventory.complete && <p className="small muted">Some folder checks are unavailable. Those chats remain visible until their folders can be verified.</p>}
+        {resume && matchingThreads.some(thread => thread.id === resume.main) && <p className="small muted">Continue where you left off: <RouteLink to={resume} navigate={navigate}>{threads.find(thread => thread.id === resume.main)?.title} · {resume.section === "task" ? "Task" : resume.section === "connected" ? "Connected work" : "Supervision"}</RouteLink></p>}
         <ListPager label="Conversations" total={matchingThreads.length} page={conversationRange.page} onPage={listPage => navigate({...listRoute, listPage})}/>
         <div className="conversation-list">{visibleThreads.map(thread => {
           const work = conversationOverview.data?.work.find(item => item.mainThreadId === thread.id);
-          return <RouteLink key={thread.id} to={{...workspaceRoute, main: thread.id, section: "task"}} navigate={navigate}><div className="conversation-list-copy"><strong>{thread.title}</strong><p className="muted small">{work?.objective ?? "Open to inspect task, plan and current supervision."}</p></div>{work ? <WorkState work={work} fresh={conversationReadCurrent}/> : <span className="small muted">{conversationReadCurrent ? "No Supervisor yet" : conversationOverview.error || !data.connected ? "Conversation state unavailable" : "Reading conversation state…"}</span>}<Icon name="arrow" size={18}/></RouteLink>;
+          return <RouteLink key={thread.id} to={{...workspaceRoute, main: thread.id, section: "task"}} navigate={navigate}><div className="conversation-list-copy"><strong>{thread.title}</strong>{orphaned.has(thread.id) && <p className="orphaned-chat-label"><Icon name="folder" size={15}/>Orphaned chat · folder missing <code>{orphaned.get(thread.id)}</code></p>}<p className="muted small">{work?.objective ?? "Open to inspect task, plan and current supervision."}</p></div>{orphaned.has(thread.id) ? <span className="pill amber">Orphaned</span> : work ? <WorkState work={work} fresh={conversationReadCurrent}/> : <span className="small muted">{conversationReadCurrent ? "No Supervisor yet" : conversationOverview.error || !data.connected ? "Conversation state unavailable" : "Reading conversation state…"}</span>}<Icon name="arrow" size={18}/></RouteLink>;
         })}</div>
         {matchingThreads.length === 0 && <p>{conversationQuery ? "No conversations match your search." : "No available main conversations in this project."}</p>}
       </div>}
@@ -361,7 +365,7 @@ export function ProjectDefinitionsPanel({data, overview, route, navigate, guard,
       {messageFor(completion, {read: view.read, environmentId}) !== null && <p role="status">{messageFor(completion, {read: view.read, environmentId})}</p>}
       {canLoad && current?.result && <div className="stack"><p className="muted small" role="status">Read {new Date(current.loadedAt!).toLocaleTimeString()}. Refresh after repository changes.</p><div hidden={route.section !== "definitions"}><DefinitionsContent key={key} definitions={current.result.definitions} selectedDefinition={route.definition ?? null} onSelect={definition => navigate({...workspaceRoute, definition: definition ?? ""})}/></div></div>}
       {loaded && <div hidden={!canLoad || view.key !== key || route.section !== "editor"} inert={supervisorSaving || configurationSaving}>
-        <ProjectConfigurationEditor key={JSON.stringify([loaded.environmentId, loaded.definitions.projectId, loaded.definitions.threadId, loaded.definitions.revision, revision])} definitions={loaded.definitions} onDirtyChange={editorReports.onDirtyChange}
+        <ProjectConfigurationEditor key={JSON.stringify([loaded.environmentId, loaded.definitions.projectId, loaded.definitions.threadId, loaded.definitions.revision, revision])} definitions={loaded.definitions} editingRequested={route.section === "editor"} onDirtyChange={editorReports.onDirtyChange}
           onSavingChange={editorReports.onSavingChange} onSaved={editorReports.onSaved}/>
       </div>}
     </div>

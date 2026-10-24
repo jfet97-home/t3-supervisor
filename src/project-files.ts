@@ -38,12 +38,13 @@ export type ReadFileResult = typeof ReadFileResult.Type;
 export const Metadata = Schema.Struct({entries: Schema.Array(Schema.Unknown)});
 export const VcsRefs = Schema.Struct({isRepo: Schema.Boolean, refs: Schema.Array(Schema.Struct({current: Schema.Boolean, name: Schema.String}))});
 export const VcsStatus = Schema.Struct({isRepo: Schema.Boolean, workingTree: Schema.Struct({files: Schema.Array(Schema.Struct({path: Schema.String}))})});
-export type VcsInfo = {isRepo: boolean; branch: string | null; changedPaths?: string[]};
+const CheckoutRefs = Schema.Struct({isRepo: Schema.Boolean, refs: Schema.Array(Schema.Struct({name: Schema.String, current: Schema.Boolean,
+  isDefault: Schema.Boolean, worktreePath: Schema.NullOr(Schema.String), isRemote: Schema.optionalKey(Schema.Boolean), remoteName: Schema.optionalKey(Schema.String)}))});
+export type VcsInfo = {isRepo: boolean; branch: string | null; changedPaths?: string[]; refs?: typeof CheckoutRefs.Type.refs};
 const CreatedCommit = Schema.Struct({commit: Schema.Struct({status: Schema.Literal("created"), commitSha: Schema.String})});
 const isListEntries = Schema.is(ListEntries);
 const isReadFileResult = Schema.is(ReadFileResult);
 const isMetadata = Schema.is(Metadata);
-const isVcsRefs = Schema.is(VcsRefs);
 const isVcsStatus = Schema.is(VcsStatus);
 const isCreatedCommit = Schema.is(CreatedCommit);
 const record = Schema.is(Schema.Record(Schema.String, Schema.Unknown));
@@ -148,14 +149,14 @@ const makeProjectFiles = Effect.fnUntraced(function* (endpoint: NativeEndpoint) 
     }),
     read: (root, path, cancel) => validPath(path) ? readNativeFile(root, path, cancel) : Effect.fail(new ProjectFileError("unavailable")),
     vcsInfo: (root, cancel) => Effect.gen(function* () {
-      const refs = yield* rpc("vcs.listRefs", {cwd: root, refKind: "local", limit: 200}, cancel);
-      if (!isVcsRefs(refs)) return yield* new ProjectFileError("unavailable");
-      const current = refs.refs.filter(ref => ref.current === true);
+      const refs = yield* rpc("vcs.listRefs", {cwd: root, refKind: "all", limit: 200}, cancel);
+      if (!Schema.is(CheckoutRefs)(refs)) return yield* new ProjectFileError("unavailable");
+      const current = refs.refs.filter(ref => ref.current === true && !ref.isRemote);
       if (current.length > 1) return yield* new ProjectFileError("unavailable");
       if (!refs.isRepo) return {isRepo: false, branch: null, changedPaths: []};
       const status = yield* vcsSnapshot(native, endpoint, {cwd: root, includeRemote: false}, cancel);
       if (!isVcsStatus(status)) return yield* new ProjectFileError("unavailable");
-      return {isRepo: true, branch: current[0] ? String(current[0].name) : null, changedPaths: status.workingTree.files.map(entry => String(entry.path))};
+      return {isRepo: true, branch: current[0] ? String(current[0].name) : null, refs: refs.refs, changedPaths: status.workingTree.files.map(entry => String(entry.path))};
     }),
     gitOperationState,
   });

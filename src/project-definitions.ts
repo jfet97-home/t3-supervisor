@@ -6,7 +6,7 @@ import {SupportingReferences, SupportingSkills, type DefinitionGuidance, definit
 import type { StoreShape } from "./store.js";
 import type { T3ClientShape } from "./t3.js";
 import type { FreshGitProbe } from "./git-probe.js";
-import { ProjectFileError, type FileFailure, type ProjectCommitter, type ProjectFiles, type ProjectWriter, type ReadFileResult } from "./project-files.js";
+import { ProjectFileError, type FileFailure, type ProjectCommitter, type ProjectFiles, type ProjectWriter, type ReadFileResult, type VcsInfo } from "./project-files.js";
 import {catalogEntryId, DefinitionNode, definitionIdPattern, normalizeProjectConfiguration, projectConfigurationError, ProjectConfigurationInfo, workflowDefinitionExpansionLimits,
   type DefinitionCatalogEntry, type DefinitionFileInfo, type DefinitionStepInfo, type DefinitionWorkflowInfo, type EffectiveConfigurationInfo,
   type ProjectDefinitionSnapshot, type ProjectCheckoutInventoryInfo} from "./project-definitions-contract.js";
@@ -758,7 +758,7 @@ const makeProjectDefinitions = Effect.fnUntraced(function* (sources: ProjectDefi
     const projectRoot = text(project.project.workspaceRoot, 4096) && posix.isAbsolute(project.project.workspaceRoot) && !project.project.workspaceRoot.includes("\0") && !project.project.workspaceRoot.includes("\\")
       ? posix.normalize(project.project.workspaceRoot) : null;
     if (!projectRoot) return yield* new DefinitionCheckoutUnavailable({reason: "workspace_invalid"});
-    if (yield* isScratchProject(projectId, project.project.workspaceRoot)) return {targets: [], issues};
+    if (yield* isScratchProject(projectId, project.project.workspaceRoot)) return {targets: [], issues, defaultBranch: null};
     const roots = new Map<string, string | null>([[projectRoot, null]]);
     const members = new Map<string, Array<{threadId: string; title: string}>>([[projectRoot, []]]);
     const candidates = catalog.threads.filter(thread => thread.projectId === projectId && thread.lineage.parentThreadId === null && !thread.deletedAt && !thread.archivedAt);
@@ -795,15 +795,40 @@ const makeProjectDefinitions = Effect.fnUntraced(function* (sources: ProjectDefi
       const shared = members.get(root) ?? [];
       shared.push({threadId: thread.id, title: thread.title}); members.set(root, shared);
     }
-    const targets: Array<DefinitionCheckoutTarget & {vcsAvailable: boolean}> = [];
-    for (const [workspaceRoot, threadId] of [...roots].sort(([a], [b]) => a.localeCompare(b))) {
-      const git = files.vcsInfo ? yield* Effect.result(vcsInfo(workspaceRoot)) : null;
-      if (git && Result.isFailure(git) && !partial) return yield* Effect.fail(git.failure);
-      const vcs = git && Result.isSuccess(git) ? git.success : {isRepo: false, branch: null};
-      if (partial && (!git || Result.isFailure(git))) issues.push({threadId, message: `Branch information unavailable for ${workspaceRoot}.`});
-      targets.push({origin: "project", threadId, workspaceRoot, vcsAvailable: git !== null && Result.isSuccess(git), branch: vcs.branch, isGitRepository: vcs.isRepo, members: (members.get(workspaceRoot) ?? []).sort((a, b) => a.threadId.localeCompare(b.threadId))});
+    const targets: Array<DefinitionCheckoutTarget & ProjectCheckoutInventoryInfo["targets"][number]> = [];
+    const rootPresence = partial ? yield* Effect.result(directoryExists(projectRoot)) : null;
+    const rootGit = partial && rootPresence && Result.isSuccess(rootPresence) && rootPresence.success && files.vcsInfo
+      ? yield* Effect.result(vcsInfo(projectRoot)) : null;
+    const refs = rootGit && Result.isSuccess(rootGit) ? rootGit.success.refs ?? [] : [];
+    const defaultNames = [...new Set(refs.filter(ref => ref.isDefault).flatMap(ref => {
+      if (!ref.isRemote) return [ref.name];
+      return ref.remoteName && ref.name.startsWith(`${ref.remoteName}/`) ? [ref.name.slice(ref.remoteName.length + 1)] : [];
+    }))];
+    const defaultBranch = defaultNames.length === 1 ? defaultNames[0]! : null;
+    if (partial && defaultBranch) {
+      for (const ref of refs) {
+        const path = ref.worktreePath;
+        if (ref.isRemote || ref.name !== defaultBranch || !path || !posix.isAbsolute(path) || path.includes("\0") || path.includes("\\")) continue;
+        const normalized = posix.normalize(path);
+        if (!roots.has(normalized)) roots.set(normalized, null);
+      }
     }
-    return {targets, issues};
+    for (const [workspaceRoot, threadId] of [...roots].sort(([a], [b]) => a === projectRoot ? -1 : b === projectRoot ? 1 : a.localeCompare(b))) {
+      const observedPresence = partial ? workspaceRoot === projectRoot ? rootPresence! : yield* Effect.result(directoryExists(workspaceRoot)) : null;
+      const presence = !observedPresence ? "present" as const : Result.isSuccess(observedPresence)
+        ? observedPresence.success ? "present" as const : "missing" as const
+        : fileFailure(observedPresence.failure) === "missing" ? "missing" as const : "unavailable" as const;
+      const git = presence !== "present" ? null : workspaceRoot === projectRoot && partial ? rootGit : files.vcsInfo ? yield* Effect.result(vcsInfo(workspaceRoot)) : null;
+      if (git && Result.isFailure(git) && !partial) return yield* Effect.fail(git.failure);
+      const vcs: VcsInfo = git && Result.isSuccess(git) ? git.success : {isRepo: false, branch: null};
+      if (partial && presence === "unavailable") issues.push({threadId, message: `Folder access could not be verified for ${workspaceRoot}.`});
+      else if (partial && presence === "present" && (!git || Result.isFailure(git))) issues.push({threadId, message: `Branch information unavailable for ${workspaceRoot}.`});
+      targets.push({origin: "project", threadId, workspaceRoot, presence, isProjectFolder: workspaceRoot === projectRoot,
+        isDefaultBranch: presence === "present" && defaultBranch !== null && vcs.branch === defaultBranch,
+        vcsAvailable: git !== null && Result.isSuccess(git), branch: vcs.branch, isGitRepository: vcs.isRepo,
+        members: (members.get(workspaceRoot) ?? []).sort((a, b) => a.threadId.localeCompare(b.threadId))});
+    }
+    return {targets, issues, defaultBranch};
   });
 
   const targetWorkspace = Effect.fnUntraced(function* (projectId: string, threadId: string | null) {
@@ -1001,7 +1026,7 @@ const makeProjectDefinitions = Effect.fnUntraced(function* (sources: ProjectDefi
     }));
   });
 
-  const load = (projectId: string, threadId: string | null = null): Effect.Effect<ProjectDefinitionSnapshot> => Effect.gen(function* () {
+  const load = (projectId: string, threadId: string | null = null, checkout?: string): Effect.Effect<ProjectDefinitionSnapshot> => Effect.gen(function* () {
     const result: MutableSnapshot = {projectId, threadId, workspaceRoot: "", globalOnly: false, revision: null, editingAvailable: false,
       status: "unavailable", steps: [], workflows: [], config: {workflows: [], steps: []}, projectConfig: null, definitionFiles: [], complete: false, sources: [], issues: []};
     const inputs: unknown[] = [];
@@ -1027,6 +1052,12 @@ const makeProjectDefinitions = Effect.fnUntraced(function* (sources: ProjectDefi
           }
           root = posix.normalize(thread.worktreePath);
         }
+      }
+      if (checkout !== undefined) {
+        const inventory = yield* readCheckoutTargets(projectId, true).pipe(Effect.mapError(error => new DefinitionSourceFailure({error})));
+        const target = inventory.targets.find(target => target.workspaceRoot === checkout && target.presence === "present" && target.isDefaultBranch);
+        if (threadId !== null || !target) {issue("", "workspace_invalid", "The default-branch working folder could not be verified. Refresh folders.");return;}
+        root = target.workspaceRoot;
       }
       result.workspaceRoot = root;
       const scratch = yield* isScratchProject(projectId, registeredRoot);
@@ -1088,12 +1119,12 @@ const makeProjectDefinitions = Effect.fnUntraced(function* (sources: ProjectDefi
   return {
     globalHomePath,
     globalDefinitionsPath,
-    load: (projectId: string, threadId: string | null = null, cancel?: Deferred.Deferred<void>) => load(projectId, threadId).pipe(definitionsOperation(cancel, "30 seconds")),
+    load: (projectId: string, threadId: string | null = null, cancel?: Deferred.Deferred<void>, checkout?: string) => load(projectId, threadId, checkout).pipe(definitionsOperation(cancel, "30 seconds")),
     presence: (projectId: string, cancel?: Deferred.Deferred<void>) => presenceForCheckout(projectId, null).pipe(definitionsOperation(cancel)),
     presenceGlobal: (cancel?: Deferred.Deferred<void>) => presenceGlobal.pipe(definitionsOperation(cancel)),
     presenceForCheckout: (projectId: string, threadId: string | null, cancel?: Deferred.Deferred<void>) => presenceForCheckout(projectId, threadId).pipe(definitionsOperation(cancel)),
     checkoutTargets: (projectId: string, cancel?: Deferred.Deferred<void>) => readCheckoutTargets(projectId, false).pipe(Effect.map(value => value.targets), definitionsOperation(cancel)),
-    checkoutInventory: (projectId: string, cancel?: Deferred.Deferred<void>) => readCheckoutTargets(projectId, true).pipe(Effect.map(({targets, issues}) => ({projectId, available: true, complete: issues.length === 0, reason: null, targets, issues})), definitionsOperation(cancel)),
+    checkoutInventory: (projectId: string, cancel?: Deferred.Deferred<void>) => readCheckoutTargets(projectId, true).pipe(Effect.map(({targets, issues, defaultBranch}) => ({projectId, available: true, complete: issues.length === 0, reason: null, defaultBranch, targets, issues})), definitionsOperation(cancel)),
     currentWorkspace: (projectId: string, threadId: string | null, cancel?: Deferred.Deferred<void>) => currentWorkspace(projectId, threadId).pipe(definitionsOperation(cancel)),
     globalFingerprint: (cancel?: Deferred.Deferred<void>) => globalFingerprint.pipe(definitionsOperation(cancel)),
     initialize: (projectId: string, threadId: string | null, input: ProjectDefinitionSetupInput, cancel?: Deferred.Deferred<void>) =>
@@ -1108,7 +1139,7 @@ export class ProjectDefinitions extends Context.Service<ProjectDefinitions, {
   readonly globalHomePath: string;
   readonly globalDefinitionsPath: string;
   // never fails: an unreadable scope makes the snapshot incomplete and revision-less (30 s deadline)
-  readonly load: (projectId: string, threadId?: string | null, cancel?: Deferred.Deferred<void>) => Effect.Effect<ProjectDefinitionSnapshot>;
+  readonly load: (projectId: string, threadId?: string | null, cancel?: Deferred.Deferred<void>, checkout?: string) => Effect.Effect<ProjectDefinitionSnapshot>;
   readonly presence: (projectId: string, cancel?: Deferred.Deferred<void>) => Effect.Effect<DefinitionPresence>;
   readonly presenceGlobal: (cancel?: Deferred.Deferred<void>) => Effect.Effect<GlobalDefinitionPresence>;
   readonly presenceForCheckout: (projectId: string, threadId: string | null, cancel?: Deferred.Deferred<void>) => Effect.Effect<DefinitionPresence>;

@@ -166,7 +166,8 @@ export class FixtureController {
     const plan = scenarioCatalog[name].plan(params);
     this.scenario = name;
     if (name === "partial-inventory") this.model.setPartialInventory();
-    else if (name === "large-interface") this.model.setLargeInterface();
+    else if (name === "orphaned-worktrees") this.model.setOrphanedWorktrees();
+    if (name === "large-interface") this.model.setLargeInterface();
     else if (name === "baseline") this.model.setJourney(null);
     else if (name.startsWith("journey-") && journeyCases.includes(name.slice(8) as JourneyCase)) this.model.setJourney(name.slice(8) as JourneyCase);
     this.arms = plan.arms;

@@ -14,9 +14,9 @@ export class ProjectConfigRequestError extends Data.TaggedError("ProjectConfigRe
 export class ProjectDefinitionsReadError extends Data.TaggedError("ProjectDefinitionsReadError")<{readonly message: string}> {}
 
 // reads the definitions of one checkout selection; an answer for another selection is not a read of this one
-export const loadProjectDefinitions = (projectId: string, threadId: string | null) => Effect.gen(function* () {
+export const loadProjectDefinitions = (projectId: string, threadId: string | null, checkout?: string) => Effect.gen(function* () {
   const client = yield* ApiClient;
-  const value = yield* client.guidance.projectConfiguration({query: threadId === null ? {projectId} : {projectId, threadId}}).pipe(
+  const value = yield* client.guidance.projectConfiguration({query: {...(threadId === null ? {projectId} : {projectId, threadId}), ...(checkout ? {checkout} : {})}}).pipe(
     Effect.mapError(() => new ProjectDefinitionsReadError({message: "Project definitions could not be loaded."})));
   if (value.projectId !== projectId || value.threadId !== threadId)
     return yield* new ProjectDefinitionsReadError({message: "The definition response belongs to another selection."});
@@ -32,14 +32,14 @@ export interface LoadedDefinitions {
 
 // the family key of one definitions read: the T3 environment, the checkout selection and the auth epoch; a refresh reads
 // the same key again, so a failed refresh keeps the latest successful read
-export const definitionsReadKey = (environmentId: string | null, projectId: string, threadId: string | null, authEpoch: number): string =>
-  scopeKey(environmentId, projectId, threadId, authEpoch);
+export const definitionsReadKey = (environmentId: string | null, projectId: string, threadId: string | null, authEpoch: number, checkout?: string): string =>
+  scopeKey(environmentId, projectId, threadId, authEpoch, checkout ?? null);
 
 // the definitions read of one key (definitionsReadKey), recording the environment it was read for; a new key disposes and
 // interrupts the previous read
 export const projectDefinitionsAtom = Atom.family((key: string) => {
-  const [environmentId, projectId, threadId] = JSON.parse(key) as [string | null, string, string | null];
-  return uiRuntime.atom(Effect.zipWith(loadProjectDefinitions(projectId, threadId), Clock.currentTimeMillis,
+  const [environmentId, projectId, threadId, , checkout] = JSON.parse(key) as [string | null, string, string | null, number, string | null];
+  return uiRuntime.atom(Effect.zipWith(loadProjectDefinitions(projectId, threadId, checkout ?? undefined), Clock.currentTimeMillis,
     (definitions, loadedAt): LoadedDefinitions => ({definitions, loadedAt, environmentId})));
 });
 
@@ -82,5 +82,7 @@ export const saveProjectConfiguration = (input: ProjectConfigSave) =>
 export const projectCheckouts = Atom.family((key: string) => uiRuntime.atom(Effect.gen(function* () {
   const [, projectId] = JSON.parse(key) as [string | null, string, number, number];
   const client = yield* ApiClient;
-  return yield* client.guidance.projectCheckouts({query: {projectId}});
+  const value = yield* client.guidance.projectCheckouts({query: {projectId}});
+  if (value.projectId !== projectId) return yield* new ProjectDefinitionsReadError({message: "Working folders belong to another project."});
+  return value;
 })));
