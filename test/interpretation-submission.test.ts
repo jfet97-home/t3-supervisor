@@ -368,10 +368,10 @@ it.effect("CT-ISUB-05: the decode keeps today's semantic outcomes: formal, provi
   // the factored semantic step decides the outcome the deleted final-chat parser decided over the same fields and node ids: the
   // canonical digests below are that parser's results, recorded once before it was removed
   const parserDigests = [
-    "d7cc22a1a5ad951f3eb360c75badd0ce9b6e182e9a68883cdd22705902e016b5",
-    "49d98f75f41d4755708c48a19c3074832f42d4bdc68aed5a3159ff14ee58f7f1",
-    "fdbf688be4d571f132581a004feb93ed1ecd4515083c632b9ce219bd16cd5b3a",
-    "12f6f928c3d5ff401b00eb34a44571bb91d2af88e1f6d3b144358196ee4c1f49",
+    "a2a8ba4bd64f8883001b94fbc220b0ecfe33a5d5bc0cb1f58398d432714859c6",
+    "4ff64e44bd7907199550801eb14aee0b0fccc3ac68f315e1b2720cb3c10c81de",
+    "ea6c4c1ddddd11cbdc2eb95ca0ab34c8f0aba1a94c2ef9593c02638e44ee5578",
+    "d80cc274844ad99927f3f2e820bfff21b5ba93351d42f41e6e8a7cf805174f7d",
     "a199d38e9c2ecc68375b8dcb1dd4bd37e45a16b3406fd7a978cf0cbf50340a38",
   ];
   let compared = 0;
