@@ -49,6 +49,25 @@ The generic T3 catalog is stored in `/data/catalog.sqlite3`; project supervision
 
 ## Development
 
+The Nix development shell pins Node 24.22.1 (the October 2026 security release)
+and pnpm 12.14.0, using the same release archives and Nix input revisions as
+Scanner. It supports Apple Silicon macOS and x86_64/aarch64 Linux.
+Run `nix develop` in the checkout to enter it, or prefix a command with
+`nix develop --command`. Dependency installation still uses `npm ci` and the
+committed `package-lock.json`.
+
+T3's **Setup Worktree** action runs `sh scripts/setup-worktree.sh`. The launcher
+approves this checkout's `.envrc` when direnv is installed, then installs dependencies
+inside the pinned Nix shell. It works without an interactive shell hook.
+An existing T3 project may need its saved action set to the same command because
+saved actions override `t3.json`.
+
+For automatic loading in interactive terminals, enable direnv's shell hook once.
+The tracked `.envrc` loads the flake when entering the checkout and unloads it
+when leaving. T3's setup launcher handles approval for worktrees it creates;
+for a checkout created manually, run `direnv allow` from its root after reviewing
+`.envrc`. Run it again if `.envrc` changes. Nix alone does not need this approval.
+
 The [usage skill](skills/use-t3-supervisor/SKILL.md) describes ordinary dashboard workflows for agent sessions.
 The [workflow-authoring skill](skills/author-supervisor-workflows/SKILL.md) derives
 reusable steps and workflows from project guidance, development history and human
