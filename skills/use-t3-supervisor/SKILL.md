@@ -31,7 +31,7 @@ Authoring a catalog does not itself enable supervision or adopt its policy.
 Steps, workflows and inline local steps may carry optional string lists:
 checkout-relative file paths in `references` and local SKILL.md paths or exact
 global catalog names in a separate `skills` string list. Definitions
-and Plan show separate lists read-only; edit source YAML/frontmatter and refresh. The
+and Task show separate lists read-only; edit source YAML/frontmatter and refresh. The
 Guide explains lookup and unavailable guidance. References are not opened or verified
 automatically and never enable supervision.
 
@@ -85,7 +85,7 @@ Matching complete native proposal/acceptance records establish agreement, not ac
 execution. Keep incomplete requirements and source issues visible.
 
 For work that needs supervision, negotiate the applicable workflow promptly before
-continuing substantive implementation. Inspect both conversations and Plan for the
+continuing substantive implementation. Inspect both conversations and Task for the
 actual proposal and acceptance; a ready binding alone does not establish agreement.
 Guidance is asynchronous and T3 provides no pre-first-tool barrier. Trivial exchanges
 should stay quiet. Report repeated introductions, redundant steering or large repeated

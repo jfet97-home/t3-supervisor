@@ -89,6 +89,52 @@ it("plan changes match occurrences by ID, so a renamed step is changed rather th
   assert.deepEqual(changes.map(change => [change.kind, change.nodeId]).sort(), [["added", "packing-extra"], ["changed", "packing-design"], ["removed", "packing-rollout"]]);
 });
 
+type PlanNode = WorkflowPlanGroupInfo["nodes"][number];
+const mapPlan = (plan: WorkflowPlanGroupInfo, change: (node: Exclude<PlanNode, WorkflowPlanGroupInfo>) => PlanNode): WorkflowPlanGroupInfo => ({...plan, nodes: plan.nodes.map(node =>
+  "nodes" in node ? mapPlan(node, change) : change(node.kind === "workflow" && node.plan ? {...node, plan: mapPlan(node.plan, change)} : node))});
+
+const accepted = () => example("agreed").task.agreement!.workflow.plan!;
+const changed = (before: WorkflowPlanGroupInfo, after: WorkflowPlanGroupInfo) =>
+  planChanges(before, after).map(change => change.kind === "changed" ? [change.nodeId, ...change.fields] : [change.kind, change.nodeId]);
+const at = (plan: WorkflowPlanGroupInfo, key: string) => plan.nodes.findIndex(node => "nodeId" in node && node.nodeId === `packing-${key}`);
+
+it("plan changes report a same-ID reorder and steps regrouped into parallel branches", () => {
+  const before = accepted(), reordered = [...before.nodes];
+  reordered.splice(at(before, "evidence"), 0, ...reordered.splice(at(before, "rollout"), 1));
+  assert.deepEqual(changed(before, {...before, nodes: reordered}), [["packing-rollout", "order"]], "same IDs in a new sequence order");
+  const panel = renderToStaticMarkup(createElement(PlanChanges, {changes: planChanges(before, {...before, nodes: reordered}), proposal: pendingProposal(example("revised").task)!}));
+  assert.match(panel, /Data and rollout plan<\/strong><span class="small muted"> · changes order/);
+  assert.equal(at(before, "rollout"), at(before, "design") + 1);
+  const grouped = [...before.nodes];
+  grouped.splice(at(before, "design"), 2, {kind: "parallel", templatePath: null, nodes: before.nodes.slice(at(before, "design"), at(before, "design") + 2)});
+  assert.deepEqual(changed(before, {...before, nodes: grouped}), [["packing-design", "grouping"], ["packing-rollout", "grouping"]], "sequence steps made parallel");
+});
+
+it("plan changes report a step moved to another parallel branch even when the flattened order is unchanged", () => {
+  const step = (key: string) => before.nodes[at(before, key)]!, before = accepted();
+  const plan = (...branches: string[][]): WorkflowPlanGroupInfo => ({kind: "sequence", templatePath: null, nodes: branches.map(keys => ({kind: "parallel", templatePath: null, nodes: keys.map(step)}))});
+  assert.deepEqual(changed(plan(["design", "evidence", "implement"], ["recurrence"]), plan(["design", "evidence"], ["implement", "recurrence"])),
+    [["packing-design", "grouping"], ["packing-evidence", "grouping"], ["packing-implement", "grouping"], ["packing-recurrence", "grouping"]]);
+  assert.deepEqual(changed(plan(["design", "evidence"], ["implement", "recurrence"]), plan(["evidence", "design"], ["recurrence", "implement"])), [], "branch order inside a parallel group is not a change");
+  assert.deepEqual(changed(plan(["design", "evidence"], ["implement", "recurrence"]), plan(["implement", "recurrence"], ["design", "evidence"])).map(([, field]) => field), ["order", "order"], "the parallel groups swapped places in the sequence");
+});
+
+it("plan changes report supporting references, skills and the fixed workflow flag", () => {
+  const before = accepted();
+  assert.deepEqual(changed(before, mapPlan(before, node => node.nodeId === "packing-scope" ? {...node, references: [...node.references ?? [], "docs/packing.md"]} : node)), [["packing-scope", "references"]]);
+  assert.deepEqual(changed(before, mapPlan(before, node => node.nodeId === "packing-verify" ? {...node, skills: []} : node)), [["packing-verify", "skills"]]);
+  assert.deepEqual(changed(before, mapPlan(before, node => node.kind === "workflow" ? {...node, fixed: !node.fixed} : node)), [["packing-review", "fixed"]]);
+  const panel = renderToStaticMarkup(createElement(PlanChanges, {changes: [], proposal: pendingProposal(example("revised").task)!}));
+  assert.match(panel, /No changes to the plan’s steps were found; inspect the proposal details/);
+});
+
+it("runtime status is not a plan change", () => {
+  const before = accepted();
+  assert.deepEqual(changed(before, mapPlan(before, node => ({...node, status: "completed", contributorThreadIds: [fixtureIds.threadA1]}))), []);
+  const working = example("working");
+  assert.deepEqual(planChanges(working.task.agreement!.workflow.plan, working.progress.workflows[0]!.plan), [], "the live statuses of the accepted plan are not changes");
+});
+
 it("the journey shows the bound live workflow, else the accepted plan, else the proposal, and never an unrelated workflow", () => {
   assert.equal(journeyRecord(example("proposal").task, undefined).kind, "proposed");
   assert.equal(journeyRecord(example("agreed").task, undefined).kind, "agreed");

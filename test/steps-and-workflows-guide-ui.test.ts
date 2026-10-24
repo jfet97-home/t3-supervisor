@@ -49,7 +49,7 @@ it("steps and workflows guide documents the approved layout, syntax and planning
   assert.match(html, /<code>\[\]<\/code>/);
   assert.match(html, /skills\/use-project\/SKILL.md/);
   assert.match(html, /src\/migration.ts/);
-  assert.match(html, /Definitions and Plan show pointers read-only/);
+  assert.match(html, /Definitions and Task show pointers read-only/);
   assert.match(html, /skills:/);
   assert.doesNotMatch(html, /scope:/);
   assert.match(html, /effect-v4-development/);

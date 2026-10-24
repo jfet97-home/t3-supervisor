@@ -591,7 +591,7 @@ export const scenarioCatalog: Record<ScenarioName, {description: string; plan: (
   "journey-working": {description: "reconstructed packing example: scope and evidence assessed, design underway", plan: () => plan([])},
   "journey-attention": {description: "reconstructed packing example: overfill behavior not evidenced", plan: () => plan([])},
   "journey-revised": {description: "reconstructed packing example: refined Verify criterion awaiting acceptance; live statuses unchanged", plan: () => plan([])},
-  "journey-reagreed": {description: "reconstructed packing example: refinement accepted; overfill clamped, implementation reopened", plan: () => plan([])},
+  "journey-reagreed": {description: "reconstructed packing example: refined check accepted; verification underway", plan: () => plan([])},
   "journey-verified": {description: "reconstructed packing example: refined criterion verified", plan: () => plan([])},
   "journey-nested": {description: "reconstructed packing example: independent review underway in parallel", plan: () => plan([])},
   "journey-nested-attention": {description: "reconstructed packing example: a review branch needs attention while its workflow stays underway", plan: () => plan([])},

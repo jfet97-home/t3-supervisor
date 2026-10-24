@@ -83,12 +83,10 @@ const moments: Record<"working" | "attention" | "reagreed" | "verified" | "neste
     implement: "Reconstructed example: article selection and quantity scans are implemented in the packing scan flow.",
     verify: "Reconstructed example: evidence shows GTIN → 0, then 4 → 8 → 12 → 16 → 20. Nothing yet shows what happens when a label exceeds the open amount."},
     task: {status: "needs_attention", note: "Reconstructed example: the happy path is shown; a label beyond the open amount is not yet evidenced."}},
-  reagreed: {at: 18, statuses: {scope: "completed", evidence: "completed", design: "completed", rollout: "completed", implement: "underway", verify: "needs_attention"}, notes: {
-    implement: "Reconstructed example: reopened — an over-amount label is being changed to reject the whole scan.",
-    verify: "Reconstructed example: overfill run — a 4-piece label at 18 of 20 was clamped to 20 instead of rejected."},
-    task: {status: "needs_attention", note: "Reconstructed example: a label beyond the open amount was clamped, not rejected. The agent is fixing it."}},
+  reagreed: {at: 18, statuses: {scope: "completed", evidence: "completed", design: "completed", rollout: "completed", implement: "completed", verify: "underway"}, notes: {
+    verify: "Reconstructed example: checking the refined criterion, including a label larger than the open amount."},
+    task: {status: "underway", note: "Reconstructed example: the refined check is accepted; verification is running."}},
   verified: {at: 11, statuses: {scope: "completed", evidence: "completed", design: "completed", rollout: "completed", implement: "completed", recurrence: "completed", verify: "completed"}, notes: {
-    implement: "Reconstructed example: an over-amount label is rejected as a whole; the count is unchanged.",
     recurrence: "Reconstructed example: applies — the corrected rule (a GTIN does not count a piece; overfill is rejected) is kept in the unit and packing browser tests.",
     verify: "Reconstructed example: GTIN → 0; labels 4 → 8 → 12 → 16 → 20; a 4-label at 18 of 20 is rejected and the count stays 18; a quantity before an article is rejected."},
     task: {status: "underway", note: "Reconstructed example: the refined criterion is verified. Independent review is next."}},

@@ -217,7 +217,7 @@ and record it.
 1. "Fixture project A", then "Project settings". Change Model to "Fixture quick model",
    Reasoning, "Maximum pending activity age", "Finalized activities per operative chat" and
    "Maximum helpers per root".
-2. Navigate as in 01 step 2, plus a chat's Overview/Supervision views (the settings draft
+2. Navigate as in 01 step 2, plus a chat's Task/Supervision views (the settings draft
    is per project). Record guards, discards and draft values.
 3. `scenario/session-expiry-next-call`, then re-sign-in. Read the draft back.
 4. `scenario/save-401?path=/api/guidance/project-supervisor`, then "Save Supervisor
@@ -304,7 +304,7 @@ native).
    record "The change could not be confirmed. The saved state is shown."
 
 **UI-STORY-08 — keyboard and focus, zoom, reflow** (also runnable read-only on native).
-On Home, Projects, a project's Definitions and Project settings, a chat's three views,
+On Home, Projects, a project's Definitions and Project settings, a chat's Task and Supervision views,
 Settings and the sign-in form, tab through all controls with the keyboard. Record the focus
 order, the focus snippet (visible outline or shadow) and the skip link ("Skip to content").
 Repeat at 200 % and 400 % zoom (browser zoom; if unavailable, 640 px and 320 px viewports

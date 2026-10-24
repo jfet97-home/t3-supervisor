@@ -3,7 +3,7 @@ import {DefinitionReferences} from "./definition-references.js";
 import type { TaskInterpretationInfo, WorkflowPlanNodeInfo, WorkflowProposalInfo } from "../../src/project-supervisor-contract.js";
 import type { WorkflowAssessmentInfo } from "../../src/workflow-assessment.js";
 import type { WorkflowProgressContribution, WorkflowProgressObservation } from "../../src/workflow-progress.js";
-import { acceptedAgreement, pendingProposal, statusRecord, type PlanChange, type StepNotes } from "./task-record.js";
+import { acceptedAgreement, pendingProposal, statusRecord, type PlanChange, type PlanChangeField, type StepNotes } from "./task-record.js";
 
 const states = {planned: "Planned", underway: "In progress", completed: "Completed", needs_attention: "Needs attention"} as const;
 const recordStates = {planned: "planned", underway: "in progress", completed: "completed", needs_attention: "needs attention"} as const;
@@ -184,16 +184,19 @@ export function TaskAlignment({task, supervisorThreadId}: {task: TaskInterpretat
   </section>;
 }
 
+const changeLabels: Record<PlanChangeField, string> = {name: "name", description: "description", note: "plan note", definition: "definition", references: "references",
+  skills: "skills", fixed: "fixed workflow", omissions: "not-applicable items", grouping: "grouping", order: "order"};
+
 /** The actual differences between the accepted plan and the proposal awaiting acceptance. */
 export function PlanChanges({changes, proposal, proposalId}: {changes: readonly PlanChange[]; proposal: WorkflowProposalInfo; proposalId?: string | undefined}) {
   return <section className="plan-changes" aria-labelledby="plan-changes-title">
     <h3 id="plan-changes-title">Proposed update awaiting acceptance</h3>
     <p className="small muted">{proposalStatusDescription[proposal.status]}{proposalId && <> Proposal <code>{proposalId}</code>.</>} {proposal.plan ? "Compared with the accepted plan; step statuses below are unchanged until the Supervisor records new assessments." : ""}</p>
-    {!proposal.plan ? <p>The update’s plan is not recorded yet.</p> : changes.length === 0 ? <p>The update changes requirements or definitions, not the plan’s steps.</p> : <ul className="stack">{changes.map(change => <li key={`${change.kind}:${change.nodeId}`}>
+    {!proposal.plan ? <p>The update’s plan is not recorded yet.</p> : changes.length === 0 ? <p>No changes to the plan’s steps were found; inspect the proposal details.</p> : <ul className="stack">{changes.map(change => <li key={`${change.kind}:${change.nodeId}`}>
       {change.kind === "added" ? <><strong>Adds {change.name}</strong>{change.note && <p className="small">{change.note}</p>}</>
         : change.kind === "removed" ? <strong>Removes {change.name}</strong>
         : <><strong>{change.previousName === change.name ? change.name : `${change.previousName} → ${change.name}`}</strong>
-          <span className="small muted"> · changes {change.fields.map(field => ({name: "name", description: "description", note: "plan note", definition: "definition", position: "position"})[field]).join(", ")}</span>
+          <span className="small muted"> · changes {change.fields.map(field => changeLabels[field]).join(", ")}</span>
           {change.fields.includes("note") && <details className="note-compare-toggle"><summary>Compare plan notes</summary><dl className="note-compare"><div><dt>Accepted</dt><dd>{change.previousNote}</dd></div><div><dt>Proposed</dt><dd>{change.note}</dd></div></dl></details>}</>}
     </li>)}</ul>}
   </section>;

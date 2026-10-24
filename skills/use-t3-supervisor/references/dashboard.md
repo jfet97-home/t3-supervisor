@@ -292,7 +292,7 @@ guess a host installation path. Omit either list or use `[]` for none. Each list
 allows at most 100 entries; skills cannot repeat. Paths allow 4096 characters and
 catalog names 256. No scope or object wrapper is used.
 
-Definitions and Plan show separate read-only lists. Edit the source and refresh
+Definitions and Task show separate read-only lists. Edit the source and refresh
 to change them. The service loads no target, verifies no existence, installs no
 skill and grants no access or proof of reading. Both lists remain part of saved
 plans, source identity and fixed commitments. The Guide owns the full syntax and
