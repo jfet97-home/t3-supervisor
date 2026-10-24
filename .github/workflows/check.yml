@@ -40,7 +40,7 @@ jobs:
           node-version: "24"
           cache: npm
       - run: npm ci --no-audit --no-fund
-      - run: npm test -- --shard=${{ matrix.shard }}/4 --maxWorkers=2
+      - run: npm test -- --shard=${{ matrix.shard }}/4 --maxWorkers=1
 
   harness:
     runs-on: ubuntu-latest
