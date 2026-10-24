@@ -70,7 +70,7 @@ different network namespaces.
 
 Container ports are published only on host loopback. Set `T3_URL` to change the
 upstream server and `SUPERVISOR_VERSION` to select an exact image version or a
-channel. The registry is `ghcr.io/jfet97-home/t3-supervisor`; published images
+channel. The registry is `ghcr.io/jfet97/t3-supervisor`; published images
 support Linux amd64 and arm64. For immutable image selection, use the digest from
 the GitHub release in your deployment configuration.
 

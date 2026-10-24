@@ -84,7 +84,7 @@ jobs:
       id-token: write
       actions: read
     env:
-      IMAGE: ghcr.io/jfet97-home/t3-supervisor
+      IMAGE: ghcr.io/jfet97/t3-supervisor
       PUBLISH: ${{ vars.RELEASE_PUBLISH_ENABLED == 'true' && (github.event_name == 'workflow_run' || inputs.publish) }}
     steps:
       - uses: actions/checkout@v4

@@ -92,7 +92,7 @@ Installing a new version does not restart your running service automatically.
 
 Back up the state directory or volume before upgrading. See
 [upgrade and rollback](docs/installation.md#upgrade-and-rollback),
-[release notes](CHANGELOG.md) and [GitHub releases](https://github.com/jfet97-home/t3-supervisor/releases).
+[release notes](CHANGELOG.md) and [GitHub releases](https://github.com/jfet97/t3-supervisor/releases).
 
 ## Learn more
 

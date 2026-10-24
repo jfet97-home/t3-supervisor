@@ -4,7 +4,7 @@
   "description": "Dashboard and background service for supervising T3 projects and conversations",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/jfet97-home/t3-supervisor.git"
+    "url": "git+https://github.com/jfet97/t3-supervisor.git"
   },
   "files": [
     "dist",

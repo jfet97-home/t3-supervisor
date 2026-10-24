@@ -22,7 +22,7 @@ ENV NODE_ENV=production DATA_DIRECTORY=/data T3_URL=http://host.docker.internal:
 USER 501:20
 ARG VERSION=development
 ARG REVISION=unknown
-LABEL org.opencontainers.image.source="https://github.com/jfet97-home/t3-supervisor" \
+LABEL org.opencontainers.image.source="https://github.com/jfet97/t3-supervisor" \
       org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.revision="${REVISION}"
 CMD ["node", "dist/main.js"]
