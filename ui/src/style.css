@@ -476,7 +476,7 @@ input[aria-invalid="true"] { border-color: light-dark(#a32f25, #ffb9b3); }
 .settings-group .panel { padding: 20px 24px; gap: 12px; }
 .settings-control .control-heading h2, .settings-control .control-heading h3 { font-size: 1rem; }
 .settings-control > p { max-width: 72ch; }
-.settings-control .row:has(> button) { justify-content: flex-end; }
+.settings-control .row:has(> button) { justify-content: flex-start; }
 .settings-control p[role="status"]:empty { display: none; }
 .connection-summary { display: flex; align-items: center; gap: 4px; color: var(--teal); font-size: .9rem; }
 button.danger-button { color: #92332b; border-color: #be716a; }
@@ -527,7 +527,6 @@ button.danger-button:hover:not(:disabled):not([aria-disabled="true"]) { color: l
 .title-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .title-actions .section-nav { border-bottom: 0; padding-bottom: 0; }
 .conversation-workspace .page-heading { padding-bottom: 12px; border-bottom: 1px solid var(--line); }
-.form-section-title { font-size: 1rem; padding-top: 8px; border-top: 1px solid var(--line); }
 .sign-in-intro .sign-in-tagline { max-width: none; font-size: 46px; font-weight: 700; line-height: 1.15; letter-spacing: -.03em; color: #f2f8ff; }
 .boot-state { max-width: 760px; }
 .retained-workflow { padding: 16px 20px; border: 1px dashed var(--control-line); border-radius: 9px; }
@@ -684,6 +683,26 @@ select { max-width: 36rem; }
   .app-header .scope-status-compact > span { white-space: normal; }
   .project-context-line { gap: 6px; }
 }
-fieldset.stack { row-gap: 6px; }
-fieldset.stack > p { margin-block-start: -2px; margin-block-end: 10px; }
-fieldset.stack > p:last-child { margin-block-end: 0; }
+
+.supervisor-settings-form { display: grid; gap: 24px; }
+.settings-card { padding: 24px; }
+.settings-defaults { display: grid; gap: 32px; }
+.settings-section { margin: 0; padding: 0; border: 0; }
+.settings-section > legend { padding: 0 0 12px; font-size: 1rem; }
+.settings-fields { display: grid; gap: 20px; }
+.settings-fields > p { max-width: 72ch; }
+.field-group { display: grid; gap: 6px; min-width: 0; }
+.field-group > input + .small, .field-group > select + .small { margin-top: -2px; }
+.field-group > [aria-live]:empty { display: none; }
+.field-group .toggle { margin: 0; padding: 0; border: 0; }
+.conversation-filters .toggle { padding: 4px 0; border: 0; min-height: 44px; align-items: center; }
+.field-group > .theme-control + .small { margin-top: -2px; }
+.field-group > p { max-width: 72ch; }
+.supervisor-settings-form > .save-bar { border: 0; padding: 0; margin: 0; }
+.checkout-priority > .checkout-prominent { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; overflow: clip; }
+.checkout-priority > .checkout-prominent .checkout-target { border: 0; }
+.checkout-prominent .checkout-identity strong, .default-branch-label { color: var(--teal); font-weight: 650; }
+.checkout-unavailable { background: var(--soft); }
+.orphaned-chat-label { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: .8rem; color: var(--quiet); }
+.orphaned-chat-label code { overflow-wrap: anywhere; }
+@media (max-width: 600px) { .settings-card { padding: 18px; } }

@@ -51,11 +51,11 @@ export function ThemeSelector() {
   const setTheme = useAtomSet(themeAtom);
   return <section className="settings-group stack">
     <h2>Appearance</h2>
-    <label className="theme-control" htmlFor="theme-preference"><span>Theme</span>
-      <select id="theme-preference" value={preference} onChange={event => {
+    <div className="field-group"><label className="theme-control" htmlFor="theme-preference"><span>Theme</span>
+      <select id="theme-preference" aria-describedby="theme-help" value={preference} onChange={event => {
         if (isPreference(event.target.value)) setTheme(event.target.value);
       }}><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select>
     </label>
-    <p className="small muted">{persisted ? "Saved in this browser. System follows your device’s appearance." : "Applied for this page. Browser storage is unavailable, so this choice cannot be saved."}</p>
+    <p id="theme-help" className="small muted">{persisted ? "Saved in this browser. System follows your device’s appearance." : "Applied for this page. Browser storage is unavailable, so this choice cannot be saved."}</p></div>
   </section>;
 }

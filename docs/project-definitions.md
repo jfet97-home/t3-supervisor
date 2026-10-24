@@ -125,3 +125,22 @@ maintained guidance instead of duplicating it. The [definition syntax](steps-and
 owns the format, lookup rules, bounds and revision semantics. Definitions and Plan
 show these pointers read-only; Supervisor does not open targets or discover host
 skill roots. Existing configuration editing still writes only the definition index.
+
+
+## Working folder selection
+
+Definitions lists each native working folder once. The registered project folder and
+Git's reported default-branch checkout appear first, combined when they are the same
+folder. The default branch is detected from native ref metadata; no branch name is
+assumed. A default checkout without a conversation binding is available for read-only
+inspection after fresh native verification. Editing remains bound to the project root
+or an existing conversation's checkout.
+
+Missing folders are retained as non-selectable references with the conversations that
+still point to them. Those orphaned chats are hidden from the project's default
+conversation list; Show orphaned chats restores them and identifies the missing path.
+Access failures are unknown, never evidence of an orphan. No conversation is deleted
+or settled by this presentation filter.
+
+Use Edit project.yaml inside the selected Definitions folder. The editor retains its
+folder and draft when returning to Definitions and cannot save an unchanged draft.

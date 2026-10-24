@@ -18,7 +18,7 @@ import type {
 } from "../../src/project-supervisor-contract.js";
 import {
   catalogEntryId, normalizeProjectConfiguration, projectConfigurationError, type DefinitionNode, type ProjectConfigSave, type ProjectConfigSaveOutcome,
-  type ProjectConfigurationInfo, type ProjectDefinitionSnapshot,
+  type ProjectConfigurationInfo, type ProjectDefinitionSnapshot, type ProjectCheckoutInventoryInfo,
 } from "../../src/project-definitions-contract.js";
 import { parseWorkflowProgressPageQuery, type WorkflowProgressPagingQuery, type WorkflowProgressSnapshot } from "../../src/workflow-progress.js";
 
@@ -202,7 +202,17 @@ export class FixtureModel {
   private journey: JourneyCase | null = null;
   private largeInterface = false;
   private partialInventory = false;
+  private orphanedInterface = false;
   setPartialInventory() {this.partialInventory = true;}
+  setOrphanedWorktrees() {
+    const project = this.project(fixtureIds.projectA);
+    this.orphanedInterface = true;
+    project.checkouts = [
+      {...project.checkouts.find(target => target.threadId === null)!, branch: "release"},
+      {origin: "project", threadId: fixtureIds.threadA1, workspaceRoot: "/fixture/worktrees/trunk", branch: "trunk", isGitRepository: true, folderStatus: "present"},
+      {origin: "project", threadId: fixtureIds.threadA3, workspaceRoot: "/fixture/worktrees/removed", branch: null, isGitRepository: false, folderStatus: "missing"},
+    ];
+  }
   setLargeInterface() {
     if (this.largeInterface) return;
     this.largeInterface = true;
@@ -570,11 +580,11 @@ export class FixtureModel {
     };
   }
 
-  checkoutInventory(projectId: string) {
+  checkoutInventory(projectId: string): ProjectCheckoutInventoryInfo {
     const project = this.project(projectId);
-    const targets = project.checkouts.filter(target => !this.partialInventory || target.threadId !== fixtureIds.threadA3).map(target => ({workspaceRoot: target.workspaceRoot, threadId: target.threadId, branch: target.branch, isGitRepository: target.isGitRepository, vcsAvailable: true,
+    const targets = project.checkouts.filter(target => !this.partialInventory || target.threadId !== fixtureIds.threadA3).map(target => ({workspaceRoot: target.workspaceRoot, threadId: target.threadId, branch: target.branch, isGitRepository: target.folderStatus === "present" && target.isGitRepository, vcsAvailable: target.folderStatus === "present", presence: target.folderStatus, isProjectFolder: target.threadId === null, isDefaultBranch: target.folderStatus === "present" && target.branch === (this.orphanedInterface ? "trunk" : "main"),
       members: this.data.threads.filter(thread => thread.projectId === projectId && (target.threadId === null ? !project.checkouts.some(checkout => checkout.threadId === thread.id) : target.threadId === thread.id)).map(thread => ({threadId: thread.id, title: thread.title}))}));
-    return {projectId, available: true, complete: !this.partialInventory, reason: null, issues: this.partialInventory ? [{threadId: fixtureIds.threadA3, message: "Working folder unavailable for Fixture chat A3: workspace_binding_unavailable."}] : [], targets};
+    return {projectId, available: true, complete: !this.partialInventory, reason: null, defaultBranch: projectId === fixtureIds.projectA ? this.orphanedInterface ? "trunk" : "main" : null, issues: this.partialInventory ? [{threadId: fixtureIds.threadA3, message: "Working folder unavailable for Fixture chat A3: workspace_binding_unavailable."}] : [], targets};
   }
 
   saveProjectConfiguration(input: ProjectConfigSave, forced: ForcedOutcome | null): ProjectConfigSaveOutcome {
@@ -597,7 +607,7 @@ export class FixtureModel {
 export const scenarioNames = [
   "journey-request", "journey-following", "journey-catching-up", "journey-paused", "journey-proposal", "journey-agreed", "journey-working", "journey-attention", "journey-revised", "journey-reagreed", "journey-verified",
   "journey-nested", "journey-nested-attention", "journey-completed", "journey-stale", "journey-retained",
-  "partial-inventory", "large-interface", "baseline", "session-expiry-next-call", "signout-other-tab", "mutation-never-answered", "mutation-dropped",
+  "orphaned-worktrees", "partial-inventory", "large-interface", "baseline", "session-expiry-next-call", "signout-other-tab", "mutation-never-answered", "mutation-dropped",
   "save-401", "save-403", "save-409", "save-413", "editor-conflict", "editor-uncertain", "slow-reads", "setup-race", "reload",
 ] as const;
 export type ScenarioName = typeof scenarioNames[number];
@@ -620,6 +630,7 @@ const setupPath = "/api/guidance/supervision-setup";
 const plan = (arms: Arm[], revokeSessions = false): ScenarioPlan => ({arms, revokeSessions});
 
 export const scenarioCatalog: Record<ScenarioName, {description: string; plan: (params: ScenarioParams) => ScenarioPlan}> = {
+  "orphaned-worktrees": {description: "Missing working folder and a separate trunk checkout.", plan: () => ({arms: [], revokeSessions: false})},
   "partial-inventory": {description: "independently readable project folder with one unavailable conversation binding", plan: () => plan([])},
   "large-interface": {description: "synthetic 149-conversation collection, 45 additional full duties and distinct/shared working folders", plan: () => plan([])},
   "journey-request": {description: "reconstructed packing example: the request is being interpreted", plan: () => plan([])},

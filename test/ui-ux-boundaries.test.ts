@@ -4,8 +4,9 @@ import {createElement} from "react";
 import {renderToStaticMarkup} from "react-dom/server";
 import {Effect} from "effect";
 import {AtomRegistry} from "effect/reactivity";
+import {ProjectFileError} from "../src/project-files.js";
 import {ProjectDefinitions} from "../src/project-definitions.js";
-import {branchLabel, CheckoutChooser} from "../ui/src/checkout-identity.js";
+import {branchLabel, CheckoutChooser, orphanedConversations} from "../ui/src/checkout-identity.js";
 import {HelpDisclosure, EntityDetails} from "../ui/src/disclosure.js";
 import {DefinitionsContent} from "../ui/src/project-definitions.js";
 import {configurationDrafts, configurationScope} from "../ui/src/project-configuration-editor.js";
@@ -26,14 +27,14 @@ it.effect("checkout inventory groups normalized folders, preserves every working
   assert.deepEqual(targets.find(target => target.workspaceRoot === f.root)!.members.map(member => member.threadId), ["chat-0", "chat-1", "chat-2"]);
   assert.equal(targets.find(target => target.workspaceRoot === "/worktrees/feature")!.members.length, 2);
   assert.equal(targets.find(target => target.workspaceRoot === "/worktrees/no-branch")!.branch, null);
-  assert.equal(branchLabel({...targets.find(target => target.workspaceRoot.endsWith("no-branch"))!, vcsAvailable: true}), "Git repository · no branch name reported");
+  assert.equal(branchLabel({...targets.find(target => target.workspaceRoot.endsWith("no-branch"))!, vcsAvailable: true}), "Git branch undetected");
 }));
 
 it("working-folder failures are explicit and never fall back to a chat-title chooser", () => {
-  const html = renderToStaticMarkup(createElement(CheckoutChooser, {inventory: {projectId: "p", available: false, complete: false, issues: [], reason: "workspace_binding_unavailable", targets: []}, selected: null, disabled: false, onRefresh: () => {}, onSelect: () => {}}));
+  const html = renderToStaticMarkup(createElement(CheckoutChooser, {inventory: {projectId: "p", available: false, complete: false, defaultBranch: null, issues: [], reason: "workspace_binding_unavailable", targets: []}, selected: null, disabled: false, onRefresh: () => {}, onSelect: () => {}}));
   assert.match(html, /workspace_binding_unavailable/);
   assert.doesNotMatch(html, /checkout-target|branch-looking-title/);
-  assert.equal(branchLabel({branch: null, isGitRepository: false, vcsAvailable: true}), "Not a Git repository");
+  assert.equal(branchLabel({branch: null, isGitRepository: false, vcsAvailable: true}), "Git branch undetected");
 });
 
 it("catalog bounds a long collection and exposes full template duties only in the selected detail", () => {
@@ -95,4 +96,48 @@ it.effect("read-only inventory retains an independent root when a conversation b
   const strict = yield* Effect.flip(definitions.checkoutTargets(f.projectId));
   assert.equal(strict._tag, "DefinitionCheckoutUnavailable");
   assert.equal(yield* definitions.currentWorkspace(f.projectId, "thread"), null, "missing conversation binding must never substitute the root");
+}));
+
+
+it.effect("missing worktrees orphan only their retained chats; denied access never does, and no Git facts are read for missing paths", () => Effect.gen(function*() {
+  const f = makeDefinitionFixture();
+  const gitReads: string[] = [];
+  const definitions = yield* f.makeDefinitions({files: {...f.projectFiles,
+    directoryExists: root => root === f.threadRoot ? Effect.succeed(false) : f.projectFiles.directoryExists(root),
+    vcsInfo: root => Effect.sync(() => {gitReads.push(root);return {isRepo: true, branch: "feature"};})}});
+  const inventory = yield* definitions.checkoutInventory(f.projectId);
+  const missing = inventory.targets.find(target => target.workspaceRoot === f.threadRoot)!;
+  assert.equal(missing.presence, "missing"); assert.equal(missing.branch, null); assert.equal(missing.vcsAvailable, false);
+  assert.ok(!gitReads.includes(f.threadRoot!));
+  assert.equal(orphanedConversations(inventory).get("thread"), f.threadRoot);
+  const html = renderToStaticMarkup(createElement(CheckoutChooser, {inventory, selected: null, disabled: false, onRefresh: () => {}, onSelect: () => {}}));
+  assert.match(html, /Folder missing/); assert.match(html, /Orphaned chats/);
+  assert.doesNotMatch(html, /Not a Git repository/);
+  const denied = yield* f.makeDefinitions({files: {...f.projectFiles, directoryExists: root => root === f.threadRoot ? Effect.fail(new ProjectFileError("permission_required")) : f.projectFiles.directoryExists(root)}});
+  const unreadable = yield* denied.checkoutInventory(f.projectId);
+  assert.equal(unreadable.targets.find(target => target.workspaceRoot === f.threadRoot)!.presence, "unavailable");
+  assert.equal(orphanedConversations(unreadable).size, 0); assert.equal(unreadable.complete, false);
+}));
+
+it.effect("the project folder and Git-reported trunk checkout are distinct, deduplicated and independently readable without a conversation binding", () => Effect.gen(function*() {
+  const f = makeDefinitionFixture(); const trunk = "/worktrees/trunk";
+  f.writeIndex(trunk);
+  const definitions = yield* f.makeDefinitions({files: {...f.projectFiles, vcsInfo: root => Effect.succeed({isRepo: true, branch: root === trunk ? "trunk" : "release",
+    refs: [{name: "trunk", current: false, isDefault: true, worktreePath: trunk}, {name: "release", current: true, isDefault: false, worktreePath: f.root}]})}});
+  const inventory = yield* definitions.checkoutInventory(f.projectId);
+  assert.equal(inventory.defaultBranch, "trunk");
+  assert.equal(inventory.targets.filter(target => target.isProjectFolder).length, 1);
+  assert.equal(inventory.targets.find(target => target.isProjectFolder)!.branch, "release");
+  assert.equal(inventory.targets.filter(target => target.isDefaultBranch).length, 1);
+  assert.equal(inventory.targets.find(target => target.isDefaultBranch)!.workspaceRoot, trunk);
+  assert.equal((yield* definitions.load(f.projectId, null, undefined, trunk)).workspaceRoot, trunk);
+  const invalid = yield* definitions.load(f.projectId, null, undefined, "/unregistered-path");
+  assert.equal(invalid.status, "unavailable"); assert.equal(invalid.workspaceRoot, "");
+  const combined = yield* f.makeDefinitions({files: {...f.projectFiles, vcsInfo: root => Effect.succeed({isRepo: true, branch: root === f.root ? "trunk" : "feature",
+    refs: [{name: "trunk", current: true, isDefault: true, worktreePath: f.root}]})}});
+  const same = yield* combined.checkoutInventory(f.projectId);
+  assert.equal(same.targets.filter(target => target.isProjectFolder || target.isDefaultBranch).length, 1);
+  const html = renderToStaticMarkup(createElement(CheckoutChooser, {inventory: same, selected: null, disabled: false, onRefresh: () => {}, onSelect: () => {}}));
+  assert.equal((html.match(/checkout-prominent/g) ?? []).length, 1);
+  assert.match(html, /Project folder/); assert.match(html, /Default branch trunk/);
 }));

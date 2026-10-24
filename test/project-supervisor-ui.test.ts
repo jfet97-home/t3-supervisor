@@ -45,6 +45,16 @@ const input: ProjectSupervisorSaveInput = {projectId: "project", mainThreadId: "
 const monitoring = {intervalMinutes: "5", activityThreshold: "10"};
 const teamSettings = {maxHelpersPerRoot: String(defaultSupervisorTeamSettings.maxHelpersPerRoot)};
 const viewDefaults = {teamSettings, onTeamSettingsChange: () => {}};
+const assertAgentCreatedCheckbox = (html: string, checked: boolean) => {
+  const checkbox = html.match(/<input\b[^>]*\bid="supervisor-agent-created-threads"[^>]*>/)?.[0];
+  assert.ok(checkbox, "the agent-created supervision setting is present");
+  assert.match(checkbox, /\btype="checkbox"/);
+  assert.match(checkbox, /\bname="superviseAgentCreatedThreads"/);
+  assert.equal(/\schecked(?:\s|=|\/?>)/.test(checkbox), checked, "the checkbox reflects the supplied setting");
+  assert.match(checkbox, /\baria-describedby="supervisor-agent-created-help"/);
+  assert.match(html, /<label\b[^>]*\bfor="supervisor-agent-created-threads"[^>]*>[\s\S]*?<span>Supervise conversations created by agents<\/span><\/label>/);
+  assert.match(html, /<p\b[^>]*\bid="supervisor-agent-created-help"[^>]*>Off by default:/);
+};
 const plan: WorkflowPlanGroupInfo = {
   kind: "sequence", templatePath: "delivery.yaml/sequence", nodes: [
     {kind: "step", nodeId: "step-inspect", definitionId: "inspect-source", localId: null, templatePath: "delivery.yaml/sequence/0", name: "Inspect source", description: "Read the affected code.", source: {origin: "project", path: ".t3-supervisor/steps/inspect-source.md", sourceId: "inspect-source"}, resolution: "resolved", reason: "The task changes project code.", status: "planned", contributorThreadIds: ["child-one"]},
@@ -326,9 +336,9 @@ it("Project settings offers agent-created supervision as an unchecked checkbox t
   const off = render(false);
   assert.match(off, /<legend>Which conversations are supervised<\/legend>/);
   assert.ok(off.indexOf("superviseAgentCreatedThreads") < off.indexOf("Defaults for new Supervisors"), "eligibility comes before the defaults for new Supervisors");
-  assert.match(off, /<input id="supervisor-agent-created-threads" type="checkbox" name="superviseAgentCreatedThreads"\/>/);
+  assertAgentCreatedCheckbox(off, false);
   assert.match(off, /Start, Stop and definition approval still need a person/);
-  assert.match(render(true), /name="superviseAgentCreatedThreads" checked=""\/>/);
+  assertAgentCreatedCheckbox(render(true), true);
 
   assert.equal(mergeLoadedDraft(null, "project", snapshot).draft.agentThreadsValue, false, "a snapshot without the field reads as off");
   const enabled = {...snapshot, settings: {...snapshot.settings, superviseAgentCreatedThreads: true}};
@@ -357,7 +367,7 @@ it("No Project settings describe eligibility by the No Project mode, while proje
     assert.match(html, sentence);
     assert.doesNotMatch(html, /project switch|in this project/, `${mode}: no project switch or project scope is implied`);
     assert.match(html, /the agent that launched an ordinary conversation outside a project are interpreted[\s\S]*The No Project mode still decides which chats are supervised\./);
-    assert.match(html, /<input id="supervisor-agent-created-threads" type="checkbox" name="superviseAgentCreatedThreads"\/>/, "the setting stays an unchecked, default-off checkbox");
+    assertAgentCreatedCheckbox(html, false);
   }
 });
 

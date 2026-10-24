@@ -770,18 +770,17 @@ export function ProjectSupervisorView({
     </div>
 
     {section === "settings" && <Freshness readAt={readAt} refreshing={refreshing} connected={connected} onRefresh={onRefresh}/>}
-    <form hidden={section !== "all" && section !== "settings"} className="panel stack" onSubmit={onSubmit} aria-label="Supervisor settings">
-      <fieldset disabled={fieldsDisabled} className="stack">
-        <legend>Which conversations are supervised</legend>
+    <form hidden={section !== "all" && section !== "settings"} className="supervisor-settings-form" onSubmit={onSubmit} aria-label="Supervisor settings">
+      <div className="panel settings-card"><fieldset disabled={fieldsDisabled} className="settings-section">
+        <legend>Which conversations are supervised</legend><div className="settings-fields">
         <p className="muted">{snapshot.noProjectMode ? noProjectEligibility[snapshot.noProjectMode] : "People’s requests in this project’s main conversations are supervised while the project switch above is on."}</p>
-        <label className="toggle" htmlFor="supervisor-agent-created-threads"><input id="supervisor-agent-created-threads" name="superviseAgentCreatedThreads" type="checkbox"
+        <div className="field-group"><label className="toggle" htmlFor="supervisor-agent-created-threads"><input id="supervisor-agent-created-threads" name="superviseAgentCreatedThreads" type="checkbox" aria-describedby="supervisor-agent-created-help"
           checked={agentThreads} onChange={event => onAgentThreadsChange(event.target.checked)} />
-          <span>Supervise conversations created by agents<small>Off by default: agent-created conversations stay excluded even after later human messages. When on, genuine human requests and requests written afterwards by the agent that launched an ordinary conversation {snapshot.noProjectMode ? "outside a project" : "in this project"} are interpreted and negotiated like a person’s task, and remain attributed to that agent. Earlier requests, other agents, Supervisor conversations, helpers and delegated child tasks are never supervised this way. Start, Stop and definition approval still need a person.{snapshot.noProjectMode && " The No Project mode still decides which chats are supervised."}</small></span>
-        </label>
-      </fieldset>
-      <h3 className="form-section-title">Defaults for new Supervisors</h3>
-      <fieldset disabled={fieldsDisabled} className="stack">
-        <legend>Model</legend>
+          <span>Supervise conversations created by agents</span></label><p className="small muted" id="supervisor-agent-created-help">Off by default: agent-created conversations stay excluded even after later human messages. When on, genuine human requests and requests written afterwards by the agent that launched an ordinary conversation {snapshot.noProjectMode ? "outside a project" : "in this project"} are interpreted and negotiated like a person’s task, and remain attributed to that agent. Earlier requests, other agents, Supervisor conversations, helpers and delegated child tasks are never supervised this way. Start, Stop and definition approval still need a person.{snapshot.noProjectMode && " The No Project mode still decides which chats are supervised."}</p></div>
+      </div></fieldset></div>
+      <section className="panel settings-card settings-defaults"><h3>Defaults for new Supervisors</h3>
+      <fieldset disabled={fieldsDisabled} className="settings-section">
+        <legend>Model and reasoning</legend><div className="settings-fields"><div className="field-group">
         <label htmlFor="supervisor-model">Supervisor model</label>
         <select id="supervisor-model" name="model" value={selectedModelKey(selection)} disabled={!modelCanChange} onChange={event => {
             const next = parseModelKey(event.target.value);
@@ -795,7 +794,7 @@ export function ProjectSupervisorView({
               </option>)}
             </optgroup>)}
         </select>
-        {reasoning && reasoning.choices.length > 0 && <>
+        </div>{reasoning && reasoning.choices.length > 0 && <div className="field-group">
           <label htmlFor="supervisor-reasoning">{reasoning.label}</label>
           <select id="supervisor-reasoning" name="reasoning" value={encodeChoice(reasoningValue!)} disabled={!reasoningCanChange} onChange={event => {
             const value = parseChoice(event.target.value);
@@ -804,12 +803,12 @@ export function ProjectSupervisorView({
             {!reasoningIsAdvertised && <option value={encodeChoice(reasoningValue!)} disabled>Stored value: {String(reasoningValue)}</option>}
             {reasoning.choices.map(choice => <option key={encodeChoice(choice.value)} value={encodeChoice(choice.value)}>{choice.label}</option>)}
           </select>
-        </>}
+        </div>}</div>
       </fieldset>
-      <fieldset disabled={fieldsDisabled} className="stack">
-        <legend>Ongoing monitoring</legend>
+      <fieldset disabled={fieldsDisabled} className="settings-section">
+        <legend>Ongoing monitoring</legend><div className="settings-fields">
         <p className="muted">Monitoring wakes each main conversation’s own Supervisor chat when pending activity reaches its maximum age or the finalized activity threshold. Defaults apply to new task workflows; existing objective-only tasks are not reprocessed.</p>
-        <div className="stack">
+        <div className="field-group">
           <label htmlFor="supervisor-monitoring-interval">Maximum pending activity age (minutes)</label>
           <input id="supervisor-monitoring-interval" name="intervalMinutes" type="number" min={monitoringIntervalMinutes.min} max={monitoringIntervalMinutes.max} step={1} required
             value={monitoring.intervalMinutes} aria-invalid={intervalError ? true : undefined}
@@ -818,7 +817,7 @@ export function ProjectSupervisorView({
           <span id="supervisor-monitoring-interval-help" className="small muted">Enter 1 or 2 minutes; 2 is the default and the upper bound. A check-in also waits for the cooldown and any check-in still in flight.</span>
           <span id="supervisor-monitoring-interval-error" className="small" aria-live="polite">{intervalError}</span>
         </div>
-        <div className="stack">
+        <div className="field-group">
           <label htmlFor="supervisor-monitoring-threshold">Finalized activities per operative chat</label>
           <input id="supervisor-monitoring-threshold" name="activityThreshold" type="number" min={3} max={100} step={1} required
             value={monitoring.activityThreshold} aria-invalid={thresholdError ? true : undefined}
@@ -827,22 +826,21 @@ export function ProjectSupervisorView({
           <span id="supervisor-monitoring-threshold-help" className="small muted">Enter a whole number from 3 to 100 finalized activities.</span>
           <span id="supervisor-monitoring-threshold-error" className="small" aria-live="polite">{thresholdError}</span>
         </div>
-        <p><strong>Supervisor cooldown:</strong> 30 seconds between monitoring sends.</p>
-        <p><strong>Model review limit:</strong> one in-flight review per Supervisor.</p>
+        <HelpDisclosure title="Fixed monitoring limits"><p><strong>Supervisor cooldown:</strong> 30 seconds between monitoring sends.</p><p><strong>Model review limit:</strong> one in-flight review per Supervisor.</p></HelpDisclosure></div>
       </fieldset>
-      <fieldset disabled={fieldsDisabled} className="stack">
-        <legend>Supervisor team</legend>
+      <fieldset disabled={fieldsDisabled} className="settings-section">
+        <legend>Supervisor team</legend><div className="settings-fields">
         <p className="muted">Set the maximum number of helpers the root may recruit. The limit applies to new recruitment; existing helpers remain when the value is 0 or the limit is lowered.</p>
-        <label htmlFor="supervisor-team-max-helpers">Maximum helpers per root</label>
+        <div className="field-group"><label htmlFor="supervisor-team-max-helpers">Maximum helpers per root</label>
         <input id="supervisor-team-max-helpers" name="maxHelpersPerRoot" type="number" min={0} max={20} step={1} required
           value={teamSettings.maxHelpersPerRoot} aria-invalid={teamSettingsError ? true : undefined}
           aria-describedby="supervisor-team-max-helpers-help supervisor-team-max-helpers-error"
           onChange={event => onTeamSettingsChange({...teamSettings, maxHelpersPerRoot: event.target.value})} />
         <span id="supervisor-team-max-helpers-help" className="small muted">Enter a whole number from 0 to 20. The default is 5; 0 disables new recruitment.</span>
-        <span id="supervisor-team-max-helpers-error" className="small" aria-live="polite">{teamSettingsError}</span>
+        <span id="supervisor-team-max-helpers-error" className="small" aria-live="polite">{teamSettingsError}</span></div></div>
       </fieldset>
 
-      <div className="save-bar">{dirty && <span>Unsaved Supervisor settings</span>}<button className="primary" type="submit" disabled={!canSave || saving || blocked}>{saving ? "Saving…" : "Save Supervisor settings"}</button>
+      </section><div className="save-bar">{dirty && <span>Unsaved Supervisor settings</span>}<button className="primary" type="submit" disabled={!canSave || saving || blocked}>{saving ? "Saving…" : "Save Supervisor settings"}</button>
       {dirty && <button type="button" disabled={saving || blocked} onClick={onDiscard}>Discard draft</button>}</div>
     </form>
 

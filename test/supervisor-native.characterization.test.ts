@@ -256,15 +256,15 @@ it.live("CT-WSFRAME-01: project-files sends exact Request frames, answers Ping, 
   ]);
 
   const vcs = yield* startPeer((socket, frame) => {
-    if (frame._tag === "Request" && frame.tag === "vcs.listRefs") socket.send(exitFrame("definitions", { _tag: "Success", value: { isRepo: true, refs: [{ current: true, name: "main" }] } }));
+    if (frame._tag === "Request" && frame.tag === "vcs.listRefs") socket.send(exitFrame("definitions", { _tag: "Success", value: { isRepo: true, refs: [{ current: true, name: "main", isDefault: true, worktreePath: "/work" }] } }));
     else if (frame._tag === "Request" && frame.tag === "subscribeVcsStatus") socket.send(JSON.stringify({ _tag: "Chunk", requestId: "definition-vcs-snapshot",
       values: [{ _tag: "snapshot", local: { isRepo: true, workingTree: { files: [{ path: "README.md" }] } } }] }));
   });
   const files = yield* projectFiles(vcs.url, "frame-token");
   assert.ok(files.vcsInfo);
-  assert.deepEqual(yield* files.vcsInfo("/work"), { isRepo: true, branch: "main", changedPaths: ["README.md"] });
+  assert.deepEqual(yield* files.vcsInfo("/work"), { isRepo: true, branch: "main", refs: [{ current: true, name: "main", isDefault: true, worktreePath: "/work" }], changedPaths: ["README.md"] });
   assert.deepEqual(raw(vcs), [
-    '{"_tag":"Request","id":"definitions","tag":"vcs.listRefs","payload":{"cwd":"/work","refKind":"local","limit":200},"headers":[]}',
+    '{"_tag":"Request","id":"definitions","tag":"vcs.listRefs","payload":{"cwd":"/work","refKind":"all","limit":200},"headers":[]}',
     '{"_tag":"Request","id":"definition-vcs-snapshot","tag":"subscribeVcsStatus","payload":{"cwd":"/work","includeRemote":false},"headers":[]}',
   ]);
 }), { timeout: 10_000 });

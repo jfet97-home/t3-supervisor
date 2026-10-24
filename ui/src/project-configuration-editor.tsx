@@ -145,14 +145,20 @@ export function ProjectCatalogFields({kind, config, definitions, disabled, onCha
   </fieldset>;
 }
 
-export function ProjectConfigurationEditor({definitions, onSaved, onDirtyChange, onSavingChange}: {
+export function ProjectConfigurationEditor({definitions, onSaved, onDirtyChange, onSavingChange, editingRequested = false}: {
   definitions: ProjectDefinitionSnapshot;
+  editingRequested?: boolean;
   onSaved: (result: ProjectDefinitionSnapshot) => void;
   onDirtyChange: (dirty: boolean) => void;
   onSavingChange: (saving: boolean) => void;
 }) {
   const scope = configurationScope(useAtomValue(environmentAtom), definitions);
   const [draft, setDraft] = useAtom(configurationDrafts(scope));
+  const requested = useRef(false);
+  useEffect(() => {
+    if (editingRequested && !requested.current) setDraft(current => ({...current, editing: true}));
+    requested.current = editingRequested;
+  }, [editingRequested, setDraft]);
   const attempt = saveProjectConfigurationAtom({scope, operationId: draft.operationId});
   const save = useAtomSet(attempt, {mode: "promiseExit"});
   const saving = AsyncResult.isWaiting(useAtomValue(attempt));
@@ -194,7 +200,7 @@ export function ProjectConfigurationEditor({definitions, onSaved, onDirtyChange,
 
   return <form className="panel stack project-configuration-editor" method="post" action="/api/guidance/project-configuration" noValidate aria-describedby={message ? messageId : undefined} onSubmit={async event => {
     event.preventDefault();
-    if (saving || blocked) return;
+    if (!dirty || saving || blocked) return;
     const plan = planSave(definitions, config, question => confirm(question));
     if (plan._tag === "Invalid") {setDraft(current => ({...current, message: plan.message, messageAlert: true}));error.current?.focus();return;}
     if (plan._tag === "Declined") return;
@@ -204,14 +210,14 @@ export function ProjectConfigurationEditor({definitions, onSaved, onDirtyChange,
     <div className="stack">
       <h3>{projectConfig ? "Edit project configuration" : "Repair project configuration"}</h3>
       <p className="definition-path">Target: <code>{definitions.workspaceRoot}/.t3-supervisor/project.yaml</code></p>
-      <p className="muted">Index every reusable file, including optional definitions. Required flags apply to this checkout; enabled global requirements remain separate and read-only. Full definition files hold policy.</p>
+      <p className="muted">Edit this folder’s existing index. Every conversation working in this folder reads the same project.yaml. Full step and workflow files remain read-only here.</p>
       {!projectConfig && <><p className="panel" role="note">The current file could not be parsed. This replacement starts with empty workflows and steps lists; its original requirements remain unknown. Review the source before saving.</p>{unreadableSource}</>}
     </div>
     <ProjectCatalogFields kind="workflows" config={config} definitions={definitions} disabled={saving || blocked} onChange={update}/>
     <ProjectCatalogFields kind="steps" config={config} definitions={definitions} disabled={saving || blocked} onChange={update}/>
     <fieldset disabled={saving || blocked} className="stack">
       <legend>Default workflow</legend>
-      <label htmlFor="project-config-default-workflow">Starting workflow suggestion</label>
+      <div className="field-group"><label htmlFor="project-config-default-workflow">Starting workflow suggestion</label>
       <select id="project-config-default-workflow" value={config.default_workflow ?? ""} aria-describedby="project-config-default-help" onChange={event => {
         const index = {workflows: config.workflows, steps: config.steps};
         update(event.target.value ? {...index, default_workflow: event.target.value} : index);
@@ -220,12 +226,12 @@ export function ProjectConfigurationEditor({definitions, onSaved, onDirtyChange,
         {config.default_workflow && !workflowIds.includes(config.default_workflow) && <option value={config.default_workflow}>{config.default_workflow} · missing from index</option>}
         {workflowIds.map(id => <option key={id} value={id}>{id}</option>)}
       </select>
-      <p id="project-config-default-help" className="muted">Choose an indexed workflow in this checkout. Task plans can use other workflows, new combinations and local steps while preserving required and fixed commitments.</p>
+      <p id="project-config-default-help" className="muted">Choose an indexed workflow in this checkout. Task plans can use other workflows, new combinations and local steps while preserving required and fixed commitments.</p></div>
     </fieldset>
     <p id={messageId} ref={error} tabIndex={-1} role={messageAlert ? "alert" : "status"}>{message}</p>
     {blocked && <p>Your draft is kept. Refresh project definitions and inspect project.yaml before trying again.</p>}
     <div className="row editor-save-bar">
-      <button className="primary" type="submit" disabled={saving || blocked}>{saving ? "Saving…" : "Save project configuration"}</button>
+      <button className="primary" type="submit" disabled={!dirty || saving || blocked}>{saving ? "Saving…" : "Save project configuration"}</button>
       <button type="button" disabled={saving} onClick={() => {
         if (dirty && !confirm("Discard unsaved project configuration changes?")) return;
         setDraft(freshDraft());onDirtyChange(false);

@@ -49,7 +49,7 @@ export const answeredDefinitions = (load: (projectId: string, threadId: string |
     globalDefinitionsPath: "~/.t3-supervisor",
     load: (projectId, threadId = null) => load(projectId, threadId),
     globalFingerprint: () => Effect.succeed(null),
-    presence: unused, presenceGlobal: unused, presenceForCheckout: unused, checkoutInventory: (projectId: string) => Effect.succeed({projectId, available: true, complete: true, reason: null, issues: [], targets: []}),
+    presence: unused, presenceGlobal: unused, presenceForCheckout: unused, checkoutInventory: (projectId: string) => Effect.succeed({projectId, available: true, complete: true, reason: null, defaultBranch: null, issues: [], targets: []}),
     checkoutTargets: unused, currentWorkspace: unused,
     initialize: unused, initializeGlobal: unused, readProjectConfig: unused,
   });
