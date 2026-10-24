@@ -1,3 +1,4 @@
+import { DashboardUpdates } from "../../src/dashboard-updates.js";
 import { request as httpRequest } from "node:http";
 import { join } from "node:path";
 import { NodeCrypto, NodeFileSystem } from "@effect/platform-node";
@@ -168,7 +169,7 @@ export const intEndpoint = (run: IntRun): Effect.Effect<IntEndpoint, never, Scop
   const ui = yield* Layer.build(GuidanceUi.layer(run.config, {supervision: {supervisor: run.supervisor, control: run.control}, workflowReader: run.writes}).pipe(
     Layer.provide(Layer.mergeAll(ServiceAuth.layer(run.directory), Layer.succeed(GuidanceRuntime, runtime), WorkflowMcp.layer)),
     Layer.provide(Layer.succeedContext(run.context)),
-    Layer.provide(Layer.mergeAll(NodeFileSystem.layer, NodeCrypto.layer)))).pipe(Effect.orDie);
+    Layer.provide(Layer.mergeAll(NodeFileSystem.layer, NodeCrypto.layer, DashboardUpdates.layer)))).pipe(Effect.orDie);
   const token = yield* Effect.flatMap(FileSystem.FileSystem, (fs) => fs.readFileString(join(run.directory, "access", "workflow-mcp-token"))).pipe(
     Effect.provide(NodeFileSystem.layer), Effect.orDie);
   return {port: Context.get(ui, GuidanceUi).port, token};

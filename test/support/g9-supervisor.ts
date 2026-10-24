@@ -1,3 +1,4 @@
+import { DashboardUpdates } from "../../src/dashboard-updates.js";
 import { NodeFileSystem } from "@effect/platform-node";
 import { Clock, Console, Effect, Layer, SubscriptionRef } from "effect";
 import { SupervisorConfig as Configuration } from "../../src/config.js";
@@ -20,7 +21,7 @@ export const rootServices = (settings: SupervisorSettings, status: SubscriptionR
     makeStore(settings.dataDirectory), Layer.succeed(T3Client, client), Layer.succeed(SupervisorStatusRef, status),
     ThreadPolicyStore.layer.pipe(Layer.provide(policyDbLayer(settings.dataDirectory)), Layer.provide(NodeFileSystem.layer)),
     SupervisorOwnership.layer, NativeTransportLive, NodeFileSystem.layer,
-  ).pipe(Layer.provideMerge(Layer.succeed(Configuration, settings)));
+  ).pipe(Layer.provideMerge(DashboardUpdates.layer), Layer.provideMerge(Layer.succeed(Configuration, settings)));
 
 /** A view whose fields read the status ref's current value, so assertions read it as they read the baseline status object. */
 export const statusView = (ref: SubscriptionRef.SubscriptionRef<SupervisorStatus>): SupervisorStatus =>

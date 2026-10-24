@@ -1,3 +1,5 @@
+import { dashboardInvalidation } from "./dashboard-updates.js";
+import { projectKeys } from "./dashboard-events.js";
 import { createHash } from "node:crypto";
 import { Clock, Context, Effect, Layer, Schema } from "effect";
 import type { SqlError } from "effect/sql";
@@ -100,6 +102,7 @@ const budgetDay = (now: number): string => new Date(now).toISOString().slice(0, 
 
 const makeGuidanceStore = Effect.gen(function* () {
   const db = yield* GuidanceDb;
+  const invalidate = yield* dashboardInvalidation(db);
   const ids = yield* SupervisorIds;
   const conflict = (message: string) => Effect.fail(new GuidanceConflictError({ message }));
 
@@ -167,6 +170,7 @@ const makeGuidanceStore = Effect.gen(function* () {
         const now = yield* Clock.currentTimeMillis;
         for (const current of yield* readRules) yield* db`UPDATE rules SET document=${JSON.stringify({ ...current, liveSince: now })} WHERE id=${current.id}`;
       }
+      yield* invalidate(null, old, next);
       return next;
     }));
   }));
@@ -183,6 +187,7 @@ const makeGuidanceStore = Effect.gen(function* () {
     if (current.generation !== generation) return yield* conflict("Settings changed. Reload first.");
     yield* db`INSERT INTO classifications VALUES(${id},${value}) ON CONFLICT(project_id) DO UPDATE SET classification=excluded.classification`;
     yield* db`UPDATE meta SET value=${JSON.stringify({ ...current, generation: generation + 1 })} WHERE key='settings'`;
+    yield* invalidate(projectKeys(id));
   })));
 
   // CC-GDB-IMPLICIT: the read and the upsert commit together
@@ -198,7 +203,7 @@ const makeGuidanceStore = Effect.gen(function* () {
 
   const used = (now?: number) => guidanceSql(Effect.flatMap(nowOr(now), readUsed));
 
-  const record = (value: RecordInput, now?: number) => guidanceSql(Effect.flatMap(nowOr(now), (at) => writeActivity(value, at)));
+  const record = (value: RecordInput, now?: number) => guidanceSql(Effect.flatMap(nowOr(now), (at) => writeActivity(value, at).pipe(Effect.tap(() => invalidate(["snapshot"])))));
 
   // two reads of one snapshot
   const activities = () => guidanceSql(db.withTransaction(Effect.gen(function* () {
@@ -225,9 +230,13 @@ const makeGuidanceStore = Effect.gen(function* () {
     for (const raw of yield* db`SELECT id,document FROM activity WHERE created_at<${evidenceCutoff}`) {
       const row = yield* decodeActivityRow(raw);
       const activity = yield* decodeActivityDocument(row.document);
-      if (activity.detail !== null) yield* db`UPDATE activity SET document=${JSON.stringify({ ...activity, detail: null })} WHERE id=${row.id}`;
+      if (activity.detail !== null) {
+        yield* db`UPDATE activity SET document=${JSON.stringify({ ...activity, detail: null })} WHERE id=${row.id}`;
+        yield* invalidate(["snapshot"]);
+      }
     }
-    yield* db`DELETE FROM activity WHERE created_at<${at - 30 * 86400_000}`;
+    const removed = yield* db`DELETE FROM activity WHERE created_at<${at - 30 * 86400_000} RETURNING id`;
+    if (removed.length > 0) yield* invalidate(["snapshot"]);
     yield* db`DELETE FROM budget WHERE day<${budgetDay(at - 7 * 86400_000)}`;
   }))));
 
@@ -238,6 +247,7 @@ const makeGuidanceStore = Effect.gen(function* () {
     if (raw === undefined) return;
     const row = yield* decodeNoticeKeyRow(raw);
     yield* db`UPDATE notices SET state='visible' WHERE id=${id}`;
+    yield* invalidate(["snapshot"]);
     yield* db`UPDATE episodes SET notified=1 WHERE thread_id=${row.thread_id} AND rule_id=${row.rule_id} AND epoch=${row.epoch}`;
   })));
 

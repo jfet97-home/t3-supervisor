@@ -1,3 +1,5 @@
+import { dashboardInvalidation } from "./dashboard-updates.js";
+import { projectKeys } from "./dashboard-events.js";
 import { Clock, Context, Data, Effect, Layer, Schema } from "effect";
 import type { SqlError } from "effect/sql";
 import { GuidanceDb, untracedSql } from "./db.js";
@@ -238,6 +240,7 @@ export const makeProjectSupervisorMonitorStore = (maxItemsPerThread = SUPERVISOR
   if (!Number.isSafeInteger(maxItemsPerThread) || maxItemsPerThread < 1 || maxItemsPerThread > SUPERVISOR_MONITOR_MAX_ITEMS_PER_THREAD)
     return yield* new InvalidMonitorCapacity();
   const db = yield* GuidanceDb;
+  const invalidate = yield* dashboardInvalidation(db);
 
   yield* guidanceSql(db.withTransaction(Effect.gen(function* () {
     for (const statement of monitorSchema) yield* db.unsafe(statement);
@@ -328,6 +331,7 @@ export const makeProjectSupervisorMonitorStore = (maxItemsPerThread = SUPERVISOR
     if (!Number.isFinite(now)) return yield* new InvalidMonitorObservation({ reason: "invalid_monitor_time" });
 
     return yield* db.withTransaction(Effect.gen(function* () {
+      const previous = yield* readState(input.projectId, input.threadId);
       yield* db`INSERT INTO supervisor_monitor_threads(project_id,thread_id,source_ordinal,activation_ordinal)
           VALUES(${input.projectId},${input.threadId},${input.sourceOrdinal},${input.sourceOrdinal}) ON CONFLICT(project_id,thread_id) DO UPDATE SET
           source_ordinal=MAX(source_ordinal,excluded.source_ordinal),
@@ -414,6 +418,8 @@ export const makeProjectSupervisorMonitorStore = (maxItemsPerThread = SUPERVISOR
 
       const pendingItems = yield* readPending(input.projectId, input.threadId);
       const state = (yield* threadRow(input.projectId, input.threadId))!;
+      yield* invalidate(projectKeys(input.projectId), {activities: previous.activities.filter(isReviewable), saturated: previous.saturated, untrackedCount: previous.untrackedCount},
+        {activities: pendingItems, saturated: state.saturated === 1, untrackedCount});
       return {
         projectId: input.projectId,
         threadId: input.threadId,
@@ -540,12 +546,15 @@ export const makeProjectSupervisorMonitorStore = (maxItemsPerThread = SUPERVISOR
     return yield* db.withTransaction(Effect.gen(function* () {
       let acknowledged = 0;
       let stale = 0;
+      let changed = false;
       for (const thread of batch.threads) {
+        const previous = yield* readState(batch.projectId, thread.threadId);
         let threadAcknowledged = 0;
         for (const item of thread.items) {
           const changes = yield* changedRows(db`UPDATE supervisor_monitor_items SET reviewed_version=version
             WHERE project_id=${batch.projectId} AND thread_id=${thread.threadId} AND item_id=${item.id} AND version=${item.version} AND eligible=1 AND active=1`.raw);
           if (changes > 0) {
+            if (previous.activities.some(activity => activity.id === item.id && activity.version === item.version)) changed = true;
             acknowledged++;
             threadAcknowledged++;
           } else stale++;
@@ -554,6 +563,7 @@ export const makeProjectSupervisorMonitorStore = (maxItemsPerThread = SUPERVISOR
           yield* db`UPDATE supervisor_monitor_threads SET last_acknowledged_at=${at}
             WHERE project_id=${batch.projectId} AND thread_id=${thread.threadId}`;
       }
+      if (changed) yield* invalidate(projectKeys(batch.projectId));
       return { acknowledged, stale };
     }));
   }));

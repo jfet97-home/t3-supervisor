@@ -1,3 +1,5 @@
+import { dashboardInvalidation } from "./dashboard-updates.js";
+import { projectKeys } from "./dashboard-events.js";
 import { NodeFileSystem } from "@effect/platform-node";
 import { Context, Data, Effect, FileSystem, Layer, Predicate, Schema } from "effect";
 import { SqlClient, type SqlError } from "effect/sql";
@@ -201,6 +203,7 @@ const schema = [
 
 const make = Effect.gen(function* () {
   const sql = yield* CatalogDb;
+  const invalidate = yield* dashboardInvalidation(sql);
   const fs = yield* FileSystem.FileSystem;
   // the store reads its file from its own connection, so modes and sizes follow the database that is open
   const [{ file: databasePath }] = yield* sql`SELECT file FROM pragma_database_list WHERE name='main'`.pipe(
@@ -233,17 +236,19 @@ const make = Effect.gen(function* () {
 
   const storeProject = Effect.fnUntraced(function* (project: ProjectInfo) {
     const document = yield* serialize(project, maxStoredShellChars, "project shell");
+    const [previous] = yield* sql`SELECT document,deleted FROM projects WHERE id=${project.id}`;
     yield* sql`
       INSERT INTO projects(id, document, deleted) VALUES (${project.id}, ${document}, 0)
       ON CONFLICT(id) DO UPDATE SET document=excluded.document, deleted=0
     `;
+    yield* invalidate(projectKeys(project.id), previous?.deleted === 0 ? previous.document : null, project);
   });
 
   const storeThread = Effect.fnUntraced(function* (thread: ThreadInfo, location: "active" | "archive") {
     const safeThread = yield* whitelistThreadShell(thread);
     const document = yield* serialize(safeThread, maxStoredShellChars, "thread shell");
     const known = yield* count(sql`SELECT COUNT(*) AS count FROM threads`);
-    const existing = yield* sql`SELECT revision FROM threads WHERE id=${safeThread.id}`;
+    const existing = yield* sql`SELECT revision,document,location FROM threads WHERE id=${safeThread.id}`;
     if (existing.length === 0 && known >= maxKnownThreads) {
       return yield* fail("known thread capacity reached; refusing to lose archive lookup metadata");
     }
@@ -256,12 +261,15 @@ const make = Effect.gen(function* () {
         location=excluded.location,
         revision=excluded.revision
     `;
+    yield* invalidate(safeThread.projectId ? projectKeys(safeThread.projectId) : null,
+      {document: existing[0]?.document ?? null, location: existing[0]?.location ?? null}, {document, location});
   });
 
   const removeThread = Effect.fnUntraced(function* (threadId: unknown) {
     const id = yield* readString(threadId, "thread id");
     const revision = yield* nextRevision(id);
-    yield* sql`UPDATE threads SET location='removed', revision=${revision} WHERE id=${id}`;
+    const changed = yield* sql`UPDATE threads SET location='removed', revision=${revision} WHERE id=${id} AND location<>'removed' RETURNING id`;
+    if (changed.length > 0) yield* invalidate(null);
   });
 
   const reconcileThreads = Effect.fnUntraced(function* (stream: SourceItem["stream"], incoming: ReadonlyArray<unknown>) {
@@ -395,7 +403,8 @@ const make = Effect.gen(function* () {
         yield* storeProject(yield* readProject(item.project));
       } else if (kind === "project.removed") {
         const id = yield* readString(item.projectId, "project id");
-        yield* sql`UPDATE projects SET deleted=1 WHERE id=${id}`;
+        const changed = yield* sql`UPDATE projects SET deleted=1 WHERE id=${id} AND deleted=0 RETURNING id`;
+        if (changed.length > 0) yield* invalidate(projectKeys(id));
       } else if (kind === "synchronized" && sequence === null) {
         return;
       } else if (sequence !== null) {

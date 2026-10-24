@@ -27,7 +27,7 @@ import type {
 import type { WorkflowProgressContribution, WorkflowProgressCoverage, WorkflowProgressSnapshot, WorkflowProgressWorkflow } from "../../src/workflow-progress.js";
 import { defaultMonitoringSettings, defaultSupervisorTeamSettings, monitoringIntervalMinutes } from "../../src/project-supervisor-contract.js";
 import { loadProjectSupervisor, loadWorkflowProgress, type ProjectSupervisorRequestError, refreshWorkflowProgressPages, retryProjectSupervisor, saveProjectSupervisor, setChatSupervision } from "./project-supervisor-api.js";
-import { admit, admittedMutation, authEpochAtom, draftFamily, environmentAtom, pollWhileVisible, scopeKey, uiRuntime, type MutationKey, type MutationResult } from "./atoms.js";
+import { admit, admittedMutation, authEpochAtom, draftFamily, environmentAtom, refreshOnDashboardChange, scopeKey, uiRuntime, type MutationKey, type MutationResult } from "./atoms.js";
 import { idleControlActivity, SupervisionControlPanel, supervisionControlKey, supervisionSetupSelection } from "./supervisor-control.js";
 
 type MonitoringDraft = {
@@ -552,7 +552,7 @@ export function TaskWorkspace({snapshot, task, threadId, progress, connected, at
       <div className="task-reading">
         <span><strong>{alignmentLabel(task)}</strong></span>
         <span>{assessmentState}</span>
-        <span className="task-refresh">{readAt !== null && <span>Read {new Date(readAt).toLocaleTimeString()}</span>}<button type="button" className="quiet-button" disabled={!connected || refreshing} onClick={onRefresh}>{refreshing ? "Refreshing…" : "Refresh"}</button></span>
+        <span className="task-refresh">{readAt !== null && <span>Read {new Date(readAt).toLocaleTimeString()}</span>}<button type="button" className="quiet-button" aria-disabled={!connected || refreshing} onClick={() => {if (connected && !refreshing) onRefresh();}}>{refreshing ? "Refreshing…" : "Refresh"}</button></span>
       </div>
     </section>
     <ConversationUnderstanding draft={task?.conversation?.draft}/>
@@ -613,7 +613,7 @@ const noProjectEligibility = {
 /** The read time and the one refresh action of a Supervisor view. */
 function Freshness({readAt, refreshing, connected, onRefresh}: {readAt: number | null; refreshing: boolean; connected: boolean; onRefresh: () => void}) {
   return <div className="view-freshness small muted">{readAt !== null && <span>Read {new Date(readAt).toLocaleTimeString()}</span>}
-    <button type="button" className="quiet-button" disabled={!connected || refreshing} onClick={onRefresh}>{refreshing ? "Refreshing…" : "Refresh"}</button></div>;
+    <button type="button" className="quiet-button" aria-disabled={!connected || refreshing} onClick={() => {if (connected && !refreshing) onRefresh();}}>{refreshing ? "Refreshing…" : "Refresh"}</button></div>;
 }
 
 export function ProjectSupervisorView({
@@ -980,14 +980,15 @@ export const snapshotReadNeeded = (panel: {projectId: string; connected: boolean
   shown: boolean; completedKey: string | null; requestKey: string}) =>
   Boolean(panel.projectId) && panel.connected && !panel.saving && (panel.forceRefresh || !(panel.dirty && panel.shown)) && panel.completedKey !== panel.requestKey;
 
-/** The chat supervision poll of the selected chat, or null while a settings or chat change is in flight or T3 is disconnected. */
-export const chatPollScope = (view: ProjectSupervisorView, panel: {projectId: string; threadId: string | undefined; connected: boolean; epoch: number}) =>
+/** The chat supervision refresh of the selected chat, or null while a settings or chat change is in flight or T3 is disconnected. */
+export const chatRefreshScope = (view: ProjectSupervisorView, panel: {projectId: string; threadId: string | undefined; connected: boolean; epoch: number}) =>
   panel.connected && panel.threadId && !view.operation && !view.chat ? {projectId: panel.projectId, mainThreadId: panel.threadId, epoch: panel.epoch} : null;
 
-/** A polled chat state replaces only the chat supervision of the shown snapshot, and only while nothing is in flight for it. */
-export const settlePoll = (view: ProjectSupervisorView, scope: string, polled: ProjectSupervisorInfo): ProjectSupervisorView =>
-  view.operation || view.chat || view.scope !== scope || view.snapshot?.projectId !== polled.projectId || view.snapshot.mainThreadId !== polled.mainThreadId
-    ? view : {...view, snapshot: {...view.snapshot, chatSupervision: polled.chatSupervision ?? null}};
+/** a background read updates operational records while configured form baselines and mutation fences keep their owners. */
+export const settleChatRefresh = (view: ProjectSupervisorView, scope: string, refreshed: ProjectSupervisorInfo): ProjectSupervisorView =>
+  view.operation || view.chat || view.scope !== scope || view.snapshot?.projectId !== refreshed.projectId || view.snapshot.mainThreadId !== refreshed.mainThreadId
+    ? view : {...view, snapshot: {...refreshed, settings: view.snapshot.settings, models: view.snapshot.models,
+      modelSelection: view.snapshot.modelSelection, modelApplication: view.snapshot.modelApplication}};
 
 // the panel state of one project that outlives the component: the shown snapshot and its read time, the outcome message of
 // the last change for the scope it belongs to, the block after an unconfirmed outcome and the changes in flight
@@ -1023,19 +1024,19 @@ export const projectSupervisorRead = Atom.family((scope: SnapshotScope) => uiRun
   return {snapshot, readAt: yield* Clock.currentTimeMillis};
 })));
 
-type ChatPollScope = {readonly environmentId: string | null; readonly projectId: string; readonly mainThreadId: string; readonly epoch: number};
+type ChatRefreshScope = {readonly environmentId: string | null; readonly projectId: string; readonly mainThreadId: string; readonly epoch: number};
 
 // the selected chat's saved supervision state; the first evaluation reads nothing because the snapshot read has just read it,
 // every refresh reads it again
-export const chatSupervisionRead = Atom.family((scope: ChatPollScope) => uiRuntime.atom((get) => {
+export const chatSupervisionRead = Atom.family((scope: ChatRefreshScope) => uiRuntime.atom((get) => {
   const previous = get.self<AsyncResult.AsyncResult<Option.Option<ProjectSupervisorInfo>>>();
   return Option.isNone(previous) || AsyncResult.isInitial(previous.value)
     ? Effect.succeed(Option.none<ProjectSupervisorInfo>())
     : Effect.map(loadProjectSupervisor(scope.projectId, scope.mainThreadId), Option.some);
 }));
 
-// the chat supervision read refreshed on each visible 30 s tick
-export const chatSupervisionPoll = Atom.family((scope: ChatPollScope) => chatSupervisionRead(scope).pipe(pollWhileVisible(30_000)));
+// the chat supervision read refreshed by matching committed changes
+export const chatSupervisionLive = Atom.family((scope: ChatRefreshScope) => chatSupervisionRead(scope).pipe(refreshOnDashboardChange(`project:${scope.projectId}`)));
 
 type ProgressScope = {
   readonly environmentId: string | null;
@@ -1084,8 +1085,8 @@ export const workflowProgressRead = Atom.family((scope: ProgressScope) => uiRunt
   }));
 }));
 
-// the progress read refreshed on each visible 30 s tick; the panel mounts it only while no read is running
-export const workflowProgressPoll = Atom.family((scope: ProgressScope) => workflowProgressRead(scope).pipe(pollWhileVisible(30_000)));
+// the progress read refreshed by matching committed changes; the panel mounts it only while no read is running
+export const workflowProgressLive = Atom.family((scope: ProgressScope) => workflowProgressRead(scope).pipe(refreshOnDashboardChange(`progress:${scope.projectId}:${scope.mainThreadId}`)));
 
 const idleAtom = Atom.make(AsyncResult.initial<never>());
 
@@ -1232,13 +1233,13 @@ export function ProjectSupervisorPanel({projectId, threadId, section = "all", at
     setForceRefresh(false);
   }, [read]);
 
-  // the chat supervision poll is not mounted while a change is in flight; it replaces only the chat's supervision state
-  const pollScope = chatPollScope(view, {projectId, threadId, connected, epoch});
-  const polled = useAtomValue(pollScope ? chatSupervisionPoll({...pollScope, environmentId}) : idleAtom);
-  const polledSnapshot = AsyncResult.isSuccess(polled) && !polled.waiting ? Option.getOrNull(polled.value) : null;
+  // operational refresh is not mounted while a change is in flight; form drafts keep their pinned baselines
+  const refreshScope = chatRefreshScope(view, {projectId, threadId, connected, epoch});
+  const refreshed = useAtomValue(refreshScope ? chatSupervisionLive({...refreshScope, environmentId}) : idleAtom);
+  const refreshedSnapshot = AsyncResult.isSuccess(refreshed) && !refreshed.waiting ? Option.getOrNull(refreshed.value) : null;
   useEffect(() => {
-    if (polledSnapshot) setView(current => settlePoll(current, scope, polledSnapshot));
-  }, [polledSnapshot]);
+    if (refreshedSnapshot) setView(current => settleChatRefresh(current, scope, refreshedSnapshot));
+  }, [refreshedSnapshot]);
 
   const progressMain = projectId && connected ? activeSnapshot?.mainThreadId ?? null : null;
   const progressScope: ProgressScope | null = progressMain ? {environmentId, projectId, mainThreadId: progressMain, bindingThreadId: activeSnapshot?.binding?.threadId ?? null,
@@ -1246,7 +1247,7 @@ export function ProjectSupervisorPanel({projectId, threadId, section = "all", at
   const progress = useAtomValue(progressScope ? workflowProgressRead(progressScope) : idleAtom);
   const progressPages = Option.getOrNull(AsyncResult.value(progress));
   const progressLoading = progressScope !== null && (AsyncResult.isInitial(progress) || progress.waiting);
-  useAtomMount(progressScope && !progressLoading ? workflowProgressPoll(progressScope) : idleAtom);
+  useAtomMount(progressScope && !progressLoading ? workflowProgressLive(progressScope) : idleAtom);
   const workflowProgressKey = scopeKey(environmentId, projectId, activeSnapshot?.mainThreadId ?? mainThreadId, activeSnapshot?.binding?.threadId ?? null, activeSnapshot?.binding?.generation ?? null);
   const workflowProgressState: WorkflowProgressPanelState = {key: workflowProgressKey, pages: progressScope ? [...progressPages?.pages ?? []] : [],
     loading: progressLoading, error: progressScope ? progressPages?.error ?? null : null};
@@ -1335,7 +1336,7 @@ export function ProjectSupervisorPanel({projectId, threadId, section = "all", at
       section={section}
       attentionEnabled={attentionEnabled}
       snapshot={activeSnapshot}
-      currentRead={!loadError}
+      currentRead={!loadError && !AsyncResult.isFailure(refreshed)}
       selection={activeDraft.modelValue}
       monitoring={activeDraft.monitoringValue}
       teamSettings={activeDraft.teamSettingsValue}

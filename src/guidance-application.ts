@@ -1,3 +1,4 @@
+import { DashboardUpdates } from "./dashboard-updates.js";
 import { Cause, Context, Effect, Layer } from "effect";
 import { GuidanceDb, guidanceDbLayer } from "./db.js";
 import { guidanceTransaction } from "./guidance-sql.js";
@@ -33,9 +34,11 @@ export const runGuidanceApplication = (
   onReady: () => void = () => {},
 ) =>
   Effect.gen(function* () {
+    const updates = yield* DashboardUpdates;
     // the run's guidance client and store: the schema, the default settings, the column additions and the restart recovery,
     // once; the client is released with the run, after everything built over it
-    const guidance = yield* Layer.build(GuidanceStore.layer.pipe(Layer.provideMerge(guidanceDbLayer(config.dataDirectory)), Layer.provide(SupervisorIds.layer)));
+    const guidance = yield* Layer.build(GuidanceStore.layer.pipe(Layer.provideMerge(guidanceDbLayer(config.dataDirectory)),
+      Layer.provideMerge(Layer.succeed(DashboardUpdates, updates)), Layer.provide(SupervisorIds.layer)));
     const store = Context.get(guidance, GuidanceStore);
     const guidanceRuntime = yield* GuidanceRuntime.make(config, source).pipe(Effect.provide(guidance));
     const descriptor = yield* t3.descriptor();

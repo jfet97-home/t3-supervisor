@@ -1,3 +1,4 @@
+import { DashboardUpdates } from "../src/dashboard-updates.js";
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import { join } from "node:path";
@@ -128,7 +129,7 @@ const liveStatus = (settings: SupervisorConfig) => Effect.flatMap(Clock.currentT
 // data directory) and ownership services
 const services = (settings: SupervisorConfig, status: SubscriptionRef.SubscriptionRef<SupervisorStatus>, base: Layer.Layer<Store | T3Client, unknown>) => Layer.mergeAll(
   base, Layer.succeed(SupervisorStatusRef, status), ThreadPolicyStore.layer.pipe(Layer.provide(policyDbLayer(settings.dataDirectory))), SupervisorOwnership.layer,
-  NativeTransportLive,
+  NativeTransportLive, DashboardUpdates.layer,
 ).pipe(Layer.provideMerge(Layer.succeed(Configuration, settings)), Layer.provideMerge(NodeFileSystem.layer));
 
 // the /health body the current status would serve at the given time

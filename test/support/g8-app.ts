@@ -1,3 +1,4 @@
+import { DashboardUpdates } from "../../src/dashboard-updates.js";
 import assert from "node:assert/strict";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { join } from "node:path";
@@ -99,7 +100,7 @@ export const runApp = (config: SupervisorConfig, t3: T3ClientShape, catalog: () 
   // store on its own client and the ownership set
   const processServices = Layer.mergeAll(Layer.succeed(Configuration, config), SupervisorOwnership.layer,
     ThreadPolicyStore.layer.pipe(Layer.provide(policyDbLayer(config.dataDirectory)), Layer.provide(Layer.succeed(Configuration, config))));
-  const application = Effect.scoped(runGuidanceApplication(config, source, t3, () => Deferred.doneUnsafe(ready, Exit.void)))
+  const application = Effect.scoped(runGuidanceApplication(config, source, t3, () => Deferred.doneUnsafe(ready, Exit.void))).pipe(Effect.provide(DashboardUpdates.layer))
     .pipe(Effect.provide(Layer.mergeAll(NativeTransportLive, processServices).pipe(Layer.provideMerge(NodeFileSystem.layer))));
   const fiber = yield* Effect.forkScoped(application);
   const interrupt = within(Fiber.interrupt(fiber), 10_000, "application interruption");

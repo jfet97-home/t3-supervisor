@@ -78,6 +78,8 @@ export const makeBrowser = (origin = "http://127.0.0.1:4100") => {
     Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
   };
   const sent: SentRequest[] = [];
+  const eventBodies = new Set<ReadableStreamDefaultController<Uint8Array>>();
+  let eventId = 0;
   const waiters = new Set<(request: SentRequest) => void>();
   const local = new Map<string, string>();
   const session = new Map<string, string>();
@@ -94,6 +96,7 @@ export const makeBrowser = (origin = "http://127.0.0.1:4100") => {
     remove(type, ...rest);
   };
   const state = {
+    events: undefined as Reply | undefined,
     reply: (() => json({ message: "Not found." }, 404)) as Reply,
     visibility: "visible" as "visible" | "hidden",
     sessionBlocked: false,
@@ -138,13 +141,19 @@ export const makeBrowser = (origin = "http://127.0.0.1:4100") => {
   };
   return {
     sent, local, session, state, location, history, entries, listeners,
+    hint: (keys: ReadonlyArray<string> | null) => {
+      const bytes = new TextEncoder().encode(`event: ${keys === null ? "reset" : "invalidate"}\nid: ${++eventId}\ndata: ${JSON.stringify({keys: keys ?? []})}\n\n`);
+      for (const body of eventBodies) body.enqueue(bytes);
+    },
+    disconnect: () => {for (const body of eventBodies) body.close(); eventBodies.clear();},
+    visibility: (value: "hidden" | "visible") => {state.visibility = value; window.dispatchEvent(new Event("visibilitychange"));},
     // installs the browser globals for the scope that runs it and puts back what they replaced when the scope closes
     install: Effect.acquireRelease(Effect.sync(() => {
       Object.assign(window, { location, history });
       installOne("location", location);
       installOne("window", window);
       installOne("history", history);
-      installOne("document", { get visibilityState() { return state.visibility; }, get hidden() { return state.visibility === "hidden"; },
+      installOne("document", { addEventListener: window.addEventListener.bind(window), removeEventListener: window.removeEventListener.bind(window), dispatchEvent: window.dispatchEvent.bind(window), get visibilityState() { return state.visibility; }, get hidden() { return state.visibility === "hidden"; },
         getElementById: () => state.root, querySelectorAll: () => [] });
       installOne("localStorage", localStorage);
       installOne("sessionStorage", sessionStorage);
@@ -156,6 +165,11 @@ export const makeBrowser = (origin = "http://127.0.0.1:4100") => {
           signal: request.signal };
         sent.push(record);
         for (const waiter of [...waiters]) waiter(record);
+        if (record.path === "/api/events" && state.events) return state.events(record);
+        if (record.path === "/api/events") return new Response(new ReadableStream<Uint8Array>({start(controller) {
+          eventBodies.add(controller);
+          request.signal.addEventListener("abort", () => { eventBodies.delete(controller); try {controller.close();} catch { /* already closed */ } }, {once: true});
+        }, cancel() {eventBodies.clear();}}), {headers: {"content-type": "text/event-stream"}});
         return state.reply(record);
       });
     }), () => Effect.sync(restore)),

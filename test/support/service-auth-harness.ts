@@ -1,3 +1,4 @@
+import { DashboardUpdates } from "../../src/dashboard-updates.js";
 import { NodeCrypto, NodeFileSystem } from "@effect/platform-node";
 import { Context, Effect, Layer } from "effect";
 import { policyDbLayer } from "../../src/db.js";
@@ -19,6 +20,6 @@ export const guidanceUi = (config: SupervisorConfig, runtime: GuidanceRuntime["S
   const policyStore = policy ? Layer.succeed(ThreadPolicyStore, policy)
     : Layer.effect(ThreadPolicyStore, makeThreadPolicyStore({excludedThreadIds: config.excludedThreadIds})).pipe(Layer.provide(policyDbLayer(config.dataDirectory)));
   const services = Layer.mergeAll(ServiceAuthService.layer(config.dataDirectory), Layer.succeed(GuidanceRuntime, runtime),
-    workflows ?? workflowMcpLayer({} as WorkflowWriteController["Service"]), policyStore).pipe(Layer.provideMerge(Layer.mergeAll(NodeFileSystem.layer, NodeCrypto.layer)));
+    workflows ?? workflowMcpLayer({} as WorkflowWriteController["Service"]), policyStore).pipe(Layer.provideMerge(Layer.mergeAll(NodeFileSystem.layer, NodeCrypto.layer, DashboardUpdates.layer)));
   return Effect.map(Layer.build(GuidanceUi.layer(config, options).pipe(Layer.provide(services))), context => Context.get(context, GuidanceUi));
 };

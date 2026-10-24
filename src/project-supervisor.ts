@@ -1325,6 +1325,8 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
             workflow: preservePlan ? retained.workflow ?? null : applied.workflow?.plan ? {...applied.workflow, plan: preserveOccurrenceIds(applied.workflow.plan,
               priorLive?.sourceBinding?.taskId === retained.id ? priorLive.plan : retained.workflow?.plan ?? null)} : applied.workflow ?? null,
             ...(preservePlan && retained.interpretationEvidence ? {interpretationEvidence: retained.interpretationEvidence} : {}),
+            ...(!preservePlan && applied.interpretationEvidence?.kind === "interpretation_submission" && conversation?.authorization
+              ? {interpretationEvidence: {...applied.interpretationEvidence, scopeRevision: conversation.authorization.scopeRevision}} : {}),
             ...(scopeChanged && engaged ? {workflowProposalId: `${finished.id}:scope:${conversation!.authorization!.scopeRevision.slice(0, 20)}`} : {}),
             objective: engaged ? conversation!.authorization!.outcome : payload.objective};
           // quiet drafts never become proposals. Same-scope pause/resume keeps the exact proposal and acceptance.

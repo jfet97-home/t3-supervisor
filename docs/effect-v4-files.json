@@ -11130,9 +11130,9 @@
     "schema DDL constants"
    ],
    "residualAdapter": {
-    "what": "PrivateFiles adapter over node:fs/promises (open with O_NOFOLLOW/O_DIRECTORY/O_EXCL, lstat dev/ino, fchmod, fsync, link)",
-    "why": "effect FileSystem has no lstat, O_NOFOLLOW/O_DIRECTORY flags or handle chmod (FileSystem.ts:425-436, 870-895)",
-    "cleanup": "Effect.acquireRelease on every FileHandle; temp file unlinkIfSameFile in finalizer"
+    "what": "PrivateFiles adapter over node:fs/promises (open with O_NOFOLLOW/O_DIRECTORY/O_EXCL, lstat dev/ino, fchmod, fsync, link); scoped Effect FileSystem.watch(access directory) for cross-client session revocation",
+    "why": "effect FileSystem has no lstat, O_NOFOLLOW/O_DIRECTORY flags or handle chmod (FileSystem.ts:425-436, 870-895); committed access-file notifications are the external-client invalidation boundary, avoiding SQL polling",
+    "cleanup": "Effect.acquireRelease on every FileHandle; temp file unlinkIfSameFile in finalizer; scoped watch fiber and PubSub subscriptions close with ServiceAuth/stream"
    },
    "sharedCallers": [
     "src/cli.ts",
@@ -26806,6 +26806,16 @@
    "test-fixture": 3,
    "ui": 1
   },
-  "openProblems": []
+  "openProblems": [],
+  "dashboardSse": {
+   "files": [
+    "src/dashboard-events.ts",
+    "src/dashboard-updates.ts",
+    "ui/src/atoms.ts"
+   ],
+   "services": "one scoped DashboardUpdates PubSub plus shared SQL afterCommit; Schema/Sse trust boundaries; Atom owns the visible registry stream",
+   "residualAdapter": "document.visibilitychange uses one registry-owned native listener, removed by Atom finalizer; fetch transport uses the existing scoped sessionHttpClient; pure types, comparisons and JSX remain plain",
+   "proof": "test/dashboard-events.test.ts and test/dashboard-stream-atoms.test.ts cover real listener/commit/auth/body lifetimes and retained UI reads/drafts/operation identities"
+  }
  }
 }

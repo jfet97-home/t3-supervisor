@@ -6,16 +6,13 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { beforeAll, it } from "@effect/vitest";
 import { Effect } from "effect";
 import { AsyncResult, type Atom, type AtomRegistry } from "effect/reactivity";
-import { TestClock } from "effect/testing";
 import { vi } from "vitest";
-import { clockedRegistry, scopedRegistry } from "./support/g7-page.js";
-import { json, makeBrowser, nextTurn, until } from "./support/g7-browser.js";
-import { countedRegistry, elapse } from "./support/s8ui-clock.js";
+import { scopedRegistry } from "./support/g7-page.js";
+import { abortOf, json, liveSleep, makeBrowser, until } from "./support/g7-browser.js";
 
-// target regressions of the dashboard shell over atoms (CT-UI-SHELL-01): the 5 s snapshot refresh, the retained last
+// target regressions of the dashboard shell over atoms (CT-UI-SHELL-01): committed-change snapshot refresh, the retained last
 // snapshot and its alert, the access refreshes, sign-in and sign-out, and drafts surviving expiry and re-sign-in. the
-// waits for a request or an atom value are bounded on the live clock. the snapshot refresh runs on the page runtime, so
-// the refresh tests step its intervals with TestClock on the runtime's clock
+// waits for a request or an atom value are bounded on the live clock. the stream and existing reads share the registry lifetime
 
 // importing the shell mounts its root; only the React root renderer is replaced, nothing it renders is under test here
 vi.mock("react-dom/client", () => ({ createRoot: () => ({ render: () => undefined }) }));
@@ -55,32 +52,28 @@ const settled = (registry: AtomRegistry.AtomRegistry, atom: Atom.Atom<AsyncResul
   until(registry, atom, (result) => AsyncResult.isNotInitial(result) && !result.waiting, "the action settled");
 const session = "A".repeat(43);
 
-it.effect("the snapshot refreshes every 5 s while mounted, also while the page is hidden, and stops when unmounted", () => Effect.gen(function* () {
-  assert.equal(shell.snapshotRefreshMillis, 5_000);
-  assert.equal(shell.dashboardSnapshot, shell.snapshotPoll(5_000));
+it.effect("the mounted snapshot refreshes on a matching hint, stays quiet hidden and reconciles once visible", () => Effect.gen(function* () {
   browser.local.set("supervisor-session", "session-1");
   browser.sent.length = 0;
   browser.state.reply = () => json(snapshot(true));
-  const registry = yield* clockedRegistry(atoms.uiRuntime);
-  // the dashboard's own 5 s interval: it passes only on the page runtime's clock, never within the live bounds
-  const stop = registry.subscribe(shell.dashboardSnapshot, () => undefined, { immediate: true });
-  // two intervals pass on the page runtime's clock
-  yield* TestClock.adjust("10 seconds");
-  yield* browser.request(() => snapshots().length >= 3, "two refreshes after the first read");
-  browser.state.visibility = "hidden";
-  const hidden = snapshots().length;
-  // two more intervals pass while hidden
-  yield* TestClock.adjust("10 seconds");
-  yield* browser.request(() => snapshots().length >= hidden + 2, "refreshes while hidden");
-  browser.state.visibility = "visible";
-  stop();
-  yield* until(registry, shell.dashboardSnapshot, (result) => !result.waiting, "the last refresh");
-  registry.dispose();
-  const after = snapshots().length;
-  // six intervals pass on the page runtime's clock after unmounting
-  yield* elapse("30 seconds");
-  assert.equal(snapshots().length, after, "no refresh after unmount");
-}), { timeout: 10_000 });
+  const registry = yield* scopedRegistry();
+  const stop = registry.subscribe(shell.dashboardSnapshot, () => undefined, {immediate: true});
+  yield* until(registry, shell.dashboardSnapshot, result => AsyncResult.isSuccess(result) && !result.waiting, "first read");
+  const stream = yield* browser.request(request => request.path === "/api/events", "shared stream");
+  browser.hint(["snapshot"]);
+  yield* browser.request(() => snapshots().length === 2, "one matching refresh");
+  browser.visibility("hidden");
+  yield* abortOf(stream.signal);
+  const before = snapshots().length;
+  browser.hint(["snapshot"]);
+  yield* liveSleep("80 millis");
+  assert.equal(snapshots().length, before);
+  browser.visibility("visible");
+  yield* browser.request(request => request.path === "/api/events" && request !== stream, "visible reconnect");
+  browser.hint(null);
+  yield* browser.request(() => snapshots().length === before + 1, "reset reconciles");
+  stop(); registry.dispose();
+}), {timeout: 10_000});
 
 it.effect("a failed snapshot keeps the latest successful read with the drafts-kept alert, and access refreshes when reads start failing and when T3 reconnects", () => Effect.gen(function* () {
   browser.local.set("supervisor-session", "session-1");
@@ -173,7 +166,7 @@ it.effect("CT-UI-SHELL-01 an expired session keeps the open dashboard and its dr
   // reconnect does
   yield* until(registry, shell.dashboardSnapshot, (result) => AsyncResult.isSuccess(result) && !result.waiting, "the re-read after the sign-in");
   yield* browser.request(() => csrfReads().length === 2, "the access refresh on reconnect");
-  assert.deepEqual(browser.sent.map((request) => [request.path, request.session]).sort(),
+  assert.deepEqual(browser.sent.filter(request => request.path !== "/api/events").map((request) => [request.path, request.session]).sort(),
     [["/api/csrf", session], ["/api/csrf", session], ["/api/guidance/snapshot", session], ["/auth/login", ""]],
     "one sign-in, one access check of the stored session, one snapshot re-read and the reconnect refresh");
   const check = registry.get(shell.accessAtom);
@@ -249,24 +242,16 @@ it.effect("sign-out sends one request however often it is asked, forgets only it
   registry.dispose();
 }), { timeout: 10_000 });
 
-it.effect("unmounting the dashboard snapshot stops its 5 s refresh timer on the page runtime's clock", () => Effect.gen(function* () {
+it.effect("disposing the dashboard registry closes the stream without a refresh timer", () => Effect.gen(function* () {
   browser.local.set("supervisor-session", "session-1");
   browser.sent.length = 0;
   browser.state.reply = () => json(snapshot(true));
-  const {registry, sleeps} = yield* countedRegistry(atoms.uiRuntime);
-  const stop = registry.subscribe(shell.dashboardSnapshot, () => undefined, { immediate: true });
-  yield* until(registry, shell.dashboardSnapshot, (result) => AsyncResult.isSuccess(result) && !result.waiting, "the first snapshot");
-  assert.equal(sleeps(), 1, "the refresh interval is the one timer on the page runtime's clock");
-  // one 5 s interval passes on the page runtime's clock
-  yield* TestClock.adjust("5 seconds");
-  yield* browser.request(() => snapshots().length >= 2, "the refresh");
-  assert.equal(snapshots().length, 2, "one refresh for the interval");
-  assert.equal(sleeps(), 1, "the next interval is pending");
-  stop();
-  // the registry removes the unmounted snapshot on its next task, and the refresh signal only it used on the task after
-  yield* nextTurn;
-  yield* nextTurn;
-  assert.equal(sleeps(), 0, "no timer after unmounting");
-  yield* elapse("30 seconds");
-  assert.equal(snapshots().length, 2, "no refresh after unmounting");
-}), { timeout: 10_000 });
+  const registry = yield* scopedRegistry();
+  registry.mount(shell.dashboardSnapshot);
+  const request = yield* browser.request(request => request.path === "/api/events", "stream opened");
+  registry.dispose();
+  yield* abortOf(request.signal);
+  const before = snapshots().length;
+  yield* liveSleep("80 millis");
+  assert.equal(snapshots().length, before);
+}));
