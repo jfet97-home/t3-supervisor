@@ -4,7 +4,7 @@ import { parseArgs } from "node:util";
 import { isScenarioName, scenarioCatalog, scenarioNames } from "./scenarios.js";
 import { startUiFixture } from "./server.js";
 
-const usage = "usage: npx tsx test/ui-fixture/run.ts --assets <dir> [--port N] [--scenario <name>]";
+const usage = "usage: pnpm exec tsx test/ui-fixture/run.ts --assets <dir> [--port N] [--scenario <name>]";
 
 const options = () => {
   const {values} = parseArgs({options: {assets: {type: "string"}, port: {type: "string"}, scenario: {type: "string"}}, strict: true});

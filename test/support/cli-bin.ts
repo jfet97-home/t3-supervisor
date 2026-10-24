@@ -3,7 +3,7 @@
 export interface InstalledBin {
   // dist/cli.js of this checkout, built by this run
   readonly builtCli: string;
-  // the npm-generated bin link in a temporary global prefix
+  // the pnpm-generated bin link in a temporary global prefix
   readonly installedBin: string;
   readonly packageDirectory: string;
   readonly root: string;

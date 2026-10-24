@@ -121,7 +121,7 @@ it.live("CT-MAIN-03: startup failures exit 1 with one classified line and no sta
   }).pipe(Effect.provide(NodeFileSystem.layer)), { timeout: 60_000 });
 
 // build + pack + offline install of the packed package, shared by the block and removed after it; its hooks are bounded
-// separately because the build runs tsc and npm. without the test services every case runs on the live clock
+// separately because the build runs tsc and pnpm. without the test services every case runs on the live clock
 layer(installedBinLayer.pipe(Layer.provideMerge(NodeFileSystem.layer)), { timeout: "120 seconds", excludeTestServices: true })("built and installed bin", (it) => {
   const entry = (bin: InstalledBin["Service"], variant: "built dist/cli.js" | "installed bin"): [string, string[]] =>
     variant === "installed bin" ? [bin.installedBin, []] : [process.execPath, [bin.builtCli]];

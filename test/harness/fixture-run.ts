@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { stripVTControlCharacters } from "node:util";
 import { onTestFinished } from "vitest";
 
-// nested fixture runs through the real watchdog entry point, as `npm test` starts it
+// nested fixture runs through the real watchdog entry point, as `pnpm test` starts it
 
 const root = fileURLToPath(new URL("../..", import.meta.url));
 const fixtureConfig = "test/harness/fixtures/vitest.fixture.config.ts";

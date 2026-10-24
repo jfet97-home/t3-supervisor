@@ -49,7 +49,7 @@ const noGroupLeft = (result: WatchdogRun) => {
 const tests = (report: CombinedReport) => report.testResults.flatMap((file) => file.assertionResults.map((test) => test.fullName));
 
 describe("watchdog phases", () => {
-  it("npm test is one watchdog over the main phase alone", () => {
+  it("pnpm test is one watchdog over the main phase alone", () => {
     const manifest = readJson<{ readonly scripts: Record<string, string> }>("package.json");
     expect(manifest.scripts.test).toBe("node --import tsx scripts/run-tests.ts --watchdog-phase=main:vitest.config.ts");
   });

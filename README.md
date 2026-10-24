@@ -29,12 +29,12 @@ The Settings page lets you exclude chats from Project Supervisor selection. Thes
 
 ### Direct installation
 
-Node.js 24 or newer is required. From a source checkout:
+Node.js 24.22.1 or newer and pnpm 12.14.0 are required. From a source checkout:
 
 ```sh
-npm ci
-npm run build
-npm install --global --omit=dev .
+pnpm install --frozen-lockfile
+pnpm build
+pnpm add --global .
 ```
 
 Configure the T3 endpoint and credential paths in the service environment, then run `t3-supervisor start`. The default state directory is `$XDG_STATE_HOME/t3-supervisor` when set, otherwise `~/.local/state/t3-supervisor`. A custom installation can use `DATA_DIRECTORY`; pass the same directory to `start` and `auth forge`.
@@ -53,12 +53,14 @@ The Nix development shell pins Node 24.22.1 (the October 2026 security release)
 and pnpm 12.14.0, using the same release archives and Nix input revisions as
 Scanner. It supports Apple Silicon macOS and x86_64/aarch64 Linux.
 Run `nix develop` in the checkout to enter it, or prefix a command with
-`nix develop --command`. Dependency installation still uses `npm ci` and the
-committed `package-lock.json`.
+`nix develop --command`. The project's `packageManager` field pins pnpm 12.14.0;
+dependency installation uses the committed `pnpm-lock.yaml` with
+`pnpm install --frozen-lockfile`.
 
-New worktrees reuse the host's npm download cache with `--prefer-offline`,
-fetching packages that are missing while keeping each worktree's installed
-`node_modules` separate.
+New worktrees reuse pnpm's shared package store with `--prefer-offline` and
+hardlinks, fetching packages that are missing while keeping each worktree's
+installed `node_modules` separate. Build-script approval is explicit in
+`pnpm-workspace.yaml`; script commands never install dependencies implicitly.
 
 T3's **Setup Worktree** action runs `sh scripts/setup-worktree.sh`. The launcher
 approves this checkout's `.envrc` when direnv is installed, then installs dependencies
@@ -78,14 +80,14 @@ reusable steps and workflows from project guidance, development history and huma
 corrections, with a recommendation for two distinct models using high reasoning.
 
 ```sh
-npm ci
-npm run autofix
-npm run typecheck
-npm test
-npm run build
+pnpm install --frozen-lockfile
+pnpm autofix
+pnpm typecheck
+pnpm test
+pnpm build
 ```
 
-`npm test` runs the [Vitest](https://vitest.dev) suites; Effect code is tested with `@effect/vitest`.
+`pnpm test` runs the [Vitest](https://vitest.dev) suites; Effect code is tested with `@effect/vitest`.
 
 GitHub CI runs lint, type checking and build once, the runner harness once, and
 the complete main suite across four native Vitest shards on separate runners.
@@ -93,14 +95,17 @@ Each shard uses one test worker so database worker startup does not compete with
 another suite in the same runner. Isolation, the leak gate, per-test bounds and
 the 20-minute watchdog stay the same. The `check` status requires every job
 to pass, including every shard; failed, cancelled or skipped jobs fail the gate.
-The existing npm download cache is reused; test results are never cached.
+One shared setup action caches the pnpm package store by OS, architecture, Node
+major and lockfile. A changed lockfile can reuse an older store and fetch only
+missing packages. Every job still validates a frozen install and executes its
+checks; installed trees, build outputs and test results are never cached.
 New runs cancel older runs of this workflow for the same branch or pull request,
 including `main`; unrelated branches and pull requests run independently.
 
 While editing, run focused files through the watchdog, for example
-`npm test -- test/config.test.ts`. Leave the final complete main and harness
+`pnpm test test/config.test.ts`. Leave the final complete main and harness
 suites to GitHub CI. To reproduce one CI shard locally, use
-`npm test -- --shard=1/4 --maxWorkers=1`. Native sharding assigns complete files
+`pnpm test --shard=1/4 --maxWorkers=1`. Native sharding assigns complete files
 deterministically, so all four shard indices are required for full coverage.
 
 Read [AGENTS.md](AGENTS.md) and the local knowledge base before changing the project.

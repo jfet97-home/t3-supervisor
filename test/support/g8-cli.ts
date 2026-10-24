@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
 import { Clock, Context, Effect, FileSystem, Layer, Option, type Scope } from "effect";
@@ -155,7 +155,7 @@ export const quickChecks = (harness: SupervisorHarness, databases: ReadonlyArray
 export class InstalledBin extends Context.Service<InstalledBin, {
   // dist/cli.js of this checkout, built by this run
   readonly builtCli: string;
-  // the npm-generated bin link in a temporary global prefix
+  // the pnpm-generated bin link in a temporary global prefix
   readonly installedBin: string;
   readonly packageDirectory: string;
   readonly root: string;
@@ -163,10 +163,12 @@ export class InstalledBin extends Context.Service<InstalledBin, {
 
 const stepTimeoutMs = 90_000;
 
-// nested npm must not inherit npm_config_* from `npm test` (a local_prefix would point it at this checkout)
-const npmEnvironment = (): NodeJS.ProcessEnv => {
+// keep the shared package store, without inheriting the test command's project-specific npm_config_* values
+const pnpmEnvironment = (): NodeJS.ProcessEnv => {
   const env: NodeJS.ProcessEnv = { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? tmpdir() };
-  if (process.env.npm_config_cache) env.npm_config_cache = process.env.npm_config_cache;
+  for (const key of ["PNPM_HOME", "XDG_DATA_HOME", "npm_config_store_dir"] as const) {
+    if (process.env[key]) env[key] = process.env[key];
+  }
   return env;
 };
 
@@ -186,7 +188,7 @@ export const installedBinLayer: Layer.Layer<InstalledBin, never, FileSystem.File
       () => `the installed bin teardown did not finish within ${installedBinTeardownMs} ms`));
   const builtCli = join(repositoryRoot, "dist", "cli.js");
   const buildStarted = yield* Clock.currentTimeMillis;
-  // the server half of `npm run build`; the ui bundle is not part of these cases
+  // the server half of `pnpm build`; the ui bundle is not part of these cases
   yield* step("tsc build", process.execPath, [join(repositoryRoot, "node_modules/typescript/bin/tsc"), "-p", "tsconfig.build.json"],
     repositoryRoot, { PATH: process.env.PATH ?? "" });
   // guard: a stale or foreign dist must not be exercised
@@ -196,16 +198,19 @@ export const installedBinLayer: Layer.Layer<InstalledBin, never, FileSystem.File
   }
   const firstLine = new TextDecoder().decode(yield* Effect.orDie(fs.readFile(builtCli))).split("\n")[0] ?? "";
   if (firstLine !== shebang) return yield* Effect.die(new Error("dist/cli.js lost its shebang"));
-  const npm = npmEnvironment();
-  yield* step("npm pack", "npm", ["pack", "--ignore-scripts", "--silent", "--pack-destination", root], repositoryRoot, npm);
-  yield* step("tar extract", "tar", ["-xzf", join(root, "t3-supervisor-0.1.0.tgz"), "-C", root], root, npm);
+  const pnpm = pnpmEnvironment();
+  yield* step("pnpm pack", "pnpm", ["pack", "--ignore-scripts", "--silent", "--pack-destination", root], repositoryRoot, pnpm);
+  yield* step("tar extract", "tar", ["-xzf", join(root, "t3-supervisor-0.1.0.tgz"), "-C", root], root, pnpm);
   const packageDirectory = join(root, "package");
   // the tarball carries no lockfile; the baseline one keeps the installed dependency set identical to this checkout
-  yield* Effect.orDie(fs.copyFile(join(repositoryRoot, "package-lock.json"), join(packageDirectory, "package-lock.json")));
-  yield* step("npm ci", "npm", ["ci", "--prefix", packageDirectory, "--omit=dev", "--offline", "--ignore-scripts", "--no-audit", "--no-fund"],
-    packageDirectory, npm);
+  for (const name of ["pnpm-lock.yaml", "pnpm-workspace.yaml"]) {
+    yield* Effect.orDie(fs.copyFile(join(repositoryRoot, name), join(packageDirectory, name)));
+  }
+  yield* step("pnpm install", "pnpm", ["install", "--frozen-lockfile", "--prod", "--offline", "--ignore-scripts"], packageDirectory, pnpm);
   const prefix = join(root, "prefix");
-  yield* step("npm install", "npm", ["install", "--global", "--prefix", prefix, "--offline", "--ignore-scripts", "--no-audit", "--no-fund", packageDirectory],
-    root, npm);
-  return { builtCli, installedBin: join(prefix, "bin", "t3-supervisor"), packageDirectory, root };
+  const binDirectory = join(prefix, "bin");
+  yield* Effect.orDie(fs.makeDirectory(binDirectory, { recursive: true }));
+  yield* step("pnpm global bin", "pnpm", ["add", "--global", ".", "--offline", "--ignore-scripts"], packageDirectory,
+    { ...pnpm, PNPM_HOME: prefix, PATH: `${binDirectory}${delimiter}${pnpm.PATH}` });
+  return { builtCli, installedBin: join(binDirectory, "t3-supervisor"), packageDirectory, root };
 }));

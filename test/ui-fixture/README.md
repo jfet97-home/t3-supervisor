@@ -18,7 +18,7 @@ SHA256 hashes at startup. Compare that manifest with the revision being reviewed
 do not reuse hashes from a previous UI build.
 
 ```sh
-npm ci && npm run build
+pnpm install --frozen-lockfile && pnpm build
 ```
 
 Compare the files on disk. The baseline server adds a per-response script nonce to
@@ -28,7 +28,7 @@ serves the files as they are, so its CSP allows `script-src 'self'` instead of t
 ## Start and stop
 
 ```sh
-npx tsx test/ui-fixture/run.ts --assets ui-dist [--port N] [--scenario <name>]
+pnpm exec tsx test/ui-fixture/run.ts --assets ui-dist [--port N] [--scenario <name>]
 ```
 
 The default port is an ephemeral port, printed as `url:`. Open exactly
@@ -278,7 +278,7 @@ native).
    about 30000 ms while visible) and `window.__fixtureCounts` (listener add/remove balance
    per type, live intervals). Hide the tab (switch tabs) for 60 s and record the cadence.
 3. StrictMode: the baseline `ui/src/main.tsx` does not render `<StrictMode>`, and a
-   development build (`npx vite build --mode development`, different hashes) does not
+   development build (`pnpm exec vite build --mode development`, different hashes) does not
    enable it. A StrictMode check would need a source change, so this part is optional and
    cannot be recorded on the unchanged baseline.
 

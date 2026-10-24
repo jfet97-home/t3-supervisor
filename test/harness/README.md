@@ -1,6 +1,6 @@
 # Runner self-tests
 
-`npm run test:harness` runs these through the same watchdog as `npm test`, with
+`pnpm test:harness` runs these through the same watchdog as `pnpm test`, with
 `vitest.harness.config.ts`. Each nested run uses `fixtures/vitest.fixture.config.ts`; the
 `*.fixture.ts` files match neither the main nor the harness `include`.
 
@@ -27,7 +27,7 @@
   neither the console nor the json report carries a token.
 - `lint-guards.test.ts`: the SQLite driver (barrel, subpath or re-export) is rejected outside
   `src/db.ts`, extension loading is rejected, and suites cannot import `node:test`.
-- `phases.test.ts`: `npm test` is one watchdog over the main phase alone; over two
+- `phases.test.ts`: `pnpm test` is one watchdog over the main phase alone; over two
   fixture phases (`fixtures/vitest.phase-{a,b}.config.ts`) a filter runs only the phases that
   select files, a location filter reaches only its file's phase, an empty selection fails as
   Vitest does, an explicit `--config` runs once, json reports stay per phase and combine
