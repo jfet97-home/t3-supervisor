@@ -14,7 +14,8 @@ it("No Project presents three named native modes independently of shared definit
 });
 it("Start is a collapsed progressive picker with a visible associated search label", () => {
   const html = renderToStaticMarkup(createElement(StartSupervisionPanel, {active: false, onStateChange: () => {}, onChanged: () => {}}));
-  assert.match(html, /<details><summary/u);
+  assert.match(html, /<details\b[^>]*><summary\b[^>]*>/u);
+  assert.doesNotMatch(html.match(/<details\b[^>]*>/u)![0], /\sopen(?:[\s=>])/u);
   assert.match(html, /<label for="start-chat-search">Find a chat<\/label>/u);
   assert.match(html, /aria-describedby="start-chat-help"/u);
   assert.doesNotMatch(html, /type="checkbox"/u);

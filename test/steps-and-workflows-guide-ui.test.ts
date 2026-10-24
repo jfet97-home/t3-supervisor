@@ -59,13 +59,14 @@ it("steps and workflows guide documents the approved layout, syntax and planning
 
 it("guide FAQs use native disclosures with visible summaries and no headings inside triggers", () => {
   const html = renderToStaticMarkup(createElement(StepsAndWorkflowsGuide));
-  const disclosures = [...html.matchAll(/<details class="panel guide-faq">([\s\S]*?)<\/details>/g)];
+  const disclosures = [...html.matchAll(/<details\b[^>]*class="[^"]*\bguide-faq\b[^"]*"[^>]*>([\s\S]*?)<\/details>/g)];
 
   assert(disclosures.length > 0, "the Guide must expose native FAQ disclosures");
-  assert.equal(disclosures.length, [...html.matchAll(/<summary>/g)].length);
+  assert.equal(disclosures.length, [...html.matchAll(/<summary\b[^>]*>/g)].length);
   for (const disclosure of disclosures) {
-    assert.match(disclosure[1]!, /<summary>[^<]+<\/summary>/);
-    assert.doesNotMatch(disclosure[1]!.match(/<summary>[\s\S]*?<\/summary>/)![0], /<h[1-6]/);
+    const summary = disclosure[1]!.match(/<summary\b[^>]*>[\s\S]*?<\/summary>/)![0];
+    assert.match(summary, /<span class="disclosure-title">[^<]+<\/span>/);
+    assert.doesNotMatch(summary, /<h[1-6]/);
     assert.match(disclosure[1]!, /<p>/);
   }
   assert.match(html, /Does a workflow reference launch a reviewer agent\?/);
@@ -82,7 +83,7 @@ it("the Guide teaches the operator journey first, then the authoring reference, 
   const order = ["<strong>Home</strong>", "<strong>Task</strong> shows", "<strong>Agent and Supervisor</strong>", "<strong>Plan note</strong>", "<strong>Supervision</strong> shows", "<strong>Definitions</strong>, read from a checkout you choose"];
   assert.deepEqual(order.map(label => walkthrough.indexOf(label) >= 0), order.map(() => true));
   assert.deepEqual([...order.map(label => walkthrough.indexOf(label))].sort((a, b) => a - b), order.map(label => walkthrough.indexOf(label)), "the walkthrough follows Home → Task → acceptance → evidence → Supervision → Definitions");
-  for (const label of ["Needs attention", "Supervised work", "Proposed update awaiting acceptance", "Update proposed", "Supervisor assessment", "Earlier step records", "Evidence and history", "Supervisor health", "Stop supervision", "Project root", "Project settings"])
+  for (const label of ["Needs attention", "Supervised work", "Proposed update awaiting acceptance", "Update proposed", "Supervisor assessment", "Earlier step records", "Evidence and history", "Supervisor health", "Stop supervision", "Project folder", "Project settings"])
     assert.match(walkthrough, new RegExp(`<strong>${label}</strong>`));
   assert.match(walkthrough, /not evidence that work was done/);
   assert.match(walkthrough, /recorded progress stays as it is/);
