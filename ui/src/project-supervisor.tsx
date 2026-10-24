@@ -600,6 +600,13 @@ export function TaskWorkspace({snapshot, task, threadId, progress, connected, at
 
 export type ConversationSection = "all" | "task" | "supervision" | "settings";
 
+// outside projects the instance's No Project mode, not a project switch, decides which chats are supervised
+const noProjectEligibility = {
+  off: "No Project mode is Off, so no chat outside a project is supervised.",
+  on_request: "No Project mode is On request: people’s requests are supervised only in chats outside projects where supervision has been started.",
+  automatic: "No Project mode is Automatic: people’s requests in every eligible chat outside a project are supervised.",
+} as const;
+
 /** The read time and the one refresh action of a Supervisor view. */
 function Freshness({readAt, refreshing, connected, onRefresh}: {readAt: number | null; refreshing: boolean; connected: boolean; onRefresh: () => void}) {
   return <div className="view-freshness small muted">{readAt !== null && <span>Read {new Date(readAt).toLocaleTimeString()}</span>}
@@ -752,10 +759,10 @@ export function ProjectSupervisorView({
     <form hidden={section !== "all" && section !== "settings"} className="panel stack" onSubmit={onSubmit} aria-label="Supervisor settings">
       <fieldset disabled={fieldsDisabled} className="stack">
         <legend>Which conversations are supervised</legend>
-        <p className="muted">People’s requests in this project’s main conversations are supervised while the project switch above is on.</p>
+        <p className="muted">{snapshot.noProjectMode ? noProjectEligibility[snapshot.noProjectMode] : "People’s requests in this project’s main conversations are supervised while the project switch above is on."}</p>
         <label className="toggle" htmlFor="supervisor-agent-created-threads"><input id="supervisor-agent-created-threads" name="superviseAgentCreatedThreads" type="checkbox"
           checked={agentThreads} onChange={event => onAgentThreadsChange(event.target.checked)} />
-          <span>Supervise conversations created by agents<small>Off by default. When on, requests written afterwards by the agent that launched an ordinary conversation in this project are interpreted and negotiated like a person’s task, and remain attributed to that agent. Earlier requests, other agents, Supervisor conversations, helpers and delegated child tasks are never supervised this way. Start, Stop and definition approval still need a person.</small></span>
+          <span>Supervise conversations created by agents<small>Off by default. When on, requests written afterwards by the agent that launched an ordinary conversation {snapshot.noProjectMode ? "outside a project" : "in this project"} are interpreted and negotiated like a person’s task, and remain attributed to that agent. Earlier requests, other agents, Supervisor conversations, helpers and delegated child tasks are never supervised this way. Start, Stop and definition approval still need a person.{snapshot.noProjectMode && " The No Project mode still decides which chats are supervised."}</small></span>
         </label>
       </fieldset>
       <h3 className="form-section-title">Defaults for new Supervisors</h3>

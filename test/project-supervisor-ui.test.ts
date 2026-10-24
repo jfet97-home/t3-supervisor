@@ -334,6 +334,28 @@ it("Project settings offers agent-created supervision as an unchecked checkbox t
   assert.equal(merged.keptDirty, true);
 });
 
+it("No Project settings describe eligibility by the No Project mode, while project copy keeps the project switch", () => {
+  const render = (noProjectMode?: "off" | "on_request" | "automatic") => renderToStaticMarkup(createElement(ProjectSupervisorView, {
+    ...viewDefaults, section: "settings", agentThreads: false, onAgentThreadsChange: () => {},
+    snapshot: noProjectMode ? {...snapshot, noProjectMode} : snapshot, selection, monitoring, connected: true, saving: false, fieldsBusy: false, blocked: false, dirty: false, canSave: false,
+    shouldOfferRetry: false, retryButtonLabel: "Retry native access", canRetry: false, onSelectionChange: () => {}, onMonitoringChange: () => {},
+    onDiscard: () => {}, onRetry: () => {}, onSubmit: event => event.preventDefault(),
+  }));
+  const project = render();
+  assert.match(project, /People’s requests in this project’s main conversations are supervised while the project switch above is on\./);
+  assert.match(project, /the agent that launched an ordinary conversation in this project are interpreted/);
+  assert.doesNotMatch(project, /No Project mode/);
+  for (const [mode, sentence] of [["off", /No Project mode is Off, so no chat outside a project is supervised\./],
+    ["on_request", /No Project mode is On request: people’s requests are supervised only in chats outside projects where supervision has been started\./],
+    ["automatic", /No Project mode is Automatic: people’s requests in every eligible chat outside a project are supervised\./]] as const) {
+    const html = render(mode);
+    assert.match(html, sentence);
+    assert.doesNotMatch(html, /project switch|in this project/, `${mode}: no project switch or project scope is implied`);
+    assert.match(html, /the agent that launched an ordinary conversation outside a project are interpreted[\s\S]*The No Project mode still decides which chats are supervised\./);
+    assert.match(html, /<input id="supervisor-agent-created-threads" type="checkbox" name="superviseAgentCreatedThreads"\/>/, "the setting stays an unchecked, default-off checkbox");
+  }
+});
+
 it("invalid monitoring drafts expose associated accessible errors", () => {
   const html = renderToStaticMarkup(createElement(ProjectSupervisorView, {
   ...viewDefaults,

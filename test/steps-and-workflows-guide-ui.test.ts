@@ -72,3 +72,27 @@ it("guide FAQs use native disclosures with visible summaries and no headings ins
   assert.match(html, /What happens when a file is broken or workflows contain a cycle\?/);
   assert.match(html, /What happens if I edit the original task message\?[\s\S]*fresh occurrence IDs are fine for the revised task/);
 });
+
+it("the Guide teaches the operator journey first, then the authoring reference, with one focusable heading per contents entry", () => {
+  const html = renderToStaticMarkup(createElement(StepsAndWorkflowsGuide));
+  assert.match(html, /<h1 id="steps-guide-title">Guide<\/h1>/);
+  const follow = html.indexOf("guide-follow-title"), write = html.indexOf(">Write steps and workflows</h2>");
+  assert.ok(follow > 0 && write > follow, "the operator walkthrough comes before the authoring reference");
+  const walkthrough = html.slice(follow, write);
+  const order = ["<strong>Home</strong>", "<strong>Task</strong> shows", "<strong>Agent and Supervisor</strong>", "<strong>Plan note</strong>", "<strong>Supervision</strong> shows", "<strong>Definitions</strong>, read from a checkout you choose"];
+  assert.deepEqual(order.map(label => walkthrough.indexOf(label) >= 0), order.map(() => true));
+  assert.deepEqual([...order.map(label => walkthrough.indexOf(label))].sort((a, b) => a - b), order.map(label => walkthrough.indexOf(label)), "the walkthrough follows Home → Task → acceptance → evidence → Supervision → Definitions");
+  for (const label of ["Needs attention", "Supervised work", "Proposed update awaiting acceptance", "Update proposed", "Supervisor assessment", "Earlier step records", "Evidence and history", "Supervisor health", "Stop supervision", "Project root", "Project settings"])
+    assert.match(walkthrough, new RegExp(`<strong>${label}</strong>`));
+  assert.match(walkthrough, /not evidence that work was done/);
+  assert.match(walkthrough, /recorded progress stays as it is/);
+  assert.doesNotMatch(html, /Projects page/);
+  assert.match(html, /A project’s <strong>Definitions<\/strong> shows the active scope, source paths and origin/);
+  assert.match(html, /A conversation’s <strong>Supervision<\/strong> view displays this team/);
+  const contents = html.slice(html.indexOf('aria-label="Guide contents"'), html.indexOf("</nav>"));
+  assert.match(contents, /<strong>Follow supervised work<\/strong><ol>[\s\S]*<\/ol><\/div><div><strong>Write steps and workflows<\/strong><ul>/);
+  const ids = [...html.matchAll(/<h3 id="(guide-[a-z]+-title)" tabindex="-1">/g)].map(match => match[1]);
+  assert.equal(new Set(ids).size, ids.length, "every focus target is unique");
+  assert.equal([...contents.matchAll(/<button type="button">/g)].length, ids.length, "every contents entry has its own heading");
+  assert.equal(ids.length, 18);
+});

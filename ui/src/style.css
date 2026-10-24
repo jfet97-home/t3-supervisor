@@ -20,7 +20,7 @@
   scrollbar-color: var(--control-line) var(--soft);
 }
 body { margin: 0; background: var(--canvas); font-size: 15px; line-height: 1.55; }
-body, main, section, aside, div, article, form, fieldset, input, select, textarea, button, a, nav, header, footer, li, table, thead, tbody, tr, th, td { box-sizing: border-box; }
+body, main, section, aside, div, article, form, fieldset, input, select, textarea, button, a, nav, header, footer, li, table, thead, tbody, tr, th, td, dialog { box-sizing: border-box; }
 button, input, select, textarea { font: inherit; color: inherit; }
 button, .button-link { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 42px; min-width: 0; border: 1px solid var(--control-line); border-radius: 7px; background: var(--surface); padding: 8px 13px; cursor: pointer; touch-action: manipulation; font-size: 14px; font-weight: 550; line-height: 1.4; text-decoration: none; color: var(--ink); }
 button:hover:not(:disabled), .button-link:hover { background: var(--soft); border-color: var(--blue); }
@@ -208,7 +208,7 @@ details[open] > summary { margin-bottom: 12px; }
 .toggle small { display: block; color: var(--quiet); margin-top: 4px; }
 .chat-options { max-height: 24rem; overflow: auto; margin-block: 16px; }
 .chat-options .toggle { min-height: 48px; }
-dialog { width: min(740px, calc(100% - 32px)); padding: 26px; border-radius: 14px; border: 1px solid var(--line); background: var(--surface); color: var(--ink); max-height: 85dvh; overflow: auto; overscroll-behavior: contain; }
+dialog { width: min(740px, calc(100% - 32px)); padding: clamp(16px, 5vw, 26px); overflow-wrap: anywhere; border-radius: 14px; border: 1px solid var(--line); background: var(--surface); color: var(--ink); max-height: 85dvh; overflow: auto; overscroll-behavior: contain; }
 dialog::backdrop { background: #17243c80; }
 dialog pre { max-height: 400px; overflow: auto; background: var(--soft); padding: 16px; border-radius: 7px; font-size: 13px; }
 .sign-in-layout { min-height: 100dvh; display: grid; grid-template-columns: minmax(280px, .85fr) minmax(0, 1fr); }
@@ -487,13 +487,20 @@ button.danger-button:hover:not(:disabled) { color: #92332b; border-color: #92332
 .definition-index-row > .definition-path { font-size: .75rem; }
 .definition-index-row .definition-block > summary { padding-block: 8px; min-height: 36px; }
 .guide-introduction { padding: 20px 24px; background: var(--soft); border-radius: 12px; font-size: 1.15rem; max-width: 72ch; }
-.guide-contents { display: grid; gap: 12px; padding-block: 12px 20px; border-bottom: 1px solid var(--line); }
-.guide-contents ul { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px 16px; padding: 0; margin: 0; list-style: none; }
-.guide-contents button { padding: 8px 0; min-height: 40px; border: 0; background: transparent; color: var(--blue); justify-content: start; text-align: start; }
-.guide-topic h2 { scroll-margin-top: 24px; }
+.guide-contents { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); gap: 12px 32px; padding-block: 12px 20px; border-bottom: 1px solid var(--line); }
+.guide-contents > div { display: grid; gap: 6px; align-content: start; }
+.guide-contents ol, .guide-contents ul { display: grid; gap: 0 16px; padding: 0; margin: 0; list-style: none; }
+.guide-contents ul { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.guide-contents ol { counter-reset: guide-contents; }
+.guide-contents ol button::before { counter-increment: guide-contents; content: counter(guide-contents) "."; color: var(--quiet); min-inline-size: 1.4em; }
+.guide-contents button { padding: 8px 0; min-height: 40px; border: 0; background: transparent; color: var(--blue); justify-content: start; text-align: start; gap: 4px; }
+.guide-walkthrough { margin: 0; padding-inline-start: 1.6em; display: grid; gap: 18px; }
+.guide-walkthrough > li::marker { color: var(--quiet); font-weight: 650; }
+.guide-walkthrough p { max-width: 72ch; }
+.steps-guide h3[tabindex="-1"] { scroll-margin-top: 24px; }
 .primary-link { margin-top: 12px; }
 @media (max-width: 760px) {
-  .guide-contents ul { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .guide-contents { grid-template-columns: minmax(0, 1fr); }
   .settings-group .panel, .guide-introduction { padding: 18px; }
   .conversation-supervision > .stack { grid-template-columns: minmax(0, 1fr); }
   .conversation-supervision > .stack > div { grid-column: 1; grid-row: auto; justify-self: start; }
@@ -508,9 +515,13 @@ button.danger-button:hover:not(:disabled) { color: #92332b; border-color: #92332
 .checkout-options a svg { grid-column: 2; grid-row: 1 / span 2; align-self: center; }
 .checkout-options a:hover strong { color: var(--blue); text-decoration: underline; }
 .checkout-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 14px; }
-.checkout-bar label { display: inline-flex; align-items: center; gap: 10px; font-weight: 600; }
-.checkout-bar select { width: auto; max-width: 100%; }
-.checkout-bar .definition-path { font-size: .8rem; color: var(--quiet); }
+.checkout-bar label { display: inline-flex; align-items: center; gap: 10px; font-weight: 600; min-inline-size: 0; max-inline-size: 100%; }
+.checkout-bar select { inline-size: auto; min-inline-size: 0; max-inline-size: 100%; flex: 0 1 auto; text-overflow: ellipsis; }
+.checkout-bar .definition-path { font-size: .8rem; color: var(--quiet); min-inline-size: 0; overflow-wrap: anywhere; }
+@media (max-width: 760px) {
+  .checkout-bar label { display: grid; gap: 6px; inline-size: 100%; }
+  .checkout-bar select { inline-size: 100%; }
+}
 .page-title-row { align-items: center; gap: 10px 18px; flex-wrap: wrap; }
 .page-title-row h1 { flex: 1 1 24ch; }
 .conversation-workspace .page-title-row h1 { font-size: 1.45rem; line-height: 1.3; }
