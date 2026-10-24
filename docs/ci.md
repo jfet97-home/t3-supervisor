@@ -1,8 +1,9 @@
 # Contributions and CI
 
 Contribute through a pull request. Main requires the GitHub Actions `check`
-status and an up-to-date branch. Repository admins retain an explicit bypass
-through a PR; ordinary direct pushes are blocked. `git push --force` cannot
+status on the latest PR head. Branches do not need to be up to date with main;
+actual merge conflicts still need resolution. Repository admins retain an explicit
+bypass through a PR; ordinary direct pushes are blocked. `git push --force` cannot
 override server-side rules. No additional approving reviewer is required by
 the current solo-maintainer ruleset.
 
@@ -16,9 +17,10 @@ build, package/container smoke checks, all four main-suite shards and the runner
 harness. Each test file runs in its native shard, with one worker per runner.
 The watchdog, test deadlines, leak gate, privacy guards and cleanup stay intact.
 
-PRs explicitly check out their head commit. Strict branch protection requires
-that branch to be up to date before merging. Any change to main requires the PR
-to update and obtain a new successful check. Admin bypasses remain exceptional.
+PRs explicitly check out their head commit. A successful check remains usable
+when main advances; do not update a branch solely to satisfy freshness. Changes
+to the PR itself still require a successful check on its new head. Admin bypasses
+remain exceptional.
 
 While editing, run focused local cases, lint and types. Leave the final complete
 main and harness suites to GitHub rather than repeating them locally.
@@ -35,14 +37,18 @@ After merging, main tries to reuse GitHub's full PR verdict. Reuse requires:
 - Static checks, each of the four main shards, the harness and aggregate `check`
   all succeeded in that run's latest attempt. Skipped jobs do not qualify.
 
-Only then do main's full jobs skip. Its aggregate check requires that explicit
-proof and links the full source run in the job summary. No test results, build
+Only with this proof do main's full jobs skip. Its aggregate check requires that
+explicit proof and links the full source run in the job summary. No test results, build
 outputs or assertions are cached. A lightweight main run cannot vouch for another.
 
 Missing PR metadata, API errors, a failed/pending/canceled latest run, fork PRs,
 missing full jobs or a different tree trigger complete validation on main. This
 also covers admin overrides. API metadata can briefly lag after a merge; the
 conservative result is another full run, never an unproved green check.
+
+A branch merged behind a newer main will normally produce a different tree, so
+main runs full validation. Integration failures between the branches can therefore
+be discovered after merging even when the PR had no textual conflicts.
 
 Newer runs still cancel superseded runs for the same source branch. Explicit
 dispatch always runs the full checks. If a stable merge's main run was canceled,
