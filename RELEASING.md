@@ -97,7 +97,7 @@ this PR. The maintainer must own the npm package name before enabling publicatio
    checkout so its repository metadata matches the archive. Do not create a dummy
    package or commit a publishing token.
 4. In npm's package settings, configure a GitHub Actions trusted publisher for
-   owner `jfet97-home`, repository `t3-supervisor`, workflow **`release.yml`**,
+   owner `jfet97`, repository `t3-supervisor`, workflow **`release.yml`**,
    environment **`release`**. Keep the main-only environment restriction in place;
    a filename-only trusted publisher does not restrict publishing to main.
    Use OIDC rather than a long-lived registry token. GitHub-hosted runners are
